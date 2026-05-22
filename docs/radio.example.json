@@ -1,0 +1,36 @@
+{
+  "stations": [
+    {
+      "id": "late-night",
+      "name": "Late Night Frequencies",
+      "description": "Podcasts, old radio, commercials, and strange midnight archives.",
+      "contentType": "audio/mpeg",
+      "epoch": "2026-01-01T00:00:00Z",
+      "media": [
+        {
+          "id": "art-bell-1997-10-23",
+          "title": "Art Bell - October 23, 1997",
+          "artist": "Art Bell",
+          "kind": "old_time_radio",
+          "path": "/srv/media/radio/art-bell-1997-10-23.mp3",
+          "durationSeconds": 10800
+        },
+        {
+          "id": "johnny-dollar-001",
+          "title": "Yours Truly, Johnny Dollar",
+          "kind": "old_time_radio",
+          "path": "/srv/media/radio/johnny-dollar-001.mp3",
+          "durationSeconds": 1800,
+          "weight": 2
+        },
+        {
+          "id": "retro-commercial-break-001",
+          "title": "Retro Commercial Break 001",
+          "kind": "commercial",
+          "path": "/srv/media/radio/retro-commercial-break-001.mp3",
+          "durationSeconds": 120
+        }
+      ]
+    }
+  ]
+}
