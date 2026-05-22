@@ -7,7 +7,7 @@ import (
 	"net/http"
 	"net/url"
 
-	"github.com/jakedebus/samo-server/internal/sources"
+	"github.com/bouliehaan/samo-server/internal/sources"
 )
 
 type internetRadioStationResponse struct {

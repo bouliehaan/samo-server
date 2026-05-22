@@ -7,8 +7,8 @@ import (
 	"net/http/httptest"
 	"testing"
 
-	"github.com/jakedebus/samo-server/internal/metadata"
-	"github.com/jakedebus/samo-server/internal/radio"
+	"github.com/bouliehaan/samo-server/internal/metadata"
+	"github.com/bouliehaan/samo-server/internal/radio"
 )
 
 func TestMetadataProvidersAreEmptyByDefault(t *testing.T) {

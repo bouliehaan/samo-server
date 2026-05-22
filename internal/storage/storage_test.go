@@ -4,7 +4,7 @@ import (
 	"context"
 	"testing"
 
-	"github.com/jakedebus/samo-server/migrations"
+	"github.com/bouliehaan/samo-server/migrations"
 )
 
 func TestApplyMigrationsIsIdempotent(t *testing.T) {

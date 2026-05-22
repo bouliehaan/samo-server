@@ -3,7 +3,7 @@ package catalog
 import (
 	"time"
 
-	"github.com/jakedebus/samo-server/internal/media"
+	"github.com/bouliehaan/samo-server/internal/media"
 )
 
 type PageRequest struct {

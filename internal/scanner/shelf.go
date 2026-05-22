@@ -8,8 +8,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/jakedebus/samo-server/internal/catalog"
-	"github.com/jakedebus/samo-server/internal/media"
+	"github.com/bouliehaan/samo-server/internal/catalog"
+	"github.com/bouliehaan/samo-server/internal/media"
 )
 
 type groupedAudio struct {

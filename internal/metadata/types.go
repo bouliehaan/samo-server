@@ -3,7 +3,7 @@ package metadata
 import (
 	"context"
 
-	"github.com/jakedebus/samo-server/internal/catalog"
+	"github.com/bouliehaan/samo-server/internal/catalog"
 )
 
 type Kind string

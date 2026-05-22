@@ -11,8 +11,8 @@ import (
 	"time"
 
 	"github.com/fsnotify/fsnotify"
-	"github.com/jakedebus/samo-server/internal/catalog"
-	"github.com/jakedebus/samo-server/internal/scanner"
+	"github.com/bouliehaan/samo-server/internal/catalog"
+	"github.com/bouliehaan/samo-server/internal/scanner"
 )
 
 type Options struct {

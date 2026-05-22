@@ -6,9 +6,9 @@ import (
 	"net/http/httptest"
 	"testing"
 
-	"github.com/jakedebus/samo-server/internal/catalog"
-	"github.com/jakedebus/samo-server/internal/media"
-	"github.com/jakedebus/samo-server/internal/radio"
+	"github.com/bouliehaan/samo-server/internal/catalog"
+	"github.com/bouliehaan/samo-server/internal/media"
+	"github.com/bouliehaan/samo-server/internal/radio"
 )
 
 func TestMusicHandlersExposeRichTrackMetadata(t *testing.T) {

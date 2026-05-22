@@ -5,7 +5,7 @@ import (
 	"encoding/json"
 	"time"
 
-	"github.com/jakedebus/samo-server/internal/catalog"
+	"github.com/bouliehaan/samo-server/internal/catalog"
 )
 
 type scanner interface {

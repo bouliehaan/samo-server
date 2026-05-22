@@ -6,9 +6,9 @@ import (
 	"net/http/httptest"
 	"testing"
 
-	"github.com/jakedebus/samo-server/internal/catalog"
-	"github.com/jakedebus/samo-server/internal/storage"
-	"github.com/jakedebus/samo-server/migrations"
+	"github.com/bouliehaan/samo-server/internal/catalog"
+	"github.com/bouliehaan/samo-server/internal/storage"
+	"github.com/bouliehaan/samo-server/migrations"
 )
 
 func TestAddPodcastFeedCreatesShelfPodcastAndEpisodes(t *testing.T) {

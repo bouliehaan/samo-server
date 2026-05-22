@@ -6,7 +6,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/jakedebus/samo-server/internal/radio"
+	"github.com/bouliehaan/samo-server/internal/radio"
 )
 
 func TestRadioAPIRequiresTokenWhenConfigured(t *testing.T) {

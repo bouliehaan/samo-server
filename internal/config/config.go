@@ -55,7 +55,7 @@ func LoadEnv() (Config, error) {
 		APIToken:          strings.TrimSpace(os.Getenv("SAMO_API_TOKEN")),
 		Libraries:         loadLibraries(),
 		MetadataProviders: envCSV("SAMO_METADATA_PROVIDERS"),
-		MetadataUserAgent: envOrDefault("SAMO_METADATA_USER_AGENT", "SamoServer/0.1 (https://github.com/jakedebus/samo-server)"),
+		MetadataUserAgent: envOrDefault("SAMO_METADATA_USER_AGENT", "SamoServer/0.1 (https://github.com/bouliehaan/samo-server)"),
 		ScanOnStart:       envBool("SAMO_SCAN_ON_START", true),
 		WatchLibraries:    envBool("SAMO_WATCH_LIBRARIES", true),
 		WatchDebounce:     envDuration("SAMO_WATCH_DEBOUNCE", 3*time.Second),

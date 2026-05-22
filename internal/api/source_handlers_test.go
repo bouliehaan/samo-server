@@ -9,11 +9,11 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/jakedebus/samo-server/internal/catalog"
-	"github.com/jakedebus/samo-server/internal/radio"
-	"github.com/jakedebus/samo-server/internal/sources"
-	"github.com/jakedebus/samo-server/internal/storage"
-	"github.com/jakedebus/samo-server/migrations"
+	"github.com/bouliehaan/samo-server/internal/catalog"
+	"github.com/bouliehaan/samo-server/internal/radio"
+	"github.com/bouliehaan/samo-server/internal/sources"
+	"github.com/bouliehaan/samo-server/internal/storage"
+	"github.com/bouliehaan/samo-server/migrations"
 )
 
 func TestCreatePodcastFeedRefreshesShelfCatalog(t *testing.T) {

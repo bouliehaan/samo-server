@@ -7,7 +7,7 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/jakedebus/samo-server/internal/media"
+	"github.com/bouliehaan/samo-server/internal/media"
 )
 
 func LoadSeedFromDB(ctx context.Context, db *sql.DB) (Seed, error) {

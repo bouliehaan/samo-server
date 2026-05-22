@@ -6,7 +6,7 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/jakedebus/samo-server/internal/metadata"
+	"github.com/bouliehaan/samo-server/internal/metadata"
 )
 
 func (s *Server) listMetadataProviders(w http.ResponseWriter, r *http.Request) {

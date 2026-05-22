@@ -128,7 +128,7 @@ func DefaultProviders(names []string, userAgent string, client *http.Client) []P
 	}
 	userAgent = strings.TrimSpace(userAgent)
 	if userAgent == "" {
-		userAgent = "SamoServer/0.1 (https://github.com/jakedebus/samo-server)"
+		userAgent = "SamoServer/0.1 (https://github.com/bouliehaan/samo-server)"
 	}
 
 	var providers []Provider

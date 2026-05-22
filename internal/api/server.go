@@ -13,10 +13,10 @@ import (
 	"strings"
 	"time"
 
-	"github.com/jakedebus/samo-server/internal/catalog"
-	"github.com/jakedebus/samo-server/internal/metadata"
-	"github.com/jakedebus/samo-server/internal/radio"
-	"github.com/jakedebus/samo-server/internal/sources"
+	"github.com/bouliehaan/samo-server/internal/catalog"
+	"github.com/bouliehaan/samo-server/internal/metadata"
+	"github.com/bouliehaan/samo-server/internal/radio"
+	"github.com/bouliehaan/samo-server/internal/sources"
 )
 
 type ServerOptions struct {

@@ -1,4 +1,4 @@
-module github.com/jakedebus/samo-server
+module github.com/bouliehaan/samo-server
 
 go 1.26.2
 

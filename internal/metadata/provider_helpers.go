@@ -8,7 +8,7 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/jakedebus/samo-server/internal/catalog"
+	"github.com/bouliehaan/samo-server/internal/catalog"
 )
 
 func getJSON[T any](client *http.Client, req *http.Request) (T, error) {

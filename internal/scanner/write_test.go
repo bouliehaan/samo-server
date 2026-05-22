@@ -4,10 +4,10 @@ import (
 	"context"
 	"testing"
 
-	"github.com/jakedebus/samo-server/internal/catalog"
-	"github.com/jakedebus/samo-server/internal/media"
-	"github.com/jakedebus/samo-server/internal/storage"
-	"github.com/jakedebus/samo-server/migrations"
+	"github.com/bouliehaan/samo-server/internal/catalog"
+	"github.com/bouliehaan/samo-server/internal/media"
+	"github.com/bouliehaan/samo-server/internal/storage"
+	"github.com/bouliehaan/samo-server/migrations"
 )
 
 func TestScannerWritesHydratableMusicRows(t *testing.T) {

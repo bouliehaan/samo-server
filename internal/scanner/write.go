@@ -6,7 +6,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/jakedebus/samo-server/internal/catalog"
+	"github.com/bouliehaan/samo-server/internal/catalog"
 )
 
 func (s *Scanner) upsertMusicArtist(ctx context.Context, artist catalog.MusicArtist) error {

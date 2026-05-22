@@ -6,7 +6,7 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/jakedebus/samo-server/internal/catalog"
+	"github.com/bouliehaan/samo-server/internal/catalog"
 )
 
 type bookSidecar struct {
