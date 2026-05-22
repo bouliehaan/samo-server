@@ -87,7 +87,13 @@ func (s *Scanner) scanAudiobook(ctx context.Context, library Library, root strin
 		}
 	}
 
-	cover := findCoverImage(group.Root)
+	audioPaths := make([]string, 0, len(probes))
+	checksums := make([]string, 0, len(probes))
+	for _, probed := range probes {
+		audioPaths = append(audioPaths, probed.AudioFile.Path)
+		checksums = append(checksums, probed.AudioFile.Checksum)
+	}
+	cover := s.resolveCover(ctx, group.Root, audioPaths, checksums)
 	item := catalog.ShelfItem{
 		ID:              itemID,
 		LibraryID:       library.ID,
@@ -130,6 +136,9 @@ func (s *Scanner) scanAudiobook(ctx context.Context, library Library, root strin
 	}
 	if err := s.upsertShelfItem(ctx, item); err != nil {
 		return err
+	}
+	if s.activeScan != nil {
+		s.activeScan.seeItem(item.ID)
 	}
 	if err := s.setShelfItemAuthors(ctx, item.ID, append(authors, narrators...)); err != nil {
 		return err
@@ -181,7 +190,13 @@ func (s *Scanner) scanPodcast(ctx context.Context, library Library, root string,
 	itemID := stableID("podcast", library.ID, group.Root)
 	duration, sizeBytes := groupDurationAndSize(probes)
 	categories := splitGenreTag(commonTags, "genre", "category", "categories")
-	cover := findCoverImage(group.Root)
+	audioPaths := make([]string, 0, len(probes))
+	checksums := make([]string, 0, len(probes))
+	for _, probed := range probes {
+		audioPaths = append(audioPaths, probed.AudioFile.Path)
+		checksums = append(checksums, probed.AudioFile.Checksum)
+	}
+	cover := s.resolveCover(ctx, group.Root, audioPaths, checksums)
 
 	item := catalog.ShelfItem{
 		ID:              itemID,
@@ -216,6 +231,9 @@ func (s *Scanner) scanPodcast(ctx context.Context, library Library, root string,
 	if err := s.upsertShelfItem(ctx, item); err != nil {
 		return err
 	}
+	if s.activeScan != nil {
+		s.activeScan.seeItem(item.ID)
+	}
 
 	for _, probed := range probes {
 		tags := probed.Tags
@@ -247,6 +265,9 @@ func (s *Scanner) scanPodcast(ctx context.Context, library Library, root string,
 		}
 		if err := s.upsertPodcastEpisode(ctx, episode); err != nil {
 			return err
+		}
+		if s.activeScan != nil {
+			s.activeScan.seeEpisode(episode.ID)
 		}
 		if err := s.upsertAudioFile(ctx, library.ID, audioFileOwner{ItemID: item.ID, EpisodeID: episode.ID}, file); err != nil {
 			return err

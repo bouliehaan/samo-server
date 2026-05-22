@@ -1,8 +1,17 @@
 package scanner
 
-import "testing"
+import (
+	"os"
+	"path/filepath"
+	"testing"
+)
 
 func TestFFProbeResultNormalizesAudioMetadata(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "signal.flac")
+	if err := os.WriteFile(path, []byte("fake-flac"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
 	raw := ffprobeResult{
 		Format: ffprobeFormat{
 			FormatName: "flac",
@@ -29,7 +38,7 @@ func TestFFProbeResultNormalizesAudioMetadata(t *testing.T) {
 		}},
 	}
 
-	probe := raw.toProbeInfo("/tmp/signal.flac")
+	probe := raw.toProbeInfo(path)
 	if probe.AudioFile.DurationSeconds != 245 {
 		t.Fatalf("duration = %d, want 245", probe.AudioFile.DurationSeconds)
 	}
@@ -44,6 +53,9 @@ func TestFFProbeResultNormalizesAudioMetadata(t *testing.T) {
 	}
 	if probe.Chapters[0].Title != "Opening" {
 		t.Fatalf("chapter title = %q, want Opening", probe.Chapters[0].Title)
+	}
+	if probe.AudioFile.Checksum == "" {
+		t.Fatal("expected audio file checksum")
 	}
 }
 

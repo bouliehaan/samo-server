@@ -1,6 +1,9 @@
 # Go
 bin/
 dist/
+.cache/
+internal/toolchain/assets/*
+!internal/toolchain/assets/README.md
 *.test
 *.out
 

@@ -84,15 +84,23 @@ func (s *Service) RefreshPodcastFeed(ctx context.Context, id string) (PodcastFee
 		return PodcastFeed{}, err
 	}
 
+	if err := s.markPollStarted(ctx, existing.ID); err != nil {
+		return PodcastFeed{}, err
+	}
+
 	parsed, err := s.fetchPodcastFeed(ctx, existing.FeedURL)
 	if err != nil {
-		_ = s.recordPodcastFeedError(ctx, existing.ID, err)
+		_ = s.markPollFailure(ctx, existing.ID, err)
 		return PodcastFeed{}, err
 	}
 	if parsed.Title == "" {
 		parsed.Title = existing.Title
 	}
 	if err := s.savePodcastFeed(ctx, existing.FeedURL, parsed); err != nil {
+		_ = s.markPollFailure(ctx, existing.ID, err)
+		return PodcastFeed{}, err
+	}
+	if err := s.markPollSuccess(ctx, existing.ID, existing.Poll.IntervalSeconds); err != nil {
 		return PodcastFeed{}, err
 	}
 	return s.GetPodcastFeed(ctx, existing.ID)
@@ -102,11 +110,7 @@ func (s *Service) ListPodcastFeeds(ctx context.Context, page catalog.PageRequest
 	if s == nil || s.db == nil {
 		return catalog.Page[PodcastFeed]{}, ErrDisabled
 	}
-	rows, err := s.db.QueryContext(ctx, `
-		SELECT id, podcast_id, feed_url, title, description, author, site_url, image_url, language,
-		       explicit, categories_json, owner_name, owner_email, episode_count, status, last_error,
-		       last_fetched_at, created_at, updated_at
-		FROM podcast_feeds
+	rows, err := s.db.QueryContext(ctx, podcastFeedSelectSQL+`
 		ORDER BY title COLLATE NOCASE`)
 	if err != nil {
 		return catalog.Page[PodcastFeed]{}, fmt.Errorf("list podcast feeds: %w", err)
@@ -131,11 +135,7 @@ func (s *Service) GetPodcastFeed(ctx context.Context, id string) (PodcastFeed, e
 	if s == nil || s.db == nil {
 		return PodcastFeed{}, ErrDisabled
 	}
-	row := s.db.QueryRowContext(ctx, `
-		SELECT id, podcast_id, feed_url, title, description, author, site_url, image_url, language,
-		       explicit, categories_json, owner_name, owner_email, episode_count, status, last_error,
-		       last_fetched_at, created_at, updated_at
-		FROM podcast_feeds
+	row := s.db.QueryRowContext(ctx, podcastFeedSelectSQL+`
 		WHERE id = ?`, strings.TrimSpace(id))
 	feed, err := scanPodcastFeed(row)
 	if errors.Is(err, sql.ErrNoRows) {
@@ -380,9 +380,10 @@ func (s *Service) savePodcastFeed(ctx context.Context, feedURL string, parsed pa
 	if _, err := tx.ExecContext(ctx, `
 		INSERT INTO podcast_feeds (
 		  id, podcast_id, feed_url, title, description, author, site_url, image_url, language, explicit,
-		  categories_json, owner_name, owner_email, episode_count, status, last_error, last_fetched_at, updated_at
+		  categories_json, owner_name, owner_email, episode_count, status, last_error, last_fetched_at,
+		  poll_enabled, poll_interval_seconds, next_poll_at, consecutive_errors, updated_at
 		)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, '', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, '', CURRENT_TIMESTAMP, 1, ?, ?, 0, CURRENT_TIMESTAMP)
 		ON CONFLICT(id) DO UPDATE SET
 		  podcast_id = excluded.podcast_id,
 		  feed_url = excluded.feed_url,
@@ -403,7 +404,7 @@ func (s *Service) savePodcastFeed(ctx context.Context, feedURL string, parsed pa
 		  updated_at = CURRENT_TIMESTAMP`,
 		feedID, podcastID, feedURL, parsed.Title, parsed.Description, parsed.Author, parsed.SiteURL, parsed.ImageURL,
 		parsed.Language, boolInt(parsed.Explicit), jsonText(categories), parsed.OwnerName, parsed.OwnerEmail,
-		episodeCount, defaultSourceStatus); err != nil {
+		episodeCount, defaultSourceStatus, DefaultPollIntervalSeconds, scheduleInitialPoll()); err != nil {
 		return fmt.Errorf("upsert podcast feed source: %w", err)
 	}
 

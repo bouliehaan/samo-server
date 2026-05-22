@@ -27,6 +27,8 @@ type Config struct {
 	ScanOnStart       bool
 	WatchLibraries    bool
 	WatchDebounce     time.Duration
+	PodcastPoll       bool
+	PodcastPollTick   time.Duration
 }
 
 type Library struct {
@@ -59,6 +61,8 @@ func LoadEnv() (Config, error) {
 		ScanOnStart:       envBool("SAMO_SCAN_ON_START", true),
 		WatchLibraries:    envBool("SAMO_WATCH_LIBRARIES", true),
 		WatchDebounce:     envDuration("SAMO_WATCH_DEBOUNCE", 3*time.Second),
+		PodcastPoll:       envBool("SAMO_PODCAST_POLL", true),
+		PodcastPollTick:   envDuration("SAMO_PODCAST_POLL_TICK", time.Minute),
 	}
 
 	return cfg.Validate()

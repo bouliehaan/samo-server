@@ -44,7 +44,7 @@ After a watch-triggered scan, Samo reloads the catalog from SQLite and updates t
 
 ## Scanner Requirements
 
-The first scanner uses `ffprobe`, so `ffmpeg` should be installed on the server. The scanner walks configured folders and accepts common audio extensions: `mp3`, `flac`, `m4a`, `m4b`, `aac`, `ogg`, `opus`, `wav`, `aif`, `aiff`, `alac`, and `wma`.
+The scanner uses bundled `ffprobe` and `ffmpeg` binaries shipped with Samo Server (see [install-ubuntu.md](install-ubuntu.md)). No apt install is required on Ubuntu. The scanner walks configured folders and accepts common audio extensions: `mp3`, `flac`, `m4a`, `m4b`, `aac`, `ogg`, `opus`, `wav`, `aif`, `aiff`, `alac`, and `wma`.
 
 ## Music Scanner
 

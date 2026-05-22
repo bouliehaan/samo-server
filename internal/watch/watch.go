@@ -10,27 +10,27 @@ import (
 	"strings"
 	"time"
 
-	"github.com/fsnotify/fsnotify"
 	"github.com/bouliehaan/samo-server/internal/catalog"
-	"github.com/bouliehaan/samo-server/internal/scanner"
+	"github.com/bouliehaan/samo-server/internal/libraries"
+	"github.com/fsnotify/fsnotify"
 )
 
 type Options struct {
-	DB        *sql.DB
-	Catalog   *catalog.Service
-	Scanner   *scanner.Scanner
-	Libraries []scanner.Library
-	Debounce  time.Duration
-	Logger    *log.Logger
+	DB            *sql.DB
+	Catalog       *catalog.Service
+	Scan          func(context.Context) (libraries.ScanResult, error)
+	ListLibraries func(context.Context) ([]string, error)
+	Debounce      time.Duration
+	Logger        *log.Logger
 }
 
 type Watcher struct {
-	db        *sql.DB
-	catalog   *catalog.Service
-	scanner   *scanner.Scanner
-	libraries []scanner.Library
-	debounce  time.Duration
-	logger    *log.Logger
+	db            *sql.DB
+	catalog       *catalog.Service
+	scan          func(context.Context) (libraries.ScanResult, error)
+	listLibraries func(context.Context) ([]string, error)
+	debounce      time.Duration
+	logger        *log.Logger
 }
 
 func New(options Options) *Watcher {
@@ -43,17 +43,27 @@ func New(options Options) *Watcher {
 		logger = log.Default()
 	}
 	return &Watcher{
-		db:        options.DB,
-		catalog:   options.Catalog,
-		scanner:   options.Scanner,
-		libraries: options.Libraries,
-		debounce:  debounce,
-		logger:    logger,
+		db:            options.DB,
+		catalog:       options.Catalog,
+		scan:          options.Scan,
+		listLibraries: options.ListLibraries,
+		debounce:      debounce,
+		logger:        logger,
 	}
 }
 
 func (w *Watcher) Run(ctx context.Context) error {
-	if len(w.libraries) == 0 {
+	if w.scan == nil {
+		return errors.New("watcher scan callback is nil")
+	}
+	if w.listLibraries == nil {
+		return errors.New("watcher library loader is nil")
+	}
+	roots, err := w.listLibraries(ctx)
+	if err != nil {
+		return err
+	}
+	if len(roots) == 0 {
 		return nil
 	}
 	if w.db == nil {
@@ -62,9 +72,6 @@ func (w *Watcher) Run(ctx context.Context) error {
 	if w.catalog == nil {
 		return errors.New("watcher catalog is nil")
 	}
-	if w.scanner == nil {
-		w.scanner = scanner.New(w.db)
-	}
 
 	fsWatcher, err := fsnotify.NewWatcher()
 	if err != nil {
@@ -72,10 +79,10 @@ func (w *Watcher) Run(ctx context.Context) error {
 	}
 	defer fsWatcher.Close()
 
-	if err := addLibraryWatches(fsWatcher, w.libraries); err != nil {
+	if err := addLibraryWatches(fsWatcher, roots); err != nil {
 		return err
 	}
-	w.logger.Printf("watching %d configured library path(s)", len(w.libraries))
+	w.logger.Printf("watching %d configured library path(s)", len(roots))
 
 	trigger := make(chan struct{}, 1)
 	done := make(chan struct{})
@@ -148,7 +155,8 @@ func (w *Watcher) scanLoop(ctx context.Context, trigger <-chan struct{}, done ch
 func (w *Watcher) rescan(ctx context.Context) {
 	started := time.Now()
 	w.logger.Printf("library change detected; scanning")
-	if err := w.scanner.Scan(ctx, w.libraries); err != nil {
+	result, err := w.scan(ctx)
+	if err != nil {
 		w.logger.Printf("watch-triggered scan failed: %v", err)
 		return
 	}
@@ -158,12 +166,13 @@ func (w *Watcher) rescan(ctx context.Context) {
 		return
 	}
 	w.catalog.Replace(seed)
-	w.logger.Printf("catalog refreshed after filesystem changes in %s", time.Since(started).Round(time.Millisecond))
+	w.logger.Printf("catalog refreshed after filesystem changes in %s (job %s, pruned %d files / %d items)",
+		time.Since(started).Round(time.Millisecond), result.Job.ID, result.Job.FilesPruned, result.Job.ItemsPruned)
 }
 
-func addLibraryWatches(watcher *fsnotify.Watcher, libraries []scanner.Library) error {
-	for _, library := range libraries {
-		root := strings.TrimSpace(library.Path)
+func addLibraryWatches(watcher *fsnotify.Watcher, roots []string) error {
+	for _, root := range roots {
+		root = strings.TrimSpace(root)
 		if root == "" {
 			continue
 		}

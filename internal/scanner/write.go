@@ -354,6 +354,9 @@ func (s *Scanner) upsertAudioFile(ctx context.Context, libraryID string, owner a
 	if err != nil {
 		return fmt.Errorf("upsert audio file %q: %w", file.Path, err)
 	}
+	if s.activeScan != nil {
+		s.activeScan.seeFile(file.Path)
+	}
 	return nil
 }
 

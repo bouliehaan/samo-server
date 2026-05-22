@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/url"
+	"time"
 
 	"github.com/bouliehaan/samo-server/internal/sources"
 )
@@ -54,6 +55,34 @@ func (s *Server) getPodcastFeed(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, feed)
+}
+
+func (s *Server) updatePodcastFeed(w http.ResponseWriter, r *http.Request) {
+	var input sources.UpdatePodcastFeedInput
+	if !readJSONBody(w, r, &input) {
+		return
+	}
+	feed, err := s.sourcesService().UpdatePodcastFeed(r.Context(), r.PathValue("id"), input)
+	if err != nil {
+		writeSourceError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, feed)
+}
+
+func (s *Server) runPodcastPollCycle(w http.ResponseWriter, r *http.Request) {
+	result, err := s.sourcesService().RunPodcastPollCycle(r.Context(), time.Now().UTC())
+	if err != nil {
+		writeSourceError(w, err)
+		return
+	}
+	if result.Updated > 0 {
+		if err := s.reloadCatalogProjection(r); err != nil {
+			writeError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+	}
+	writeJSON(w, http.StatusOK, result)
 }
 
 func (s *Server) refreshPodcastFeed(w http.ResponseWriter, r *http.Request) {
@@ -202,6 +231,8 @@ func writeSourceError(w http.ResponseWriter, err error) {
 		writeError(w, http.StatusNotFound, "source not found")
 	case errors.Is(err, sources.ErrInvalidURL):
 		writeError(w, http.StatusBadRequest, "url must be absolute http or https")
+	case errors.Is(err, sources.ErrInvalidPollInterval):
+		writeError(w, http.StatusBadRequest, err.Error())
 	default:
 		writeError(w, http.StatusInternalServerError, err.Error())
 	}

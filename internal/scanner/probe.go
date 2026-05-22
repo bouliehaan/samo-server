@@ -1,6 +1,9 @@
 package scanner
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -106,6 +109,7 @@ func (raw ffprobeResult) toProbeInfo(path string) probeInfo {
 		DurationSeconds: duration,
 		SizeBytes:       sizeBytes,
 		ModifiedAt:      modifiedAt,
+		Checksum:        fileChecksum(path, stat),
 		EmbeddedTags:    tags,
 	}
 
@@ -271,6 +275,17 @@ func mimeTypeForPath(path string) string {
 	default:
 		return "application/octet-stream"
 	}
+}
+
+func fileChecksum(path string, info os.FileInfo) string {
+	if info == nil {
+		return ""
+	}
+	hash := sha256.New()
+	hash.Write([]byte(strings.ToLower(strings.TrimSpace(path))))
+	hash.Write([]byte(info.ModTime().UTC().Format(time.RFC3339Nano)))
+	_, _ = fmt.Fprintf(hash, "%d", info.Size())
+	return hex.EncodeToString(hash.Sum(nil)[:16])
 }
 
 func metadataFormatsForPath(path string, tags catalog.Tags) []string {

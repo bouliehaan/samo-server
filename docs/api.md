@@ -11,6 +11,99 @@ All `/api/v1/*` routes accept `Authorization: Bearer <token>` or `X-Samo-Token: 
 
 `overview` returns counts for music and shelf content. `manifest` returns namespaces, route lists, and the metadata groups clients can expect.
 
+## Libraries
+
+Filesystem libraries are stored in SQLite. Env-configured paths from `SAMO_MUSIC_DIRS`, `SAMO_AUDIOBOOK_DIRS`, and `SAMO_PODCAST_DIRS` are synced into the database on startup.
+
+Routes:
+
+- `GET /api/v1/libraries`
+- `GET /api/v1/libraries/{id}`
+- `POST /api/v1/libraries`
+- `PATCH /api/v1/libraries/{id}`
+- `DELETE /api/v1/libraries/{id}`
+- `POST /api/v1/libraries/{id}/scan`
+- `POST /api/v1/scan`
+- `GET /api/v1/scan/jobs`
+- `GET /api/v1/scan/jobs/{id}`
+
+`POST /api/v1/libraries` accepts:
+
+```json
+{
+  "name": "Audiobooks",
+  "kind": "shelf",
+  "mediaType": "book",
+  "path": "/media/audiobooks"
+}
+```
+
+Supported `kind` values:
+
+- `music`
+- `shelf` with `mediaType` of `book` or `podcast`
+
+Scan routes run synchronously and return a scan job record with prune counts. A scan removes database rows for files, shelf items, and local podcast episodes that disappeared from disk since the previous scan.
+
+`PATCH /api/v1/libraries/{id}` may include a new `path`. Relocating a library creates a new deterministic library ID and moves child rows to it.
+
+## Playback
+
+Playback state is stored in SQLite and surfaced on catalog reads after refresh.
+
+Routes:
+
+- `GET /api/v1/playback/{kind}/{id}`
+- `PUT /api/v1/playback/{kind}/{id}`
+- `PATCH /api/v1/playback/{kind}/{id}`
+
+Supported `kind` values:
+
+- `music-artist`, `music-album`, `music-track`, `music-playlist`
+- `shelf-item`, `shelf-episode`
+
+`PATCH` accepts partial fields plus optional `incrementPlayCount`, `incrementSkipCount`, `touchLastPlayedAt`, and `touchLastPositionAt`. Ratings must be 0–5.
+
+Example:
+
+```json
+PATCH /api/v1/playback/music-track/track-id
+{
+  "progressSeconds": 184,
+  "favorite": true,
+  "touchLastPositionAt": true
+}
+```
+
+## Media Streaming
+
+Local files are served only when their path falls under a configured filesystem library root.
+
+Routes:
+
+- `GET /api/v1/media/files/{id}`
+- `GET /api/v1/media/files/{id}/stream`
+- `GET /api/v1/music/tracks/{id}/stream`
+- `GET /api/v1/music/albums/{id}/cover`
+- `GET /api/v1/shelf/items/{id}/stream`
+- `GET /api/v1/shelf/items/{id}/cover`
+- `GET /api/v1/shelf/episodes/{id}/stream`
+
+Stream routes support HTTP Range requests. Pass `?mediaFileId=` to stream a specific linked audio file on track, shelf item, and episode shortcuts.
+
+Cover routes serve the first local image path on the album or shelf item (sidecar file or extracted embedded art).
+
+### Extracted covers
+
+When the scanner extracts embedded artwork, covers are cached under `{SAMO_DATA_DIR}/covers` and registered in `extracted_covers`.
+
+Routes:
+
+- `GET /api/v1/media/covers/{id}`
+- `GET /api/v1/media/covers/{id}/image`
+
+Catalog `Image` entries use the stable `cover_*` ID and local cache path when extraction ran during scan.
+
 ## Metadata Lookup
 
 External metadata lookup is explicit and disabled by default. It is meant for a future web UI where a user asks Samo to search for candidates, reviews the result, then applies selected fields later.
@@ -85,6 +178,8 @@ The shelf namespace is Samo's Audiobookshelf-shaped side: audiobooks, podcasts, 
 - `GET /api/v1/shelf/podcast-feeds`
 - `POST /api/v1/shelf/podcast-feeds`
 - `GET /api/v1/shelf/podcast-feeds/{id}`
+- `PATCH /api/v1/shelf/podcast-feeds/{id}`
+- `POST /api/v1/shelf/podcast-feeds/poll`
 - `POST /api/v1/shelf/podcast-feeds/{id}/refresh`
 - `DELETE /api/v1/shelf/podcast-feeds/{id}`
 - `GET /api/v1/shelf/episodes`
@@ -111,6 +206,14 @@ Podcast feeds are remote source records. `POST /api/v1/shelf/podcast-feeds` acce
 ```
 
 Samo fetches the RSS feed, stores the feed source, creates or updates a shelf podcast item, and creates or updates remote podcast episodes with enclosure metadata. Local podcast files still come from the scanner and use the same shelf podcast/episode response models.
+
+Feed responses include a `poll` object: `pollEnabled`, `pollIntervalSeconds` (900–604800), `nextPollAt`, `lastPollStartedAt`, `lastPollFinishedAt`, and `consecutiveErrors`.
+
+`PATCH /api/v1/shelf/podcast-feeds/{id}` accepts optional `title`, `pollEnabled`, and `pollIntervalSeconds` without re-fetching RSS.
+
+`POST /api/v1/shelf/podcast-feeds/poll` runs one poll cycle for all due feeds and returns `{ checked, updated, failed, skipped, results[] }`.
+
+When `SAMO_PODCAST_POLL=true` (default), the server also polls due feeds on a background ticker (`SAMO_PODCAST_POLL_TICK`, default `1m`).
 
 ## Radio
 

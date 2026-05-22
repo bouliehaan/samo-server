@@ -14,7 +14,11 @@ import (
 	"time"
 
 	"github.com/bouliehaan/samo-server/internal/catalog"
+	"github.com/bouliehaan/samo-server/internal/covers"
+	"github.com/bouliehaan/samo-server/internal/files"
+	"github.com/bouliehaan/samo-server/internal/libraries"
 	"github.com/bouliehaan/samo-server/internal/metadata"
+	"github.com/bouliehaan/samo-server/internal/playback"
 	"github.com/bouliehaan/samo-server/internal/radio"
 	"github.com/bouliehaan/samo-server/internal/sources"
 )
@@ -22,6 +26,10 @@ import (
 type ServerOptions struct {
 	APIToken      string
 	Catalog       *catalog.Service
+	Libraries     *libraries.Service
+	Playback      *playback.Service
+	Covers        *covers.Service
+	Files         *files.Service
 	Metadata      *metadata.Service
 	Radio         *radio.Service
 	Sources       *sources.Service
@@ -31,6 +39,10 @@ type ServerOptions struct {
 type Server struct {
 	apiToken      string
 	catalog       *catalog.Service
+	libraries     *libraries.Service
+	playback      *playback.Service
+	covers        *covers.Service
+	files         *files.Service
 	metadata      *metadata.Service
 	mux           *http.ServeMux
 	radio         *radio.Service
@@ -55,6 +67,10 @@ func NewServer(options ServerOptions) http.Handler {
 	server := &Server{
 		apiToken:      strings.TrimSpace(options.APIToken),
 		catalog:       catalogService,
+		libraries:     options.Libraries,
+		playback:      options.Playback,
+		covers:        options.Covers,
+		files:         options.Files,
 		metadata:      metadataService,
 		mux:           http.NewServeMux(),
 		radio:         radioService,
@@ -80,6 +96,31 @@ func (s *Server) routes() {
 
 	s.handleAPI("GET /api/v1/catalog/overview", s.catalogOverview)
 	s.handleAPI("GET /api/v1/catalog/manifest", s.catalogManifest)
+
+	s.handleAPI("GET /api/v1/libraries", s.listLibraries)
+	s.handleAPI("GET /api/v1/libraries/{id}", s.getLibrary)
+	s.handleAPI("POST /api/v1/libraries", s.createLibrary)
+	s.handleAPI("PATCH /api/v1/libraries/{id}", s.updateLibrary)
+	s.handleAPI("DELETE /api/v1/libraries/{id}", s.deleteLibrary)
+	s.handleAPI("POST /api/v1/libraries/{id}/scan", s.scanLibrary)
+	s.handleAPI("POST /api/v1/scan", s.scanAllLibraries)
+	s.handleAPI("GET /api/v1/scan/jobs", s.listScanJobs)
+	s.handleAPI("GET /api/v1/scan/jobs/{id}", s.getScanJob)
+
+	s.handleAPI("GET /api/v1/playback/{kind}/{id}", s.getPlayback)
+	s.handleAPI("PUT /api/v1/playback/{kind}/{id}", s.putPlayback)
+	s.handleAPI("PATCH /api/v1/playback/{kind}/{id}", s.patchPlayback)
+
+	s.handleAPI("GET /api/v1/media/covers/{id}", s.getExtractedCover)
+	s.handleAPI("GET /api/v1/media/covers/{id}/image", s.serveExtractedCover)
+
+	s.handleAPI("GET /api/v1/media/files/{id}", s.getMediaFile)
+	s.handleAPI("GET /api/v1/media/files/{id}/stream", s.streamMediaFile)
+	s.handleAPI("GET /api/v1/music/tracks/{id}/stream", s.streamMusicTrack)
+	s.handleAPI("GET /api/v1/music/albums/{id}/cover", s.serveMusicAlbumCover)
+	s.handleAPI("GET /api/v1/shelf/items/{id}/stream", s.streamShelfItem)
+	s.handleAPI("GET /api/v1/shelf/items/{id}/cover", s.serveShelfItemCover)
+	s.handleAPI("GET /api/v1/shelf/episodes/{id}/stream", s.streamShelfEpisode)
 
 	s.handleAPI("GET /api/v1/metadata/providers", s.listMetadataProviders)
 	s.handleAPI("GET /api/v1/metadata/search", s.searchMetadata)
@@ -108,6 +149,8 @@ func (s *Server) routes() {
 	s.handleAPI("GET /api/v1/shelf/podcast-feeds", s.listPodcastFeeds)
 	s.handleAPI("POST /api/v1/shelf/podcast-feeds", s.createPodcastFeed)
 	s.handleAPI("GET /api/v1/shelf/podcast-feeds/{id}", s.getPodcastFeed)
+	s.handleAPI("PATCH /api/v1/shelf/podcast-feeds/{id}", s.updatePodcastFeed)
+	s.handleAPI("POST /api/v1/shelf/podcast-feeds/poll", s.runPodcastPollCycle)
 	s.handleAPI("POST /api/v1/shelf/podcast-feeds/{id}/refresh", s.refreshPodcastFeed)
 	s.handleAPI("DELETE /api/v1/shelf/podcast-feeds/{id}", s.deletePodcastFeed)
 	s.handleAPI("GET /api/v1/shelf/episodes", s.listPodcastEpisodes)

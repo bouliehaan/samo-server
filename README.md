@@ -43,7 +43,7 @@ External metadata lookup is disabled by default and can be enabled later with `S
 
 ## Storage and scanning
 
-Samo stores catalog metadata in SQLite and can scan configured music, audiobook, and podcast folders with `ffprobe`. See [docs/storage-and-scanning.md](docs/storage-and-scanning.md) for environment variables and scanner behavior.
+Samo stores catalog metadata in SQLite and scans configured music, audiobook, and podcast folders using bundled `ffmpeg`/`ffprobe` on Ubuntu. See [docs/install-ubuntu.md](docs/install-ubuntu.md) for deployment layout and [docs/storage-and-scanning.md](docs/storage-and-scanning.md) for scanner environment variables.
 
 ## Philosophy
 

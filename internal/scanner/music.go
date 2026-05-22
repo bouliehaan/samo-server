@@ -53,7 +53,7 @@ func (s *Scanner) scanMusicFile(ctx context.Context, library Library, root strin
 	}
 
 	albumID := stableID("album", strings.Join(albumArtistNames, ";"), albumTitle, releaseDate)
-	albumCover := findCoverImage(filepath.Dir(path))
+	albumCover := s.resolveCover(ctx, filepath.Dir(path), []string{path}, []string{probe.AudioFile.Checksum})
 	album := catalog.MusicAlbum{
 		ID:                  albumID,
 		Title:               albumTitle,

@@ -15,8 +15,9 @@ type scanner interface {
 func scanPodcastFeed(row scanner) (PodcastFeed, error) {
 	var feed PodcastFeed
 	var explicit int
+	var pollEnabled int
 	var categoriesJSON string
-	var lastFetchedAt, createdAt, updatedAt sql.NullString
+	var lastFetchedAt, nextPollAt, lastPollStartedAt, lastPollFinishedAt, createdAt, updatedAt sql.NullString
 	if err := row.Scan(
 		&feed.ID,
 		&feed.PodcastID,
@@ -35,6 +36,12 @@ func scanPodcastFeed(row scanner) (PodcastFeed, error) {
 		&feed.Status,
 		&feed.LastError,
 		&lastFetchedAt,
+		&pollEnabled,
+		&feed.Poll.IntervalSeconds,
+		&nextPollAt,
+		&lastPollStartedAt,
+		&lastPollFinishedAt,
+		&feed.Poll.ConsecutiveErrors,
 		&createdAt,
 		&updatedAt,
 	); err != nil {
@@ -43,6 +50,10 @@ func scanPodcastFeed(row scanner) (PodcastFeed, error) {
 	feed.Explicit = explicit != 0
 	decodeJSON(categoriesJSON, &feed.Categories)
 	feed.LastFetchedAt = parseTimePtr(lastFetchedAt)
+	feed.Poll.Enabled = pollEnabled != 0
+	feed.Poll.NextPollAt = parseTimePtr(nextPollAt)
+	feed.Poll.LastPollStartedAt = parseTimePtr(lastPollStartedAt)
+	feed.Poll.LastPollFinishedAt = parseTimePtr(lastPollFinishedAt)
 	feed.CreatedAt = parseTimePtr(createdAt)
 	feed.UpdatedAt = parseTimePtr(updatedAt)
 	return feed, nil

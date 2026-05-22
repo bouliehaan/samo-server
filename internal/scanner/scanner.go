@@ -23,25 +23,41 @@ type Library struct {
 	Path      string
 }
 
+type Options struct {
+	Covers      CoverResolver
+	FFprobePath string
+}
+
 type Scanner struct {
 	db          *sql.DB
 	ffprobePath string
+	covers      CoverResolver
+	activeScan  *scanAccumulator
 }
 
 func New(db *sql.DB) *Scanner {
+	return NewWithOptions(db, Options{})
+}
+
+func NewWithOptions(db *sql.DB, options Options) *Scanner {
+	ffprobePath := strings.TrimSpace(options.FFprobePath)
+	if ffprobePath == "" {
+		ffprobePath = "ffprobe"
+	}
 	return &Scanner{
 		db:          db,
-		ffprobePath: "ffprobe",
+		ffprobePath: ffprobePath,
+		covers:      options.Covers,
 	}
 }
 
 func (s *Scanner) Scan(ctx context.Context, libraries []Library) error {
-	for _, library := range libraries {
-		if err := s.scanLibrary(ctx, library); err != nil {
-			return err
-		}
-	}
-	return s.refreshStats(ctx)
+	_, err := s.ScanWithStats(ctx, libraries)
+	return err
+}
+
+func LibraryID(kind, mediaType, path string) string {
+	return stableID("library", kind, mediaType, path)
 }
 
 func (s *Scanner) scanLibrary(ctx context.Context, library Library) error {
@@ -61,7 +77,7 @@ func (s *Scanner) scanLibrary(ctx context.Context, library Library) error {
 	if library.Name == "" {
 		library.Name = filepath.Base(root)
 	}
-	library.ID = stableID("library", library.Kind, library.MediaType, root)
+	library.ID = LibraryID(library.Kind, library.MediaType, root)
 
 	if err := s.upsertLibrary(ctx, library); err != nil {
 		return err
