@@ -38,6 +38,36 @@ GET /api/v1/metadata/search?kind=music&musicType=track&track=Signal+One&artist=T
 
 ## Apply Workflow
 
-There is no apply/merge endpoint yet. Search results are candidates. A later web UI should let the user compare current catalog metadata against candidate metadata, select fields, and then write those fields through explicit catalog update APIs.
+Search results are candidates only until a client explicitly applies them.
+
+1. `GET /api/v1/metadata/search` — find candidates.
+2. `POST /api/v1/metadata/apply/preview` — show `before`, merged `after`, plus `appliedFields` / `skippedFields` for the requested field list.
+3. `POST /api/v1/metadata/apply` — write selected fields to SQLite and refresh the in-memory catalog.
+
+Apply targets:
+
+- `shelf-item` (audiobook `book` metadata or local `podcast` metadata)
+- `shelf-episode`
+- `music-artist`, `music-album`, `music-track`
+- `podcast-feed` (remote RSS source rows)
+
+Request body:
+
+```json
+{
+  "targetKind": "shelf-item",
+  "targetId": "item_abc123",
+  "fields": ["title", "description", "authors", "externalIds"],
+  "candidate": {
+    "provider": "openlibrary",
+    "mediaType": "audiobook",
+    "title": "Signal Manual",
+    "description": "A dense field guide",
+    "authors": [{ "name": "Ada Archive", "role": "author" }]
+  }
+}
+```
+
+`fields` is required and acts as the user confirmation gate. Empty candidate values are reported in `skippedFields` and are not written. `externalIds` merges into existing IDs instead of replacing them.
 
 Do not call metadata providers from the scanner, watcher, source ingestion, or startup flow.

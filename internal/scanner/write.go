@@ -10,6 +10,13 @@ import (
 )
 
 func (s *Scanner) upsertMusicArtist(ctx context.Context, artist catalog.MusicArtist) error {
+	if s.overrideIndex != nil {
+		var err error
+		artist, err = s.overrideIndex.GuardMusicArtist(ctx, s.db, artist)
+		if err != nil {
+			return err
+		}
+	}
 	_, err := s.db.ExecContext(ctx, `
 		INSERT INTO music_artists (id, name, sort_name, genres_json, external_ids_json, updated_at)
 		VALUES (?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
@@ -27,6 +34,13 @@ func (s *Scanner) upsertMusicArtist(ctx context.Context, artist catalog.MusicArt
 }
 
 func (s *Scanner) upsertMusicAlbum(ctx context.Context, album catalog.MusicAlbum) error {
+	if s.overrideIndex != nil {
+		var err error
+		album, err = s.overrideIndex.GuardMusicAlbum(ctx, s.db, album)
+		if err != nil {
+			return err
+		}
+	}
 	_, err := s.db.ExecContext(ctx, `
 		INSERT INTO music_albums (
 		  id, title, sort_title, version, display_artist, release_date, original_release_date, release_year, release_type,
@@ -66,6 +80,9 @@ func (s *Scanner) upsertMusicAlbum(ctx context.Context, album catalog.MusicAlbum
 }
 
 func (s *Scanner) setAlbumArtists(ctx context.Context, albumID string, artists []catalog.MusicArtist) error {
+	if s.overrideIndex != nil && s.overrideIndex.HasField(catalog.OverrideKindMusicAlbum, albumID, "artists") {
+		return nil
+	}
 	if _, err := s.db.ExecContext(ctx, `DELETE FROM music_album_artists WHERE album_id = ?`, albumID); err != nil {
 		return fmt.Errorf("clear album artists: %w", err)
 	}
@@ -81,6 +98,13 @@ func (s *Scanner) setAlbumArtists(ctx context.Context, albumID string, artists [
 }
 
 func (s *Scanner) upsertMusicTrack(ctx context.Context, track catalog.MusicTrack) error {
+	if s.overrideIndex != nil {
+		var err error
+		track, err = s.overrideIndex.GuardMusicTrack(ctx, s.db, track)
+		if err != nil {
+			return err
+		}
+	}
 	_, err := s.db.ExecContext(ctx, `
 		INSERT INTO music_tracks (
 		  id, title, sort_title, subtitle, display_artist, album_id, album_title, disc_number, track_number, total_discs,
@@ -124,6 +148,9 @@ func (s *Scanner) upsertMusicTrack(ctx context.Context, track catalog.MusicTrack
 }
 
 func (s *Scanner) setTrackArtists(ctx context.Context, trackID string, artists []catalog.MusicArtist) error {
+	if s.overrideIndex != nil && s.overrideIndex.HasField(catalog.OverrideKindMusicTrack, trackID, "artists") {
+		return nil
+	}
 	if _, err := s.db.ExecContext(ctx, `DELETE FROM music_track_artists WHERE track_id = ?`, trackID); err != nil {
 		return fmt.Errorf("clear track artists: %w", err)
 	}
@@ -139,6 +166,13 @@ func (s *Scanner) setTrackArtists(ctx context.Context, trackID string, artists [
 }
 
 func (s *Scanner) upsertShelfItem(ctx context.Context, item catalog.ShelfItem) error {
+	if s.overrideIndex != nil {
+		var err error
+		item, err = s.overrideIndex.GuardShelfItem(ctx, s.db, item)
+		if err != nil {
+			return err
+		}
+	}
 	coverJSON := "{}"
 	if item.Cover != nil {
 		coverJSON = jsonText(item.Cover)
@@ -204,6 +238,12 @@ func (s *Scanner) upsertShelfAuthor(ctx context.Context, author catalog.ShelfAut
 }
 
 func (s *Scanner) setShelfItemAuthors(ctx context.Context, itemID string, authors []catalog.Contributor) error {
+	if s.overrideIndex != nil {
+		if s.overrideIndex.HasField(catalog.OverrideKindShelfItem, itemID, "authors") ||
+			s.overrideIndex.HasField(catalog.OverrideKindShelfItem, itemID, "narrators") {
+			return nil
+		}
+	}
 	if _, err := s.db.ExecContext(ctx, `DELETE FROM shelf_item_authors WHERE item_id = ?`, itemID); err != nil {
 		return fmt.Errorf("clear shelf item authors: %w", err)
 	}
@@ -239,6 +279,9 @@ func (s *Scanner) upsertShelfSeries(ctx context.Context, series catalog.ShelfSer
 }
 
 func (s *Scanner) setShelfItemSeries(ctx context.Context, itemID string, series []catalog.SeriesRef) error {
+	if s.overrideIndex != nil && s.overrideIndex.HasField(catalog.OverrideKindShelfItem, itemID, "series") {
+		return nil
+	}
 	if _, err := s.db.ExecContext(ctx, `DELETE FROM shelf_item_series WHERE item_id = ?`, itemID); err != nil {
 		return fmt.Errorf("clear shelf item series: %w", err)
 	}
@@ -257,6 +300,13 @@ func (s *Scanner) setShelfItemSeries(ctx context.Context, itemID string, series 
 }
 
 func (s *Scanner) upsertPodcastEpisode(ctx context.Context, episode catalog.PodcastEpisode) error {
+	if s.overrideIndex != nil {
+		var err error
+		episode, err = s.overrideIndex.GuardPodcastEpisode(ctx, s.db, episode)
+		if err != nil {
+			return err
+		}
+	}
 	_, err := s.db.ExecContext(ctx, `
 		INSERT INTO podcast_episodes (
 		  id, library_id, podcast_id, title, subtitle, description, published_at, season, episode,

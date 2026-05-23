@@ -32,6 +32,9 @@ func (s *Server) listPodcastFeeds(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) createPodcastFeed(w http.ResponseWriter, r *http.Request) {
+	if _, ok := s.requireAdmin(w, r); !ok {
+		return
+	}
 	var input sources.AddPodcastFeedInput
 	if !readJSONBody(w, r, &input) {
 		return
@@ -58,6 +61,9 @@ func (s *Server) getPodcastFeed(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) updatePodcastFeed(w http.ResponseWriter, r *http.Request) {
+	if _, ok := s.requireAdmin(w, r); !ok {
+		return
+	}
 	var input sources.UpdatePodcastFeedInput
 	if !readJSONBody(w, r, &input) {
 		return
@@ -71,6 +77,9 @@ func (s *Server) updatePodcastFeed(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) runPodcastPollCycle(w http.ResponseWriter, r *http.Request) {
+	if _, ok := s.requireAdmin(w, r); !ok {
+		return
+	}
 	result, err := s.sourcesService().RunPodcastPollCycle(r.Context(), time.Now().UTC())
 	if err != nil {
 		writeSourceError(w, err)
@@ -86,6 +95,9 @@ func (s *Server) runPodcastPollCycle(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) refreshPodcastFeed(w http.ResponseWriter, r *http.Request) {
+	if _, ok := s.requireAdmin(w, r); !ok {
+		return
+	}
 	feed, err := s.sourcesService().RefreshPodcastFeed(r.Context(), r.PathValue("id"))
 	if err != nil {
 		writeSourceError(w, err)
@@ -99,6 +111,9 @@ func (s *Server) refreshPodcastFeed(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) deletePodcastFeed(w http.ResponseWriter, r *http.Request) {
+	if _, ok := s.requireAdmin(w, r); !ok {
+		return
+	}
 	if err := s.sourcesService().DeletePodcastFeed(r.Context(), r.PathValue("id")); err != nil {
 		writeSourceError(w, err)
 		return
@@ -140,6 +155,9 @@ func (s *Server) listInternetRadioStations(w http.ResponseWriter, r *http.Reques
 }
 
 func (s *Server) createInternetRadioStation(w http.ResponseWriter, r *http.Request) {
+	if _, ok := s.requireAdmin(w, r); !ok {
+		return
+	}
 	var input sources.AddInternetRadioStationInput
 	if !readJSONBody(w, r, &input) {
 		return
@@ -152,6 +170,46 @@ func (s *Server) createInternetRadioStation(w http.ResponseWriter, r *http.Reque
 	writeJSON(w, http.StatusCreated, s.internetRadioResponse(r, station))
 }
 
+func (s *Server) updateInternetRadioStation(w http.ResponseWriter, r *http.Request) {
+	if _, ok := s.requireAdmin(w, r); !ok {
+		return
+	}
+	var input sources.UpdateInternetRadioStationInput
+	if !readJSONBody(w, r, &input) {
+		return
+	}
+	station, err := s.sourcesService().UpdateInternetRadioStation(r.Context(), r.PathValue("id"), input)
+	if err != nil {
+		writeSourceError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, s.internetRadioResponse(r, station))
+}
+
+func (s *Server) probeInternetRadioStation(w http.ResponseWriter, r *http.Request) {
+	if _, ok := s.requireAdmin(w, r); !ok {
+		return
+	}
+	station, err := s.sourcesService().ProbeInternetRadioStation(r.Context(), r.PathValue("id"))
+	if err != nil {
+		writeSourceError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, s.internetRadioResponse(r, station))
+}
+
+func (s *Server) runInternetRadioProbeCycle(w http.ResponseWriter, r *http.Request) {
+	if _, ok := s.requireAdmin(w, r); !ok {
+		return
+	}
+	result, err := s.sourcesService().RunInternetRadioProbeCycle(r.Context(), time.Now().UTC())
+	if err != nil {
+		writeSourceError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, result)
+}
+
 func (s *Server) getInternetRadioStation(w http.ResponseWriter, r *http.Request) {
 	station, err := s.sourcesService().GetInternetRadioStation(r.Context(), r.PathValue("id"))
 	if err != nil {
@@ -162,6 +220,9 @@ func (s *Server) getInternetRadioStation(w http.ResponseWriter, r *http.Request)
 }
 
 func (s *Server) deleteInternetRadioStation(w http.ResponseWriter, r *http.Request) {
+	if _, ok := s.requireAdmin(w, r); !ok {
+		return
+	}
 	if err := s.sourcesService().DeleteInternetRadioStation(r.Context(), r.PathValue("id")); err != nil {
 		writeSourceError(w, err)
 		return
@@ -232,6 +293,8 @@ func writeSourceError(w http.ResponseWriter, err error) {
 	case errors.Is(err, sources.ErrInvalidURL):
 		writeError(w, http.StatusBadRequest, "url must be absolute http or https")
 	case errors.Is(err, sources.ErrInvalidPollInterval):
+		writeError(w, http.StatusBadRequest, err.Error())
+	case errors.Is(err, sources.ErrInvalidProbeInterval):
 		writeError(w, http.StatusBadRequest, err.Error())
 	default:
 		writeError(w, http.StatusInternalServerError, err.Error())

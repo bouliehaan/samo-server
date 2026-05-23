@@ -4,31 +4,44 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 )
 
 const (
-	defaultAddr    = ":4500"
+	defaultAddr    = ":6969"
 	defaultDataDir = "data"
 )
 
 // Config contains process-level server settings. Feature-specific settings live
 // in their own packages so modules can grow independently.
 type Config struct {
-	Addr              string
-	DataDir           string
-	DBPath            string
-	RadioConfigPath   string
-	APIToken          string
-	Libraries         []Library
-	MetadataProviders []string
-	MetadataUserAgent string
-	ScanOnStart       bool
-	WatchLibraries    bool
-	WatchDebounce     time.Duration
-	PodcastPoll       bool
-	PodcastPollTick   time.Duration
+	Addr                   string
+	DataDir                string
+	DBPath                 string
+	RadioConfigPath        string
+	APIToken               string
+	BootstrapUsername      string
+	BootstrapPassword      string
+	Libraries              []Library
+	MetadataProviders      []string
+	MetadataUserAgent      string
+	ScanOnStart            bool
+	WatchLibraries         bool
+	WatchDebounce          time.Duration
+	PodcastPoll            bool
+	PodcastPollTick        time.Duration
+	LastFMAPIKey           string
+	LastFMSharedSecret     string
+	LastFMPoll             bool
+	LastFMPollTick         time.Duration
+	PodcastCache           bool
+	PodcastCacheMaxBytes   int64
+	PodcastCacheMaxAge     time.Duration
+	PodcastCacheMaxFile    int64
+	InternetRadioProbe     bool
+	InternetRadioProbeTick time.Duration
 }
 
 type Library struct {
@@ -50,19 +63,31 @@ func LoadEnv() (Config, error) {
 	}
 
 	cfg := Config{
-		Addr:              envOrDefault("SAMO_ADDR", defaultAddr),
-		DataDir:           dataDir,
-		DBPath:            dbPath,
-		RadioConfigPath:   radioConfigPath,
-		APIToken:          strings.TrimSpace(os.Getenv("SAMO_API_TOKEN")),
-		Libraries:         loadLibraries(),
-		MetadataProviders: envCSV("SAMO_METADATA_PROVIDERS"),
-		MetadataUserAgent: envOrDefault("SAMO_METADATA_USER_AGENT", "SamoServer/0.1 (https://github.com/bouliehaan/samo-server)"),
-		ScanOnStart:       envBool("SAMO_SCAN_ON_START", true),
-		WatchLibraries:    envBool("SAMO_WATCH_LIBRARIES", true),
-		WatchDebounce:     envDuration("SAMO_WATCH_DEBOUNCE", 3*time.Second),
-		PodcastPoll:       envBool("SAMO_PODCAST_POLL", true),
-		PodcastPollTick:   envDuration("SAMO_PODCAST_POLL_TICK", time.Minute),
+		Addr:                   envOrDefault("SAMO_ADDR", defaultAddr),
+		DataDir:                dataDir,
+		DBPath:                 dbPath,
+		RadioConfigPath:        radioConfigPath,
+		APIToken:               strings.TrimSpace(os.Getenv("SAMO_API_TOKEN")),
+		BootstrapUsername:      strings.TrimSpace(os.Getenv("SAMO_BOOTSTRAP_USERNAME")),
+		BootstrapPassword:      strings.TrimSpace(os.Getenv("SAMO_BOOTSTRAP_PASSWORD")),
+		Libraries:              loadLibraries(),
+		MetadataProviders:      envCSV("SAMO_METADATA_PROVIDERS"),
+		MetadataUserAgent:      envOrDefault("SAMO_METADATA_USER_AGENT", "SamoServer/0.1 (https://github.com/bouliehaan/samo-server)"),
+		ScanOnStart:            envBool("SAMO_SCAN_ON_START", true),
+		WatchLibraries:         envBool("SAMO_WATCH_LIBRARIES", true),
+		WatchDebounce:          envDuration("SAMO_WATCH_DEBOUNCE", 3*time.Second),
+		PodcastPoll:            envBool("SAMO_PODCAST_POLL", true),
+		PodcastPollTick:        envDuration("SAMO_PODCAST_POLL_TICK", time.Minute),
+		LastFMAPIKey:           strings.TrimSpace(os.Getenv("SAMO_LASTFM_API_KEY")),
+		LastFMSharedSecret:     strings.TrimSpace(os.Getenv("SAMO_LASTFM_SHARED_SECRET")),
+		LastFMPoll:             envBool("SAMO_LASTFM_POLL", true),
+		LastFMPollTick:         envDuration("SAMO_LASTFM_POLL_TICK", time.Minute),
+		PodcastCache:           envBool("SAMO_PODCAST_CACHE", true),
+		PodcastCacheMaxBytes:   envInt64("SAMO_PODCAST_CACHE_MAX_BYTES", 10<<30),
+		PodcastCacheMaxAge:     envDuration("SAMO_PODCAST_CACHE_MAX_AGE", 30*24*time.Hour),
+		PodcastCacheMaxFile:    envInt64("SAMO_PODCAST_CACHE_MAX_FILE_BYTES", 500<<20),
+		InternetRadioProbe:     envBool("SAMO_INTERNET_RADIO_PROBE", true),
+		InternetRadioProbeTick: envDuration("SAMO_INTERNET_RADIO_PROBE_TICK", time.Minute),
 	}
 
 	return cfg.Validate()
@@ -125,6 +150,18 @@ func envDuration(key string, fallback time.Duration) time.Duration {
 	}
 	parsed, err := time.ParseDuration(value)
 	if err != nil {
+		return fallback
+	}
+	return parsed
+}
+
+func envInt64(key string, fallback int64) int64 {
+	value := strings.TrimSpace(os.Getenv(key))
+	if value == "" {
+		return fallback
+	}
+	parsed, err := strconv.ParseInt(value, 10, 64)
+	if err != nil || parsed < 0 {
 		return fallback
 	}
 	return parsed

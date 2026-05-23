@@ -90,6 +90,7 @@ func normalizeStation(input StationConfig) (*station, error) {
 			MediaCount:           len(media),
 			RotationCount:        len(loop),
 			TotalDurationSeconds: totalDurationSeconds,
+			Enabled:              true,
 		},
 		epoch: epoch,
 		media: media,

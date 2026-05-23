@@ -52,7 +52,7 @@ func LoadSeedFromDB(ctx context.Context, db *sql.DB) (Seed, error) {
 		return Seed{}, err
 	}
 
-	return Seed{
+	seed := Seed{
 		MusicArtists:    artists,
 		MusicAlbums:     albums,
 		MusicTracks:     tracks,
@@ -63,7 +63,20 @@ func LoadSeedFromDB(ctx context.Context, db *sql.DB) (Seed, error) {
 		ShelfAuthors:    authors,
 		ShelfSeries:     series,
 		PodcastEpisodes: episodes,
-	}, nil
+	}
+
+	overrides, err := LoadMetadataOverrides(ctx, db)
+	if err != nil {
+		return Seed{}, err
+	}
+	if len(overrides) > 0 {
+		feedPodcastIDs, err := LoadPodcastFeedPodcastIDs(ctx, db)
+		if err != nil {
+			return Seed{}, err
+		}
+		ProjectMetadataOverrides(&seed, overrides, feedPodcastIDs)
+	}
+	return seed, nil
 }
 
 func loadMusicArtists(ctx context.Context, db *sql.DB) ([]MusicArtist, error) {
@@ -488,7 +501,7 @@ func loadAudioFiles(ctx context.Context, db *sql.DB, ownerColumn string) (map[st
 		       checksum, embedded_tags_json
 		FROM media_files
 		WHERE %s IS NOT NULL
-		ORDER BY relative_path, file_name`, ownerColumn, ownerColumn))
+		ORDER BY relative_path, file_name, id`, ownerColumn, ownerColumn))
 	if err != nil {
 		return nil, fmt.Errorf("load audio files: %w", err)
 	}
@@ -510,6 +523,9 @@ func loadAudioFiles(ctx context.Context, db *sql.DB, ownerColumn string) (map[st
 		decodeJSON(embeddedTagsJSON, &item.EmbeddedTags)
 		item.ModifiedAt = parseTimePtr(modifiedAt)
 		files[ownerID] = append(files[ownerID], item)
+	}
+	for ownerID := range files {
+		files[ownerID] = SortAudioFiles(files[ownerID])
 	}
 	return files, rows.Err()
 }

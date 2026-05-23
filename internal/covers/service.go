@@ -7,6 +7,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -16,10 +17,13 @@ import (
 )
 
 type Service struct {
-	db          *sql.DB
-	coverDir    string
-	ffmpegPath  string
-	ffprobePath string
+	db             *sql.DB
+	coverDir       string
+	ffmpegPath     string
+	ffprobePath    string
+	httpClient     *http.Client
+	remoteMaxBytes int64
+	allowPrivate   bool
 }
 
 type Options struct {

@@ -14,50 +14,51 @@ func New(db *sql.DB) *Service {
 	return &Service{db: db}
 }
 
-func (s *Service) Get(ctx context.Context, kind TargetKind, id string) (State, error) {
+func (s *Service) Get(ctx context.Context, userID string, kind TargetKind, id string) (State, error) {
 	if s == nil || s.db == nil {
 		return State{}, ErrDisabled
 	}
+	userID = strings.TrimSpace(userID)
 	id = strings.TrimSpace(id)
-	if id == "" {
+	if userID == "" || id == "" {
 		return State{}, ErrNotFound
 	}
-	return loadState(ctx, s.db, kind, id)
+	return loadState(ctx, s.db, userID, kind, id)
 }
 
-func (s *Service) Put(ctx context.Context, kind TargetKind, id string, state State) (State, error) {
+func (s *Service) Put(ctx context.Context, userID string, kind TargetKind, id string, state State) (State, error) {
 	if s == nil || s.db == nil {
 		return State{}, ErrDisabled
 	}
+	userID = strings.TrimSpace(userID)
 	id = strings.TrimSpace(id)
-	if id == "" {
+	if userID == "" || id == "" {
 		return State{}, ErrNotFound
 	}
-	if _, err := loadState(ctx, s.db, kind, id); err != nil {
-		return State{}, err
-	}
-	return saveState(ctx, s.db, kind, id, state)
+	return saveState(ctx, s.db, userID, kind, id, state)
 }
 
-func (s *Service) Patch(ctx context.Context, kind TargetKind, id string, patch PatchInput) (State, error) {
+func (s *Service) Patch(ctx context.Context, userID string, kind TargetKind, id string, patch PatchInput) (State, error) {
 	if s == nil || s.db == nil {
 		return State{}, ErrDisabled
 	}
+	userID = strings.TrimSpace(userID)
 	id = strings.TrimSpace(id)
-	if id == "" {
+	if userID == "" || id == "" {
 		return State{}, ErrNotFound
 	}
-	current, err := loadState(ctx, s.db, kind, id)
+	current, err := loadState(ctx, s.db, userID, kind, id)
 	if err != nil {
 		return State{}, err
 	}
 	updated := applyPatch(current, patch)
-	return saveState(ctx, s.db, kind, id, updated)
+	updated.UserID = userID
+	return saveState(ctx, s.db, userID, kind, id, updated)
 }
 
 func ParseTargetKind(raw string) (TargetKind, error) {
 	kind := TargetKind(strings.TrimSpace(raw))
-	if _, err := specFor(kind); err != nil {
+	if _, err := tableFor(kind); err != nil {
 		return "", ErrInvalidTarget
 	}
 	return kind, nil

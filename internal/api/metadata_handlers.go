@@ -6,11 +6,94 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/bouliehaan/samo-server/internal/catalog"
 	"github.com/bouliehaan/samo-server/internal/metadata"
 )
 
 func (s *Server) listMetadataProviders(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, s.metadata.Providers())
+}
+
+func (s *Server) previewMetadataApply(w http.ResponseWriter, r *http.Request) {
+	if _, ok := s.requireAdmin(w, r); !ok {
+		return
+	}
+	var request metadata.MetadataApplyRequest
+	if !readJSONBody(w, r, &request) {
+		return
+	}
+	preview, err := s.metadataApplyService().Preview(r.Context(), request)
+	if err != nil {
+		writeMetadataApplyError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, preview)
+}
+
+func (s *Server) applyMetadata(w http.ResponseWriter, r *http.Request) {
+	if _, ok := s.requireAdmin(w, r); !ok {
+		return
+	}
+	var request metadata.MetadataApplyRequest
+	if !readJSONBody(w, r, &request) {
+		return
+	}
+	result, err := s.metadataApplyService().Apply(r.Context(), request)
+	if err != nil {
+		writeMetadataApplyError(w, err)
+		return
+	}
+	if err := s.reloadCatalogProjection(r); err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, result)
+}
+
+func (s *Server) getMetadataOverride(w http.ResponseWriter, r *http.Request) {
+	if _, ok := s.requireAdmin(w, r); !ok {
+		return
+	}
+	view, err := s.metadataApplyService().GetOverride(r.Context(), r.PathValue("targetKind"), r.PathValue("targetId"))
+	if err != nil {
+		writeMetadataApplyError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, view)
+}
+
+func (s *Server) deleteMetadataOverride(w http.ResponseWriter, r *http.Request) {
+	if _, ok := s.requireAdmin(w, r); !ok {
+		return
+	}
+	if err := s.metadataApplyService().DeleteOverride(r.Context(), r.PathValue("targetKind"), r.PathValue("targetId")); err != nil {
+		writeMetadataApplyError(w, err)
+		return
+	}
+	if err := s.reloadCatalogProjection(r); err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+func (s *Server) clearMetadataOverrideFields(w http.ResponseWriter, r *http.Request) {
+	if _, ok := s.requireAdmin(w, r); !ok {
+		return
+	}
+	var request metadata.MetadataOverrideClearRequest
+	if !readJSONBody(w, r, &request) {
+		return
+	}
+	if err := s.metadataApplyService().ClearOverrideFields(r.Context(), r.PathValue("targetKind"), r.PathValue("targetId"), request.Fields); err != nil {
+		writeMetadataApplyError(w, err)
+		return
+	}
+	if err := s.reloadCatalogProjection(r); err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
 }
 
 func (s *Server) searchMetadata(w http.ResponseWriter, r *http.Request) {
@@ -49,6 +132,32 @@ func readMetadataSearchRequest(r *http.Request) (metadata.SearchRequest, error) 
 		request.Limit = limit
 	}
 	return request, nil
+}
+
+func (s *Server) metadataApplyService() *metadata.MetadataApplyService {
+	if s.metadataApply == nil {
+		panic("metadata apply service is not configured")
+	}
+	return s.metadataApply
+}
+
+func writeMetadataApplyError(w http.ResponseWriter, err error) {
+	switch {
+	case errors.Is(err, metadata.ErrMetadataApplyDisabled):
+		writeError(w, http.StatusServiceUnavailable, err.Error())
+	case errors.Is(err, metadata.ErrApplyNotFound):
+		writeError(w, http.StatusNotFound, "metadata apply target not found")
+	case errors.Is(err, catalog.ErrMetadataOverrideNotFound):
+		writeError(w, http.StatusNotFound, "metadata override not found")
+	case errors.Is(err, metadata.ErrInvalidApplyTarget),
+		errors.Is(err, metadata.ErrInvalidApplyField),
+		errors.Is(err, metadata.ErrEmptyApplyFields),
+		errors.Is(err, metadata.ErrApplyCandidateKind),
+		errors.Is(err, metadata.ErrInvalidRequest):
+		writeError(w, http.StatusBadRequest, err.Error())
+	default:
+		writeError(w, http.StatusInternalServerError, err.Error())
+	}
 }
 
 func writeMetadataError(w http.ResponseWriter, err error) {

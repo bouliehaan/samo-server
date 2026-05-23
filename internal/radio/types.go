@@ -38,6 +38,42 @@ type StationSummary struct {
 	MediaCount           int    `json:"mediaCount"`
 	RotationCount        int    `json:"rotationCount"`
 	TotalDurationSeconds int    `json:"totalDurationSeconds"`
+	Source               string `json:"source,omitempty"`
+	Enabled              bool   `json:"enabled"`
+}
+
+// Item source kinds. Station items may reference catalog entities or be
+// raw filesystem paths. Future kinds (playlists, smart queries) can be added
+// without breaking existing rows because resolution is done at hydration
+// time.
+const (
+	ItemSourcePath         = "path"
+	ItemSourceMusicTrack   = "music-track"
+	ItemSourceShelfItem    = "shelf-item"
+	ItemSourceShelfEpisode = "shelf-episode"
+
+	StationSourceDatabase = "database"
+	StationSourceFile     = "file"
+)
+
+// StationItem is the API-facing view of a row in radio_station_items. The
+// resolved path is only populated when hydration found a local file for the
+// catalog reference.
+type StationItem struct {
+	ID              string `json:"id"`
+	StationID       string `json:"stationId"`
+	Position        int    `json:"position"`
+	SourceKind      string `json:"sourceKind"`
+	SourceID        string `json:"sourceId,omitempty"`
+	SourcePath      string `json:"sourcePath,omitempty"`
+	ResolvedPath    string `json:"resolvedPath,omitempty"`
+	Title           string `json:"title"`
+	Artist          string `json:"artist,omitempty"`
+	Album           string `json:"album,omitempty"`
+	Kind            string `json:"kind"`
+	DurationSeconds int    `json:"durationSeconds"`
+	Weight          int    `json:"weight"`
+	Missing         bool   `json:"missing,omitempty"`
 }
 
 type ProgramSlot struct {

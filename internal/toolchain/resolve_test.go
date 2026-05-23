@@ -3,6 +3,8 @@ package toolchain
 import (
 	"os"
 	"path/filepath"
+	"runtime"
+	"strings"
 	"testing"
 )
 
@@ -61,5 +63,28 @@ func TestResolveHonorsExplicitOverride(t *testing.T) {
 	}
 	if tools.FFmpeg != ffmpeg || tools.FFprobe != ffmpeg {
 		t.Fatalf("tools = %+v, want %q for both", tools, ffmpeg)
+	}
+}
+
+func TestValidateExecutableRejectsNonExecutableFile(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("unix execute bits are not portable on windows")
+	}
+	path := filepath.Join(t.TempDir(), "ffmpeg")
+	if err := os.WriteFile(path, []byte("#!/bin/sh\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := validateExecutable(path); err == nil || !strings.Contains(err.Error(), "not executable") {
+		t.Fatalf("validateExecutable error = %v, want not executable", err)
+	}
+}
+
+func TestValidateExecutableRejectsEmptyFile(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "ffprobe")
+	if err := os.WriteFile(path, nil, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := validateExecutable(path); err == nil || !strings.Contains(err.Error(), "empty") {
+		t.Fatalf("validateExecutable error = %v, want empty", err)
 	}
 }

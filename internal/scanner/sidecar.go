@@ -24,6 +24,7 @@ type bookSidecar struct {
 
 func readBookSidecar(dir string) bookSidecar {
 	var out bookSidecar
+	out.mergeJSON(readJSONBookMetadata(dir))
 
 	if description := readFirstTextFile(dir, "desc.txt", "description.txt", "summary.txt"); description != "" {
 		out.Description = description
@@ -38,6 +39,39 @@ func readBookSidecar(dir string) bookSidecar {
 	}
 
 	return out
+}
+
+func (b *bookSidecar) mergeJSON(jsonMeta bookSidecar) {
+	if b.Title == "" {
+		b.Title = jsonMeta.Title
+	}
+	if len(b.Authors) == 0 {
+		b.Authors = jsonMeta.Authors
+	}
+	if len(b.Narrators) == 0 {
+		b.Narrators = jsonMeta.Narrators
+	}
+	if b.Publisher == "" {
+		b.Publisher = jsonMeta.Publisher
+	}
+	if b.PublishedDate == "" {
+		b.PublishedDate = jsonMeta.PublishedDate
+	}
+	if b.Description == "" {
+		b.Description = jsonMeta.Description
+	}
+	if len(b.Genres) == 0 {
+		b.Genres = jsonMeta.Genres
+	}
+	if b.Language == "" {
+		b.Language = jsonMeta.Language
+	}
+	if len(b.ISBNs) == 0 {
+		b.ISBNs = jsonMeta.ISBNs
+	}
+	if len(b.Series) == 0 {
+		b.Series = jsonMeta.Series
+	}
 }
 
 func (b *bookSidecar) mergeOPF(opf bookSidecar) {

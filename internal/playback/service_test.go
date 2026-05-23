@@ -6,8 +6,11 @@ import (
 
 	"github.com/bouliehaan/samo-server/internal/catalog"
 	"github.com/bouliehaan/samo-server/internal/storage"
+	"github.com/bouliehaan/samo-server/internal/users"
 	"github.com/bouliehaan/samo-server/migrations"
 )
+
+const testUserID = users.BootstrapUserID
 
 func TestPlaybackPatchUpdatesMusicTrack(t *testing.T) {
 	ctx := context.Background()
@@ -26,7 +29,7 @@ func TestPlaybackPatchUpdatesMusicTrack(t *testing.T) {
 	}
 
 	service := New(db)
-	updated, err := service.Patch(ctx, TargetMusicTrack, "track-1", PatchInput{
+	updated, err := service.Patch(ctx, testUserID, TargetMusicTrack, "track-1", PatchInput{
 		ProgressSeconds:     intPtr(42),
 		Rating:              intPtr(5),
 		Favorite:            boolPtr(true),
@@ -39,7 +42,7 @@ func TestPlaybackPatchUpdatesMusicTrack(t *testing.T) {
 		t.Fatalf("unexpected state: %+v", updated)
 	}
 
-	loaded, err := service.Get(ctx, TargetMusicTrack, "track-1")
+	loaded, err := service.Get(ctx, testUserID, TargetMusicTrack, "track-1")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -65,7 +68,7 @@ func TestPlaybackRejectsInvalidRating(t *testing.T) {
 	}
 
 	service := New(db)
-	_, err = service.Put(ctx, TargetMusicTrack, "track-1", catalog.PlaybackState{Rating: 9})
+	_, err = service.Put(ctx, testUserID, TargetMusicTrack, "track-1", catalog.PlaybackState{Rating: 9})
 	if err == nil {
 		t.Fatal("expected invalid rating error")
 	}

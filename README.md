@@ -41,6 +41,8 @@ Podcast RSS feeds are added through `/api/v1/shelf/podcast-feeds`. Internet radi
 
 External metadata lookup is disabled by default and can be enabled later with `SAMO_METADATA_PROVIDERS`. See [docs/metadata.md](docs/metadata.md) for provider names and search routes.
 
+Last.fm scrobbling is configured with `SAMO_LASTFM_API_KEY` and `SAMO_LASTFM_SHARED_SECRET`. See [docs/lastfm.md](docs/lastfm.md) for account linking and playback/scrobble behavior.
+
 ## Storage and scanning
 
 Samo stores catalog metadata in SQLite and scans configured music, audiobook, and podcast folders using bundled `ffmpeg`/`ffprobe` on Ubuntu. See [docs/install-ubuntu.md](docs/install-ubuntu.md) for deployment layout and [docs/storage-and-scanning.md](docs/storage-and-scanning.md) for scanner environment variables.

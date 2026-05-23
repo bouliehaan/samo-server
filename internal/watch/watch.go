@@ -214,12 +214,12 @@ func interestingEvent(event fsnotify.Event) bool {
 
 func isInterestingPath(path string) bool {
 	name := strings.ToLower(filepath.Base(path))
-	if name == "desc.txt" || name == "description.txt" || name == "summary.txt" || name == "reader.txt" || name == "narrator.txt" || name == "narrators.txt" {
+	if name == "desc.txt" || name == "description.txt" || name == "summary.txt" || name == "reader.txt" || name == "narrator.txt" || name == "narrators.txt" || name == "metadata.json" {
 		return true
 	}
 	switch strings.ToLower(filepath.Ext(path)) {
 	case ".aac", ".aif", ".aiff", ".alac", ".flac", ".m4a", ".m4b", ".mp3", ".ogg", ".opus", ".wav", ".wma",
-		".opf", ".jpg", ".jpeg", ".png", ".webp":
+		".opf", ".nfo", ".cue", ".jpg", ".jpeg", ".png", ".webp":
 		return true
 	default:
 		return false

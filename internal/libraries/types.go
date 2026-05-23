@@ -5,6 +5,7 @@ import "time"
 const (
 	KindMusic = "music"
 	KindShelf = "shelf"
+	KindMixed = "mixed"
 
 	MediaTypeBook    = "book"
 	MediaTypePodcast = "podcast"

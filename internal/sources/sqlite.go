@@ -3,6 +3,7 @@ package sources
 import (
 	"database/sql"
 	"encoding/json"
+	"strings"
 	"time"
 
 	"github.com/bouliehaan/samo-server/internal/catalog"
@@ -62,8 +63,13 @@ func scanPodcastFeed(row scanner) (PodcastFeed, error) {
 func scanInternetRadioStation(row scanner) (InternetRadioStation, error) {
 	var station InternetRadioStation
 	var enabled int
+	var probeEnabled int
 	var tagsJSON string
 	var lastCheckedAt, createdAt, updatedAt sql.NullString
+	var nowPlayingRaw, nowPlayingArtist, nowPlayingTitle sql.NullString
+	var nowPlayingUpdatedAt, nextProbeAt, lastProbeStartedAt, lastProbeFinishedAt sql.NullString
+	var lastProbeError, probeStatus sql.NullString
+	var probeInterval, consecutiveProbeErrors int
 	if err := row.Scan(
 		&station.ID,
 		&station.Name,
@@ -81,6 +87,18 @@ func scanInternetRadioStation(row scanner) (InternetRadioStation, error) {
 		&lastCheckedAt,
 		&createdAt,
 		&updatedAt,
+		&nowPlayingRaw,
+		&nowPlayingArtist,
+		&nowPlayingTitle,
+		&nowPlayingUpdatedAt,
+		&probeEnabled,
+		&probeInterval,
+		&nextProbeAt,
+		&lastProbeStartedAt,
+		&lastProbeFinishedAt,
+		&lastProbeError,
+		&consecutiveProbeErrors,
+		&probeStatus,
 	); err != nil {
 		return InternetRadioStation{}, err
 	}
@@ -89,7 +107,38 @@ func scanInternetRadioStation(row scanner) (InternetRadioStation, error) {
 	station.LastCheckedAt = parseTimePtr(lastCheckedAt)
 	station.CreatedAt = parseTimePtr(createdAt)
 	station.UpdatedAt = parseTimePtr(updatedAt)
+
+	raw := strings.TrimSpace(nullableString(nowPlayingRaw))
+	title := strings.TrimSpace(nullableString(nowPlayingTitle))
+	artist := strings.TrimSpace(nullableString(nowPlayingArtist))
+	updatedAtPtr := parseTimePtr(nowPlayingUpdatedAt)
+	if raw != "" || title != "" || artist != "" {
+		station.NowPlaying = &InternetRadioNowPlaying{
+			Raw:       raw,
+			Title:     title,
+			Artist:    artist,
+			UpdatedAt: updatedAtPtr,
+		}
+	}
+
+	station.Probe = ProbeSchedule{
+		Enabled:             probeEnabled != 0,
+		IntervalSeconds:     probeInterval,
+		NextProbeAt:         parseTimePtr(nextProbeAt),
+		LastProbeStartedAt:  parseTimePtr(lastProbeStartedAt),
+		LastProbeFinishedAt: parseTimePtr(lastProbeFinishedAt),
+		LastError:           strings.TrimSpace(nullableString(lastProbeError)),
+		Status:              strings.TrimSpace(nullableString(probeStatus)),
+		ConsecutiveErrors:   consecutiveProbeErrors,
+	}
 	return station, nil
+}
+
+func nullableString(value sql.NullString) string {
+	if !value.Valid {
+		return ""
+	}
+	return value.String
 }
 
 func paginate[T any](items []T, page catalog.PageRequest) catalog.Page[T] {

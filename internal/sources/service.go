@@ -18,6 +18,7 @@ import (
 
 	"github.com/bouliehaan/samo-server/internal/catalog"
 	"github.com/bouliehaan/samo-server/internal/media"
+	"github.com/bouliehaan/samo-server/internal/podcastcache"
 )
 
 const (
@@ -34,19 +35,30 @@ var (
 )
 
 type Service struct {
-	db     *sql.DB
-	client *http.Client
+	db           *sql.DB
+	client       *http.Client
+	podcastCache *podcastcache.Service
 }
 
-func New(db *sql.DB) *Service {
-	return NewWithHTTPClient(db, &http.Client{Timeout: 30 * time.Second})
+type Options struct {
+	HTTPClient   *http.Client
+	PodcastCache *podcastcache.Service
 }
 
-func NewWithHTTPClient(db *sql.DB, client *http.Client) *Service {
+func New(db *sql.DB, opts ...Options) *Service {
+	var options Options
+	if len(opts) > 0 {
+		options = opts[0]
+	}
+	client := options.HTTPClient
 	if client == nil {
 		client = &http.Client{Timeout: 30 * time.Second}
 	}
-	return &Service{db: db, client: client}
+	return &Service{db: db, client: client, podcastCache: options.PodcastCache}
+}
+
+func NewWithHTTPClient(db *sql.DB, client *http.Client) *Service {
+	return New(db, Options{HTTPClient: client})
 }
 
 func (s *Service) AddPodcastFeed(ctx context.Context, input AddPodcastFeedInput) (PodcastFeed, error) {
@@ -128,6 +140,13 @@ func (s *Service) ListPodcastFeeds(ctx context.Context, page catalog.PageRequest
 	if err := rows.Err(); err != nil {
 		return catalog.Page[PodcastFeed]{}, err
 	}
+	for index, feed := range feeds {
+		projected, err := s.projectPodcastFeed(ctx, feed)
+		if err != nil {
+			return catalog.Page[PodcastFeed]{}, err
+		}
+		feeds[index] = projected
+	}
 	return paginate(feeds, page), nil
 }
 
@@ -144,7 +163,7 @@ func (s *Service) GetPodcastFeed(ctx context.Context, id string) (PodcastFeed, e
 	if err != nil {
 		return PodcastFeed{}, err
 	}
-	return feed, nil
+	return s.projectPodcastFeed(ctx, feed)
 }
 
 func (s *Service) DeletePodcastFeed(ctx context.Context, id string) error {
@@ -166,6 +185,11 @@ func (s *Service) DeletePodcastFeed(ctx context.Context, id string) error {
 	}
 	if _, err := tx.ExecContext(ctx, `DELETE FROM shelf_items WHERE id = ?`, podcastID); err != nil {
 		return fmt.Errorf("delete podcast feed item: %w", err)
+	}
+	if _, err := tx.ExecContext(ctx, `
+		DELETE FROM metadata_overrides
+		WHERE target_kind = ? AND target_id = ?`, catalog.OverrideKindPodcastFeed, strings.TrimSpace(id)); err != nil {
+		return fmt.Errorf("delete podcast feed override: %w", err)
 	}
 	if err := refreshRemotePodcastLibraryStats(ctx, tx); err != nil {
 		return err
@@ -203,9 +227,10 @@ func (s *Service) AddInternetRadioStation(ctx context.Context, input AddInternet
 	_, err = s.db.ExecContext(ctx, `
 		INSERT INTO internet_radio_stations (
 		  id, name, description, stream_url, homepage_url, image_url, content_type, codec, bitrate,
-		  country, language, tags_json, enabled, updated_at
+		  country, language, tags_json, enabled, updated_at,
+		  probe_enabled, probe_interval_seconds, next_probe_at
 		)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, 1, ?, ?)
 		ON CONFLICT(id) DO UPDATE SET
 		  name = excluded.name,
 		  description = excluded.description,
@@ -222,7 +247,8 @@ func (s *Service) AddInternetRadioStation(ctx context.Context, input AddInternet
 		  updated_at = CURRENT_TIMESTAMP`,
 		id, name, strings.TrimSpace(input.Description), streamURL, homepageURL, imageURL,
 		strings.TrimSpace(input.ContentType), strings.TrimSpace(input.Codec), input.Bitrate,
-		strings.TrimSpace(input.Country), strings.TrimSpace(input.Language), jsonText(cleanStringSlice(input.Tags)), boolInt(enabled))
+		strings.TrimSpace(input.Country), strings.TrimSpace(input.Language), jsonText(cleanStringSlice(input.Tags)), boolInt(enabled),
+		DefaultProbeIntervalSeconds, scheduleInitialPoll())
 	if err != nil {
 		return InternetRadioStation{}, fmt.Errorf("upsert internet radio station: %w", err)
 	}
@@ -233,10 +259,7 @@ func (s *Service) ListInternetRadioStations(ctx context.Context, page catalog.Pa
 	if s == nil || s.db == nil {
 		return catalog.Page[InternetRadioStation]{}, ErrDisabled
 	}
-	rows, err := s.db.QueryContext(ctx, `
-		SELECT id, name, description, stream_url, homepage_url, image_url, content_type, codec, bitrate,
-		       country, language, tags_json, enabled, last_checked_at, created_at, updated_at
-		FROM internet_radio_stations
+	rows, err := s.db.QueryContext(ctx, internetRadioStationSelectSQL+`
 		ORDER BY name COLLATE NOCASE`)
 	if err != nil {
 		return catalog.Page[InternetRadioStation]{}, fmt.Errorf("list internet radio stations: %w", err)
@@ -261,10 +284,7 @@ func (s *Service) GetInternetRadioStation(ctx context.Context, id string) (Inter
 	if s == nil || s.db == nil {
 		return InternetRadioStation{}, ErrDisabled
 	}
-	row := s.db.QueryRowContext(ctx, `
-		SELECT id, name, description, stream_url, homepage_url, image_url, content_type, codec, bitrate,
-		       country, language, tags_json, enabled, last_checked_at, created_at, updated_at
-		FROM internet_radio_stations
+	row := s.db.QueryRowContext(ctx, internetRadioStationSelectSQL+`
 		WHERE id = ?`, strings.TrimSpace(id))
 	station, err := scanInternetRadioStation(row)
 	if errors.Is(err, sql.ErrNoRows) {
@@ -312,6 +332,22 @@ func (s *Service) fetchPodcastFeed(ctx context.Context, feedURL string) (parsedP
 }
 
 func (s *Service) savePodcastFeed(ctx context.Context, feedURL string, parsed parsedPodcastFeed) error {
+	idx, err := catalog.LoadOverrideIndex(ctx, s.db)
+	if err != nil {
+		return err
+	}
+
+	feedID := podcastFeedID(feedURL)
+	podcastID := podcastItemID(feedURL)
+	parsed, err = s.guardPodcastFeedSave(ctx, idx, feedID, podcastID, parsed)
+	if err != nil {
+		return err
+	}
+	guardedEpisodes, err := s.guardPodcastEpisodesSave(ctx, idx, podcastID, parsed.Episodes)
+	if err != nil {
+		return err
+	}
+
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return err
@@ -322,8 +358,6 @@ func (s *Service) savePodcastFeed(ctx context.Context, feedURL string, parsed pa
 		return err
 	}
 
-	feedID := podcastFeedID(feedURL)
-	podcastID := podcastItemID(feedURL)
 	episodeCount := len(parsed.Episodes)
 	categories := cleanStringSlice(parsed.Categories)
 	podcastMeta := catalog.PodcastMetadata{
@@ -408,12 +442,8 @@ func (s *Service) savePodcastFeed(ctx context.Context, feedURL string, parsed pa
 		return fmt.Errorf("upsert podcast feed source: %w", err)
 	}
 
-	for _, parsedEpisode := range parsed.Episodes {
-		episodeID := podcastEpisodeID(podcastID, parsedEpisode)
-		externalIDs := catalog.ExternalIDs{
-			FeedGUID: parsedEpisode.GUID,
-			URLs:     cleanStringSlice([]string{parsedEpisode.Link, parsedEpisode.EnclosureURL}),
-		}
+	for index, parsedEpisode := range parsed.Episodes {
+		episode := guardedEpisodes[index]
 		if _, err := tx.ExecContext(ctx, `
 			INSERT INTO podcast_episodes (
 			  id, library_id, podcast_id, title, subtitle, description, published_at, season, episode,
@@ -438,11 +468,11 @@ func (s *Service) savePodcastFeed(ctx context.Context, feedURL string, parsed pa
 			  enclosure_bytes = excluded.enclosure_bytes,
 			  external_ids_json = excluded.external_ids_json,
 			  updated_at = CURRENT_TIMESTAMP`,
-			episodeID, remotePodcastLibraryID, podcastID, parsedEpisode.Title, parsedEpisode.Subtitle,
-			parsedEpisode.Description, timeString(parsedEpisode.PublishedAt), parsedEpisode.Season,
-			parsedEpisode.Episode, parsedEpisode.EpisodeType, parsedEpisode.DurationSeconds,
-			boolInt(parsedEpisode.Explicit), parsedEpisode.EnclosureURL, parsedEpisode.EnclosureType,
-			parsedEpisode.EnclosureBytes, jsonText(externalIDs)); err != nil {
+			episode.ID, episode.LibraryID, episode.PodcastID, episode.Title, episode.Subtitle,
+			episode.Description, timeString(episode.PublishedAt), episode.Season,
+			episode.Episode, episode.EpisodeType, episode.DurationSeconds,
+			boolInt(episode.Explicit), episode.EnclosureURL, episode.EnclosureType,
+			episode.EnclosureBytes, jsonText(episode.ExternalIDs)); err != nil {
 			return fmt.Errorf("upsert feed episode %q: %w", parsedEpisode.Title, err)
 		}
 	}
@@ -450,8 +480,13 @@ func (s *Service) savePodcastFeed(ctx context.Context, feedURL string, parsed pa
 	if err := refreshRemotePodcastLibraryStats(ctx, tx); err != nil {
 		return err
 	}
-
-	return tx.Commit()
+	if err := tx.Commit(); err != nil {
+		return err
+	}
+	if s.podcastCache != nil {
+		return s.podcastCache.PruneAfterFeedSave(ctx)
+	}
+	return nil
 }
 
 func (s *Service) recordPodcastFeedError(ctx context.Context, id string, cause error) error {

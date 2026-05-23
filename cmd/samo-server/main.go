@@ -11,14 +11,21 @@ import (
 	"github.com/bouliehaan/samo-server/internal/config"
 	"github.com/bouliehaan/samo-server/internal/covers"
 	"github.com/bouliehaan/samo-server/internal/files"
+	"github.com/bouliehaan/samo-server/internal/lastfm"
 	"github.com/bouliehaan/samo-server/internal/libraries"
 	"github.com/bouliehaan/samo-server/internal/metadata"
 	"github.com/bouliehaan/samo-server/internal/playback"
+	"github.com/bouliehaan/samo-server/internal/playlists"
+	"github.com/bouliehaan/samo-server/internal/podcastcache"
+	"github.com/bouliehaan/samo-server/internal/podcaststream"
 	"github.com/bouliehaan/samo-server/internal/radio"
 	"github.com/bouliehaan/samo-server/internal/scanner"
+	"github.com/bouliehaan/samo-server/internal/search"
+	"github.com/bouliehaan/samo-server/internal/shelfuser"
 	"github.com/bouliehaan/samo-server/internal/sources"
 	"github.com/bouliehaan/samo-server/internal/storage"
 	"github.com/bouliehaan/samo-server/internal/toolchain"
+	"github.com/bouliehaan/samo-server/internal/users"
 	"github.com/bouliehaan/samo-server/internal/watch"
 	"github.com/bouliehaan/samo-server/migrations"
 )
@@ -82,22 +89,94 @@ func main() {
 		log.Fatal(err)
 	}
 
-	radioService, err := radio.NewService(radioConfig)
+	radioService, err := radio.NewServiceFromDB(ctx, db, radioConfig)
 	if err != nil {
 		log.Fatal(err)
 	}
 
 	catalogService := catalog.NewService(catalogSeed)
 	playbackService := playback.New(db)
-	filesService := files.New(db, coverService.CoverDir())
 	metadataService := metadata.NewDefaultService(cfg.MetadataProviders, cfg.MetadataUserAgent)
-	sourceService := sources.New(db)
+	coverService.SetRemoteOptions(covers.RemoteOptions{})
+	metadataApplyService := metadata.NewMetadataApplyServiceWithOptions(db, metadata.MetadataApplyOptions{
+		CoverDownloader: coverService,
+		Logger:          log.Printf,
+	})
+	playlistService := playlists.New(db)
+	podcastStreamService := podcaststream.New()
+	searchService := search.New()
+	searchService.Rebuild(catalogSeed)
+	shelfUserService := shelfuser.New(db)
+	podcastCacheService, err := podcastcache.New(db, podcastcache.Options{
+		CacheDir:     filepath.Join(cfg.DataDir, "podcast-cache"),
+		Enabled:      cfg.PodcastCache,
+		MaxBytes:     cfg.PodcastCacheMaxBytes,
+		MaxAge:       cfg.PodcastCacheMaxAge,
+		MaxFileBytes: cfg.PodcastCacheMaxFile,
+		Stream:       podcastStreamService,
+	})
+	if err != nil {
+		log.Fatal(err)
+	}
+	filesService := files.New(db, coverService.CoverDir(), podcastCacheService.CacheDir())
+	sourceService := sources.New(db, sources.Options{PodcastCache: podcastCacheService})
+	userService := users.New(users.ServiceOptions{
+		DB:             db,
+		LegacyAPIToken: cfg.APIToken,
+	})
+	// Bootstrap only creates an admin when env vars supply credentials. When
+	// the operator leaves them empty, first-run setup is handed off to the
+	// /setup wizard instead of a logged auto-generated password.
+	bootstrapResult, err := userService.BootstrapWithResult(ctx, users.BootstrapInput{
+		AdminUsername: cfg.BootstrapUsername,
+		AdminPassword: cfg.BootstrapPassword,
+	})
+	if err != nil {
+		log.Fatal(err)
+	}
+	if bootstrapResult.CreatedAdmin {
+		log.Printf("created bootstrap admin user: %s", bootstrapResult.AdminUsername)
+		if bootstrapResult.GeneratedPassword != "" {
+			log.Printf("generated bootstrap admin password for %s: %s", bootstrapResult.AdminUsername, bootstrapResult.GeneratedPassword)
+			log.Printf("set SAMO_BOOTSTRAP_PASSWORD to choose a password explicitly, then rotate this generated password after first login")
+		}
+	}
+	if bootstrapResult.UpdatedPassword {
+		log.Printf("updated bootstrap password for user: %s", bootstrapResult.AdminUsername)
+	}
+	if bootstrapResult.EnsuredServerToken {
+		log.Printf("legacy SAMO_API_TOKEN mapped to bootstrap server user")
+	}
+	setupHintNeeded := false
+	if !bootstrapResult.CreatedAdmin && !bootstrapResult.UpdatedPassword {
+		if existingUsers, err := userService.List(ctx); err == nil {
+			hasAdmin := false
+			for _, user := range existingUsers {
+				if user.ID == users.BootstrapUserID {
+					continue
+				}
+				if user.Role == users.RoleAdmin {
+					hasAdmin = true
+					break
+				}
+			}
+			setupHintNeeded = !hasAdmin
+		}
+	}
+
+	lastfmService := lastfm.NewService(lastfm.ServiceOptions{
+		DB:           db,
+		APIKey:       cfg.LastFMAPIKey,
+		SharedSecret: cfg.LastFMSharedSecret,
+		Logger:       log.Printf,
+	})
 	reloadCatalog := func(ctx context.Context) error {
 		seed, err := catalog.LoadSeedFromDB(ctx, db)
 		if err != nil {
 			return err
 		}
 		catalogService.Replace(seed)
+		searchService.Rebuild(seed)
 		return nil
 	}
 	handler := api.NewServer(api.ServerOptions{
@@ -108,10 +187,31 @@ func main() {
 		Covers:        coverService,
 		Files:         filesService,
 		Metadata:      metadataService,
+		MetadataApply: metadataApplyService,
+		Playlists:     playlistService,
+		PodcastStream: podcastStreamService,
+		PodcastCache:  podcastCacheService,
+		Search:        searchService,
+		ShelfUser:     shelfUserService,
 		Radio:         radioService,
 		Sources:       sourceService,
+		LastFM:        lastfmService,
+		Users:         userService,
 		ReloadCatalog: reloadCatalog,
 	})
+
+	if cfg.LastFMPoll && lastfmService.Enabled() {
+		poller := lastfm.NewPoller(lastfm.PollerOptions{
+			Service: lastfmService,
+			Tick:    cfg.LastFMPollTick,
+			Logger:  log.Printf,
+		})
+		go func() {
+			if err := poller.Run(ctx); err != nil && err != context.Canceled {
+				log.Printf("last.fm queue poller stopped: %v", err)
+			}
+		}()
+	}
 
 	if cfg.PodcastPoll {
 		poller := sources.NewPoller(sources.PollerOptions{
@@ -123,6 +223,19 @@ func main() {
 		go func() {
 			if err := poller.Run(ctx); err != nil && err != context.Canceled {
 				log.Printf("podcast feed poller stopped: %v", err)
+			}
+		}()
+	}
+
+	if cfg.InternetRadioProbe {
+		probe := sources.NewProbePoller(sources.ProbePollerOptions{
+			Sources: sourceService,
+			Tick:    cfg.InternetRadioProbeTick,
+			Logger:  log.Printf,
+		})
+		go func() {
+			if err := probe.Run(ctx); err != nil && err != context.Canceled {
+				log.Printf("internet radio probe poller stopped: %v", err)
 			}
 		}()
 	}
@@ -155,14 +268,30 @@ func main() {
 		}()
 	}
 
-	log.Printf("samo-server listening on %s", cfg.Addr)
+	listener, err := listenWithFallback(cfg.Addr, 20)
+	if err != nil {
+		log.Fatal(err)
+	}
+	actualAddr := listener.Addr().String()
+	if actualAddr != cfg.Addr {
+		log.Printf("requested %s was in use; samo-server bound to %s instead", cfg.Addr, actualAddr)
+	}
+	log.Printf("samo-server listening on %s", actualAddr)
+	if setupHintNeeded {
+		log.Printf("no admin user configured; open http://localhost%s/setup in a browser to finish first-run setup", normalizedDisplayPort(actualAddr))
+	}
 	log.Printf("sqlite database: %s", cfg.DBPath)
 	log.Printf("ffmpeg: %s", tools.FFmpeg)
 	log.Printf("ffprobe: %s", tools.FFprobe)
 	log.Printf("cover cache: %s", coverDir)
 	log.Printf("radio config: %s (%d station(s))", cfg.RadioConfigPath, radioService.StationCount())
+	if lastfmService.Enabled() {
+		log.Printf("last.fm scrobbling: enabled")
+	} else {
+		log.Printf("last.fm scrobbling: disabled (set SAMO_LASTFM_API_KEY and SAMO_LASTFM_SHARED_SECRET)")
+	}
 
-	if err := http.ListenAndServe(cfg.Addr, handler); err != nil {
+	if err := http.Serve(listener, handler); err != nil {
 		log.Fatal(err)
 	}
 }

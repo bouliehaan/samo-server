@@ -1,13 +1,16 @@
 package api
 
 import (
+	"context"
 	"errors"
-	"fmt"
 	"net/http"
+	"strconv"
 	"strings"
+	"time"
 
 	"github.com/bouliehaan/samo-server/internal/catalog"
 	"github.com/bouliehaan/samo-server/internal/files"
+	"github.com/bouliehaan/samo-server/internal/podcaststream"
 )
 
 func (s *Server) getMediaFile(w http.ResponseWriter, r *http.Request) {
@@ -26,19 +29,19 @@ func (s *Server) streamMediaFile(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) streamMusicTrack(w http.ResponseWriter, r *http.Request) {
-	track, err := s.catalog.MusicTrack(r.PathValue("id"))
+	principal, ok := s.currentUser(r)
+	if !ok {
+		writeError(w, http.StatusUnauthorized, "unauthorized")
+		return
+	}
+	track, err := s.musicTrackWithUserPlayback(r.Context(), principal.User.ID, r.PathValue("id"))
 	if err != nil {
 		writeCatalogError(w, err)
 		return
 	}
-	fileID, err := mediaFileIDFromRequest(r, track.AudioFiles)
-	if err != nil {
-		writeError(w, http.StatusBadRequest, err.Error())
-		return
-	}
-	if err := s.filesService().ServeMediaFile(r.Context(), fileID, w, r); err != nil {
-		writeFilesError(w, err)
-	}
+	resume := streamResumeSeconds(r, track.Playback.ProgressSeconds)
+	s.notifyMusicTrackLastFM(r.Context(), principal.User.ID, track.ID, catalog.PlaybackState{}, catalog.PlaybackState{ProgressSeconds: resume}, nil, "stream", resume)
+	s.streamCatalogAudioFiles(w, r, track.AudioFiles, track.Playback, track.DiscNumber)
 }
 
 func (s *Server) streamShelfEpisode(w http.ResponseWriter, r *http.Request) {
@@ -47,14 +50,11 @@ func (s *Server) streamShelfEpisode(w http.ResponseWriter, r *http.Request) {
 		writeCatalogError(w, err)
 		return
 	}
-	fileID, err := mediaFileIDFromRequest(r, episode.AudioFiles)
-	if err != nil {
-		writeError(w, http.StatusBadRequest, err.Error())
+	if len(episode.AudioFiles) == 0 {
+		s.streamPodcastEnclosure(w, r, episode)
 		return
 	}
-	if err := s.filesService().ServeMediaFile(r.Context(), fileID, w, r); err != nil {
-		writeFilesError(w, err)
-	}
+	s.streamCatalogAudioFiles(w, r, episode.AudioFiles, episode.Progress, 0)
 }
 
 func (s *Server) streamShelfItem(w http.ResponseWriter, r *http.Request) {
@@ -63,34 +63,95 @@ func (s *Server) streamShelfItem(w http.ResponseWriter, r *http.Request) {
 		writeCatalogError(w, err)
 		return
 	}
-	fileID, err := mediaFileIDFromRequest(r, item.AudioFiles)
+	s.streamCatalogAudioFiles(w, r, item.AudioFiles, item.Progress, 0)
+}
+
+func (s *Server) streamCatalogAudioFiles(w http.ResponseWriter, r *http.Request, audioFiles []catalog.AudioFile, playback catalog.PlaybackState, defaultDisc int) {
+	target, err := catalog.SelectStreamTarget(audioFiles, playback, catalog.StreamSelectQueryFromRequest(r), defaultDisc)
 	if err != nil {
-		writeError(w, http.StatusBadRequest, err.Error())
+		writeStreamSelectError(w, err)
 		return
 	}
-	if err := s.filesService().ServeMediaFile(r.Context(), fileID, w, r); err != nil {
+	w.Header().Set("X-Samo-Media-File-Id", target.FileID)
+	if target.GlobalSeconds > 0 {
+		w.Header().Set("X-Samo-Stream-Global-Seconds", strconv.Itoa(target.GlobalSeconds))
+	}
+	if err := s.filesService().ServeMediaFileAt(r.Context(), target.FileID, target.OffsetSeconds, w, r); err != nil {
 		writeFilesError(w, err)
 	}
 }
 
-func mediaFileIDFromRequest(r *http.Request, files []catalog.AudioFile) (string, error) {
-	if len(files) == 0 {
-		return "", errNoAudioFiles()
+func (s *Server) streamPodcastEnclosure(w http.ResponseWriter, r *http.Request, episode catalog.PodcastEpisode) {
+	if strings.TrimSpace(episode.EnclosureURL) == "" {
+		writeError(w, http.StatusNotFound, "no audio files available")
+		return
 	}
-	if raw := strings.TrimSpace(r.URL.Query().Get("mediaFileId")); raw != "" {
-		for _, file := range files {
-			if file.ID == raw {
-				return raw, nil
+	resume := streamResumeSeconds(r, episode.Progress.ProgressSeconds)
+	if s.podcastCache != nil && s.podcastCache.Enabled() {
+		if cached, ok, err := s.podcastCache.Lookup(r.Context(), episode.ID, episode.EnclosureURL); err != nil {
+			writeError(w, http.StatusInternalServerError, err.Error())
+			return
+		} else if ok {
+			w.Header().Set("X-Samo-Stream-Source", "cache")
+			if resume > 0 {
+				w.Header().Set("X-Samo-Stream-Offset-Seconds", strconv.Itoa(resume))
 			}
+			if err := s.filesService().ServeReadablePathAt(r.Context(), cached.Path, cached.ContentType, episode.DurationSeconds, resume, w, r); err != nil {
+				writeFilesError(w, err)
+			}
+			return
 		}
-		return "", errUnknownMediaFile()
 	}
-	return files[0].ID, nil
+	if err := s.podcastStreamService().ServeEnclosure(r.Context(), podcaststream.Enclosure{
+		URL:             episode.EnclosureURL,
+		ContentType:     episode.EnclosureType,
+		SizeBytes:       episode.EnclosureBytes,
+		DurationSeconds: episode.DurationSeconds,
+		OffsetSeconds:   resume,
+	}, w, r); err != nil {
+		writePodcastStreamError(w, err)
+		return
+	}
+	if s.podcastCache != nil && s.podcastCache.Enabled() {
+		episodeCopy := episode
+		go func() {
+			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Minute)
+			defer cancel()
+			_ = s.podcastCache.EnsureCached(ctx, episodeCopy)
+		}()
+	}
 }
 
-func errNoAudioFiles() error { return fmt.Errorf("no audio files available") }
-func errUnknownMediaFile() error {
-	return fmt.Errorf("mediaFileId does not belong to this item")
+func (s *Server) podcastStreamService() *podcaststream.Service {
+	if s.podcastStream == nil {
+		panic("podcast stream service is not configured")
+	}
+	return s.podcastStream
+}
+
+func writePodcastStreamError(w http.ResponseWriter, err error) {
+	switch {
+	case errors.Is(err, podcaststream.ErrInvalidEnclosure), errors.Is(err, podcaststream.ErrForbiddenEnclosure):
+		writeError(w, http.StatusBadRequest, err.Error())
+	case errors.Is(err, podcaststream.ErrUpstream):
+		writeError(w, http.StatusBadGateway, err.Error())
+	case errors.Is(err, podcaststream.ErrDisabled):
+		writeError(w, http.StatusServiceUnavailable, err.Error())
+	default:
+		writeError(w, http.StatusInternalServerError, err.Error())
+	}
+}
+
+func writeStreamSelectError(w http.ResponseWriter, err error) {
+	message := strings.TrimSpace(err.Error())
+	switch message {
+	case "no audio files available":
+		writeError(w, http.StatusNotFound, message)
+	case "mediaFileId does not belong to this item":
+		writeError(w, http.StatusBadRequest, message)
+	default:
+		writeError(w, http.StatusBadRequest, message)
+	}
 }
 
 func (s *Server) serveMusicAlbumCover(w http.ResponseWriter, r *http.Request) {
@@ -155,4 +216,15 @@ func writeFilesError(w http.ResponseWriter, err error) {
 	default:
 		writeError(w, http.StatusInternalServerError, err.Error())
 	}
+}
+
+func streamResumeSeconds(r *http.Request, savedProgress int) int {
+	query := catalog.StreamSelectQueryFromRequest(r)
+	if query.ProgressSeconds > 0 {
+		return query.ProgressSeconds
+	}
+	if savedProgress > 0 {
+		return savedProgress
+	}
+	return 0
 }

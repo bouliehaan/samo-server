@@ -9,12 +9,17 @@ import (
 )
 
 func (s *Server) getPlayback(w http.ResponseWriter, r *http.Request) {
+	principal, ok := s.currentUser(r)
+	if !ok {
+		writeError(w, http.StatusUnauthorized, "unauthorized")
+		return
+	}
 	kind, err := playback.ParseTargetKind(r.PathValue("kind"))
 	if err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	state, err := s.playbackService().Get(r.Context(), kind, r.PathValue("id"))
+	state, err := s.playbackService().Get(r.Context(), principal.User.ID, kind, r.PathValue("id"))
 	if err != nil {
 		writePlaybackError(w, err)
 		return
@@ -23,45 +28,81 @@ func (s *Server) getPlayback(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) putPlayback(w http.ResponseWriter, r *http.Request) {
+	principal, ok := s.currentUser(r)
+	if !ok {
+		writeError(w, http.StatusUnauthorized, "unauthorized")
+		return
+	}
 	kind, err := playback.ParseTargetKind(r.PathValue("kind"))
 	if err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
+	}
+	id := r.PathValue("id")
+	var before catalog.PlaybackState
+	if kind == playback.TargetMusicTrack {
+		if state, err := s.playbackService().Get(r.Context(), principal.User.ID, kind, id); err == nil {
+			before = state
+		}
+	} else if kind == playback.TargetShelfItem {
+		if state, err := s.playbackService().Get(r.Context(), principal.User.ID, kind, id); err == nil {
+			before = state
+		}
 	}
 	var state catalog.PlaybackState
 	if !readJSONBody(w, r, &state) {
 		return
 	}
-	updated, err := s.playbackService().Put(r.Context(), kind, r.PathValue("id"), state)
+	updated, err := s.playbackService().Put(r.Context(), principal.User.ID, kind, id, state)
 	if err != nil {
 		writePlaybackError(w, err)
 		return
 	}
-	if err := s.reloadCatalogProjection(r); err != nil {
-		writeError(w, http.StatusInternalServerError, err.Error())
-		return
+	if kind == playback.TargetMusicTrack {
+		s.notifyMusicTrackLastFM(r.Context(), principal.User.ID, id, before, updated, nil, "playback-put", 0)
+	}
+	if kind == playback.TargetShelfItem {
+		s.recordShelfListeningSession(r.Context(), principal.User.ID, id, before, updated, nil)
 	}
 	writeJSON(w, http.StatusOK, updated)
 }
 
 func (s *Server) patchPlayback(w http.ResponseWriter, r *http.Request) {
+	principal, ok := s.currentUser(r)
+	if !ok {
+		writeError(w, http.StatusUnauthorized, "unauthorized")
+		return
+	}
 	kind, err := playback.ParseTargetKind(r.PathValue("kind"))
 	if err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
+	id := r.PathValue("id")
+	var before catalog.PlaybackState
+	if kind == playback.TargetMusicTrack && s.lastfm != nil && s.lastfm.Enabled() {
+		if state, err := s.playbackService().Get(r.Context(), principal.User.ID, kind, id); err == nil {
+			before = state
+		}
+	} else if kind == playback.TargetShelfItem {
+		if state, err := s.playbackService().Get(r.Context(), principal.User.ID, kind, id); err == nil {
+			before = state
+		}
+	}
 	var patch playback.PatchInput
 	if !readJSONBody(w, r, &patch) {
 		return
 	}
-	updated, err := s.playbackService().Patch(r.Context(), kind, r.PathValue("id"), patch)
+	updated, err := s.playbackService().Patch(r.Context(), principal.User.ID, kind, id, patch)
 	if err != nil {
 		writePlaybackError(w, err)
 		return
 	}
-	if err := s.reloadCatalogProjection(r); err != nil {
-		writeError(w, http.StatusInternalServerError, err.Error())
-		return
+	if kind == playback.TargetMusicTrack {
+		s.notifyMusicTrackLastFM(r.Context(), principal.User.ID, id, before, updated, &patch, "playback-patch", 0)
+	}
+	if kind == playback.TargetShelfItem {
+		s.recordShelfListeningSession(r.Context(), principal.User.ID, id, before, updated, &patch)
 	}
 	writeJSON(w, http.StatusOK, updated)
 }

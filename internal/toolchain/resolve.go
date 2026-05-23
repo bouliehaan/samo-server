@@ -78,8 +78,14 @@ func validateExecutable(path string) (string, error) {
 	if info.IsDir() {
 		return "", fmt.Errorf("%q is a directory", absolute)
 	}
+	if !info.Mode().IsRegular() {
+		return "", fmt.Errorf("%q is not a regular file", absolute)
+	}
 	if info.Size() == 0 {
 		return "", fmt.Errorf("%q is empty", absolute)
+	}
+	if info.Mode().Perm()&0o111 == 0 {
+		return "", fmt.Errorf("%q is not executable", absolute)
 	}
 	return absolute, nil
 }

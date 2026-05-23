@@ -10,7 +10,9 @@ import (
 )
 
 func (s *Service) Stream(ctx context.Context, stationID string, startedAt time.Time, dst io.Writer) error {
+	s.mu.RLock()
 	station, ok := s.stations[normalizeID(stationID)]
+	s.mu.RUnlock()
 	if !ok {
 		return ErrStationNotFound
 	}

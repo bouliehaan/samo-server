@@ -17,6 +17,8 @@ func (s *Scanner) scanMusicFile(ctx context.Context, library Library, root strin
 
 	relPath, _ := filepath.Rel(root, path)
 	tags := probe.Tags
+	albumDir := filepath.Dir(path)
+	albumSidecar := readMusicAlbumSidecar(albumDir)
 	title := firstTag(tags, "title")
 	if title == "" {
 		title = strings.TrimSuffix(filepath.Base(path), filepath.Ext(path))
@@ -31,17 +33,19 @@ func (s *Scanner) scanMusicFile(ctx context.Context, library Library, root strin
 		albumArtistNames = []string{artistNames[0]}
 	}
 
-	artists := musicArtistsFromNames(artistNames, splitTag(tags, "musicbrainz_artistid", "musicbrainz_artist_id"))
-	albumArtists := musicArtistsFromNames(albumArtistNames, splitTag(tags, "musicbrainz_albumartistid", "musicbrainz_albumartist_id"))
+	artistSortNames := splitTag(tags, "artistsort", "artist_sort", "sortname")
+	albumArtistSortNames := splitTag(tags, "albumartistsort", "album_artist_sort", "albumsort")
+	artists := musicArtistsFromNames(artistNames, splitTag(tags, "musicbrainz_artistid", "musicbrainz_artist_id"), artistSortNames)
+	albumArtists := musicArtistsFromNames(albumArtistNames, splitTag(tags, "musicbrainz_albumartistid", "musicbrainz_albumartist_id"), albumArtistSortNames)
 	for _, artist := range append(artists, albumArtists...) {
 		if err := s.upsertMusicArtist(ctx, artist); err != nil {
 			return err
 		}
 	}
 
-	albumTitle := firstTag(tags, "album")
+	albumTitle := firstNonEmpty(firstTag(tags, "album"), albumSidecar.Title)
 	if albumTitle == "" {
-		albumTitle = filepath.Base(filepath.Dir(path))
+		albumTitle = filepath.Base(albumDir)
 	}
 	releaseDate := firstTag(tags, "date", "year", "originaldate", "originalyear")
 	releaseYear := yearFromDate(releaseDate)
@@ -70,9 +74,9 @@ func (s *Scanner) scanMusicFile(ctx context.Context, library Library, root strin
 		ReleaseType:         firstTag(tags, "releasetype", "musicbrainz_albumtype"),
 		ReleaseStatus:       firstTag(tags, "releasestatus"),
 		Compilation:         boolTag(tags, "compilation", "itunescompilation", "tcmp"),
-		RecordLabel:         firstTag(tags, "label", "organization", "publisher"),
+		RecordLabel:         firstNonEmpty(firstTag(tags, "label", "organization", "publisher"), albumSidecar.RecordLabel),
 		CatalogNumber:       firstTag(tags, "catalognumber", "catalog_number"),
-		Barcode:             firstTag(tags, "barcode"),
+		Barcode:             firstNonEmpty(barcodeFromTags(tags), albumSidecar.Barcode),
 		Genres:              genres,
 		Styles:              splitGenreTag(tags, "style", "styles"),
 		Moods:               splitGenreTag(tags, "mood", "moods"),
@@ -85,6 +89,10 @@ func (s *Scanner) scanMusicFile(ctx context.Context, library Library, root strin
 			AppleMusicID:              firstTag(tags, "apple_music_album_id", "applemusic_album_id"),
 		},
 	}
+	if len(album.Genres) == 0 && len(albumSidecar.Genres) > 0 {
+		album.Genres = albumSidecar.Genres
+	}
+	albumSidecar.mergeIntoAlbum(&album)
 	if albumCover != nil {
 		album.Images = []catalog.Image{*albumCover}
 	}
@@ -120,7 +128,7 @@ func (s *Scanner) scanMusicFile(ctx context.Context, library Library, root strin
 		Moods:            splitGenreTag(tags, "mood", "moods"),
 		Tags:             album.Tags,
 		DurationSeconds:  probe.AudioFile.DurationSeconds,
-		Explicit:         boolTag(tags, "explicit", "itunesadvisory", "advisory"),
+		Explicit:         explicitTag(tags),
 		BPM:              int(parseInt64(firstTag(tags, "bpm"))),
 		Key:              firstTag(tags, "initialkey", "key"),
 		Comment:          firstTag(tags, "comment", "description"),
@@ -156,7 +164,7 @@ func (s *Scanner) scanMusicFile(ctx context.Context, library Library, root strin
 	return nil
 }
 
-func musicArtistsFromNames(names []string, musicBrainzIDs []string) []catalog.MusicArtist {
+func musicArtistsFromNames(names []string, musicBrainzIDs []string, sortNames []string) []catalog.MusicArtist {
 	artists := make([]catalog.MusicArtist, 0, len(names))
 	for index, name := range names {
 		name = strings.TrimSpace(name)
@@ -166,6 +174,9 @@ func musicArtistsFromNames(names []string, musicBrainzIDs []string) []catalog.Mu
 		artist := catalog.MusicArtist{
 			ID:   stableID("artist", name),
 			Name: name,
+		}
+		if index < len(sortNames) {
+			artist.SortName = strings.TrimSpace(sortNames[index])
 		}
 		if index < len(musicBrainzIDs) {
 			artist.ExternalIDs.MusicBrainzArtistID = musicBrainzIDs[index]

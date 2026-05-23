@@ -6,7 +6,6 @@ import (
 	"sort"
 	"strconv"
 	"strings"
-	"time"
 
 	"github.com/bouliehaan/samo-server/internal/catalog"
 	"github.com/bouliehaan/samo-server/internal/media"
@@ -36,7 +35,7 @@ func (s *Scanner) scanAudiobook(ctx context.Context, library Library, root strin
 		return nil
 	}
 
-	commonTags := probes[0].Tags
+	commonTags := mergeProbeTags(probes)
 	sidecar := readBookSidecar(group.Root)
 	title := firstNonEmpty(firstTag(commonTags, "album", "title"), sidecar.Title)
 	if title == "" {
@@ -104,6 +103,7 @@ func (s *Scanner) scanAudiobook(ctx context.Context, library Library, root strin
 		Inode:           fileInode(group.Root),
 		SizeBytes:       sizeBytes,
 		Genres:          genres,
+		Tags:            splitGenreTag(commonTags, "tag", "tags"),
 		DurationSeconds: duration,
 		Cover:           cover,
 		Book: &catalog.BookMetadata{
@@ -121,7 +121,7 @@ func (s *Scanner) scanAudiobook(ctx context.Context, library Library, root strin
 			Genres:          genres,
 			Tags:            splitGenreTag(commonTags, "tag", "tags"),
 			ISBNs:           firstNonEmptySlice(splitTag(commonTags, "isbn", "isbn13", "isbn10"), sidecar.ISBNs),
-			Explicit:        boolTag(commonTags, "explicit", "itunesadvisory", "advisory"),
+			Explicit:        explicitTag(commonTags),
 			Abridged:        boolTag(commonTags, "abridged"),
 			DurationSeconds: duration,
 			ExternalIDs: catalog.ExternalIDs{
@@ -148,6 +148,9 @@ func (s *Scanner) scanAudiobook(ctx context.Context, library Library, root strin
 	}
 
 	chapters := flattenBookChapters(probes)
+	if len(chapters) == 0 {
+		chapters = readCueChapters(group.Root, probes)
+	}
 	if err := s.replaceChapters(ctx, item.ID, "", chapters); err != nil {
 		return err
 	}
@@ -182,7 +185,7 @@ func (s *Scanner) scanPodcast(ctx context.Context, library Library, root string,
 		return nil
 	}
 
-	commonTags := probes[0].Tags
+	commonTags := mergeProbeTags(probes)
 	title := firstTag(commonTags, "album", "show", "podcast", "album_artist")
 	if title == "" {
 		title = filepath.Base(group.Root)
@@ -217,7 +220,7 @@ func (s *Scanner) scanPodcast(ctx context.Context, library Library, root string,
 			FeedURL:      firstTag(commonTags, "podcasturl", "feed", "feed_url", "rss"),
 			SiteURL:      firstTag(commonTags, "url", "website"),
 			Language:     firstTag(commonTags, "language"),
-			Explicit:     boolTag(commonTags, "explicit", "itunesadvisory", "advisory"),
+			Explicit:     explicitTag(commonTags),
 			Categories:   categories,
 			OwnerName:    firstTag(commonTags, "owner", "owner_name"),
 			OwnerEmail:   firstTag(commonTags, "owner_email"),
@@ -254,7 +257,7 @@ func (s *Scanner) scanPodcast(ctx context.Context, library Library, root string,
 			Episode:         episodeNumber,
 			EpisodeType:     firstTag(tags, "episode_type", "episodetype"),
 			DurationSeconds: file.DurationSeconds,
-			Explicit:        boolTag(tags, "explicit", "itunesadvisory", "advisory"),
+			Explicit:        explicitTag(tags),
 			EnclosureURL:    firstTag(tags, "enclosure_url", "enclosureurl", "url"),
 			EnclosureType:   file.MimeType,
 			EnclosureBytes:  file.SizeBytes,
@@ -444,20 +447,4 @@ func yearString(value string) string {
 		return ""
 	}
 	return strconv.Itoa(year)
-}
-
-func parseDatePtr(value string) *time.Time {
-	value = strings.TrimSpace(value)
-	if value == "" {
-		return nil
-	}
-	formats := []string{time.RFC3339, "2006-01-02", "2006"}
-	for _, format := range formats {
-		parsed, err := time.Parse(format, value)
-		if err == nil {
-			parsed = parsed.UTC()
-			return &parsed
-		}
-	}
-	return nil
 }

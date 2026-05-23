@@ -2,7 +2,8 @@ package api
 
 import (
 	"net/http"
-	"strings"
+
+	"github.com/bouliehaan/samo-server/internal/search"
 )
 
 func (s *Server) listMusicArtists(w http.ResponseWriter, r *http.Request) {
@@ -51,7 +52,12 @@ func (s *Server) listMusicTracks(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) getMusicTrack(w http.ResponseWriter, r *http.Request) {
-	item, err := s.catalog.MusicTrack(r.PathValue("id"))
+	principal, ok := s.currentUser(r)
+	if !ok {
+		writeError(w, http.StatusUnauthorized, "unauthorized")
+		return
+	}
+	item, err := s.musicTrackWithUserPlayback(r.Context(), principal.User.ID, r.PathValue("id"))
 	if err != nil {
 		writeCatalogError(w, err)
 		return
@@ -87,10 +93,21 @@ func (s *Server) getMusicPlaylist(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) searchMusic(w http.ResponseWriter, r *http.Request) {
+	principal, ok := s.currentUser(r)
+	if !ok {
+		writeError(w, http.StatusUnauthorized, "unauthorized")
+		return
+	}
 	page, err := readPage(r)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	writeJSON(w, http.StatusOK, s.catalog.SearchMusic(strings.TrimSpace(r.URL.Query().Get("q")), page))
+	overlay, err := s.loadSearchOverlay(r, principal.User.ID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	query := search.ParseMusicQueryFromRequest(r, page)
+	writeJSON(w, http.StatusOK, s.searchService().SearchMusic(query, overlay))
 }

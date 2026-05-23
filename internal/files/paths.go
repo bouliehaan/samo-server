@@ -22,22 +22,59 @@ func loadAllowedRoots(ctx context.Context, db *sql.DB, extraRoots []string) ([]s
 		if err := rows.Scan(&path); err != nil {
 			return nil, fmt.Errorf("scan library root: %w", err)
 		}
-		absolute, err := filepath.Abs(strings.TrimSpace(path))
+		var err error
+		roots, err = appendAllowedRoot(roots, path)
 		if err != nil {
 			return nil, err
 		}
-		roots = append(roots, absolute)
 	}
 	for _, root := range extraRoots {
-		absolute, err := filepath.Abs(strings.TrimSpace(root))
+		var err error
+		roots, err = appendAllowedRoot(roots, root)
 		if err != nil {
 			return nil, err
-		}
-		if absolute != "" {
-			roots = append(roots, absolute)
 		}
 	}
 	return roots, rows.Err()
+}
+
+func appendAllowedRoot(roots []string, root string) ([]string, error) {
+	root = strings.TrimSpace(root)
+	if root == "" {
+		return roots, nil
+	}
+	absolute, err := filepath.Abs(root)
+	if err != nil {
+		return nil, err
+	}
+	resolved, err := filepath.EvalSymlinks(absolute)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return roots, nil
+		}
+		return nil, fmt.Errorf("resolve library root %q: %w", root, err)
+	}
+	info, err := os.Stat(resolved)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return roots, nil
+		}
+		return nil, fmt.Errorf("stat library root %q: %w", root, err)
+	}
+	if !info.IsDir() {
+		return roots, nil
+	}
+	roots = appendUniqueRoot(roots, filepath.Clean(absolute))
+	return appendUniqueRoot(roots, filepath.Clean(resolved)), nil
+}
+
+func appendUniqueRoot(roots []string, root string) []string {
+	for _, existing := range roots {
+		if existing == root {
+			return roots
+		}
+	}
+	return append(roots, root)
 }
 
 func isUnderAllowedRoot(path string, roots []string) bool {
@@ -66,7 +103,7 @@ func pathWithinRoot(path, root string) bool {
 	if rel == "." {
 		return true
 	}
-	return !strings.HasPrefix(rel, "..")
+	return rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator))
 }
 
 func validateReadablePath(ctx context.Context, db *sql.DB, extraRoots []string, path string) (string, os.FileInfo, error) {
@@ -87,7 +124,18 @@ func validateReadablePath(ctx context.Context, db *sql.DB, extraRoots []string, 
 		return "", nil, ErrForbidden
 	}
 
-	info, err := os.Stat(absolute)
+	resolved, err := filepath.EvalSymlinks(absolute)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return "", nil, ErrMissing
+		}
+		return "", nil, fmt.Errorf("resolve path: %w", err)
+	}
+	if !isUnderAllowedRoot(resolved, roots) {
+		return "", nil, ErrForbidden
+	}
+
+	info, err := os.Stat(resolved)
 	if err != nil {
 		if os.IsNotExist(err) {
 			return "", nil, ErrMissing
@@ -97,5 +145,5 @@ func validateReadablePath(ctx context.Context, db *sql.DB, extraRoots []string, 
 	if info.IsDir() {
 		return "", nil, ErrInvalidPath
 	}
-	return absolute, info, nil
+	return resolved, info, nil
 }

@@ -219,7 +219,7 @@ func validateCreateInput(input CreateLibraryInput) (Library, error) {
 	}
 
 	switch kind {
-	case KindMusic:
+	case KindMusic, KindMixed:
 		mediaType = ""
 	case KindShelf:
 		switch mediaType {

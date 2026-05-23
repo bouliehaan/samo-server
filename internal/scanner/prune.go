@@ -4,6 +4,8 @@ import (
 	"context"
 	"fmt"
 	"strings"
+
+	"github.com/bouliehaan/samo-server/internal/catalog"
 )
 
 type ScanStats struct {
@@ -45,6 +47,15 @@ func (a *scanAccumulator) seeEpisode(id string) {
 }
 
 func (s *Scanner) ScanWithStats(ctx context.Context, libraries []Library) (ScanStats, error) {
+	idx, err := catalog.LoadOverrideIndex(ctx, s.db)
+	if err != nil {
+		return ScanStats{}, err
+	}
+	if !idx.IsEmpty() {
+		s.overrideIndex = idx
+	}
+	defer func() { s.overrideIndex = nil }()
+
 	stats := ScanStats{}
 	for _, library := range libraries {
 		libraryStats, err := s.scanLibraryWithStats(ctx, library)
@@ -59,6 +70,9 @@ func (s *Scanner) ScanWithStats(ctx context.Context, libraries []Library) (ScanS
 		return stats, err
 	}
 	if err := s.pruneOrphanMusic(ctx); err != nil {
+		return stats, err
+	}
+	if err := catalog.PruneStaleMetadataOverrides(ctx, s.db); err != nil {
 		return stats, err
 	}
 	return stats, nil

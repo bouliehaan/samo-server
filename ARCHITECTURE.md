@@ -20,9 +20,12 @@ The server currently has these major pieces:
 - library management and scan orchestration in `internal/libraries`
 - embedded cover extraction and cache in `internal/covers`
 - playback state persistence in `internal/playback`
+- per-user shelf bookmarks, collections, and listening sessions in `internal/shelfuser`
 - local media file access and streaming in `internal/files`
 - remote source ingestion in `internal/sources`
 - Samo-native HTTP API handlers in `internal/api`
+- Subsonic/OpenSubsonic compatibility adapter in `internal/subsonic`
+- Last.fm scrobbling adapter in `internal/lastfm`
 - 24/7 radio station module in `internal/radio`
 - shared media taxonomy in `internal/media`
 
@@ -31,6 +34,167 @@ There is no GUI yet. The current UI surface is only a small root status page. Th
 ## Foundation Work Log
 
 Record completed foundation-layer work here so later features do not need to reopen low-level design. Each entry should name the owning package, schema changes, API contracts, and intentional limits.
+
+### 2026-05-22 — First-run setup wizard
+
+**Packages:** `internal/api`, `internal/users`, `cmd/samo-server`
+
+**Behavior**
+
+- On a fresh install the server no longer auto-generates a bootstrap admin password. The user-server row remains (so the legacy `SAMO_API_TOKEN` still maps to it), but no admin row is created until env vars opt in (`SAMO_BOOTSTRAP_USERNAME` or `SAMO_BOOTSTRAP_PASSWORD`) or the wizard completes.
+- `/` redirects to `/setup` while setup is pending; `/setup` redirects back to `/` once an admin + library + scan exist.
+- `users.bootstrap` defers admin creation when both username and password are blank, so headless deploys with secrets still work and humans see the wizard.
+
+**HTTP API (`/api/v1/setup/*`)**
+
+- `GET /api/v1/setup/status` — public; returns `{needsSetup, hasAdmin, hasLibrary, libraryCount, hasScanned, currentStep}`.
+- `POST /api/v1/setup/admin` — public when no admin exists; creates the first admin and returns a login `LoginResponse` (user + bearer token). Subsequent calls return 409.
+- `GET /api/v1/setup/directories?path=…` — public during setup, admin-only afterwards. Lists subdirectories under the provided absolute path with item counts. Rejects `/proc`, `/sys`, `/dev`, `/run`. Empty path returns a suggested-locations list (`$HOME`, `/srv`, `/mnt`, `/media`, `/opt`, `/var/lib`, `/data`).
+- `POST /api/v1/setup/libraries` — requires the admin token issued in step 1; calls `libraries.Service.Create`.
+- `POST /api/v1/setup/scan` — runs `libraries.ScanAll(TriggerAPI)` and refreshes the catalog.
+- `POST /api/v1/setup/complete` — no-op gate that returns done state.
+
+**`/setup` UI**
+
+- Single self-contained HTML page served by `setup_page.go`. Vanilla JS + CSS, no build step, no framework. Stores the admin token in `localStorage` and uses it for every subsequent setup request.
+- Three steps with an inline progress indicator: admin account → library folders (with a directory browser and a free-form path field) → first scan.
+
+**Tests**
+
+- Full wizard flow: fresh status → admin creation → token use → library creation → status advances.
+- Repeat admin creation is rejected (409).
+- Library creation without the admin token is rejected (401).
+- Directory browser returns suggested-locations entries for the root path and rejects system paths.
+- `/setup` redirects to `/` once an admin + library + scan exist.
+- Bootstrap behavior split tests: empty input defers to wizard, explicit username generates a password.
+
+**Intentional limits left for later foundation passes**
+
+- The wizard does not yet offer Last.fm/metadata-provider configuration screens; those are still env-var-driven.
+- Library browser surfaces only direct subdirectories — no media-content sniffing or scan-preview yet.
+- The wizard issues a single short-lived bearer token via the standard login flow; there is no "remember this device" or session cookie story yet.
+- No "danger zone" rescue mode for re-running the wizard after corruption; admins must fix data state via the catalog API.
+
+### 2026-05-22 — Remote cover art download
+
+**Packages:** `internal/covers`, `internal/metadata`, `cmd/samo-server`
+
+**`internal/covers`**
+
+- `Service.DownloadFromURL` fetches an image URL into the cover cache and persists an `extracted_covers` row keyed by URL hash. Repeated calls with the same URL hit the existing row and skip the network.
+- SSRF guard rejects empty/`localhost`/`.local`/loopback/private/link-local hosts unless `RemoteOptions.AllowPrivateHosts` is set (tests only).
+- Content-Type must start with `image/`; oversized responses (default 5 MiB) and empty bodies fail with `ErrTooLarge` / `ErrUnsupportedType`.
+- Cover IDs are derived from a stable hash of the normalized URL so the same artwork at the same address is content-addressable.
+
+**`internal/metadata`**
+
+- `CoverDownloader` interface (matched implicitly by `covers.Service`) wires the downloader into `MetadataApplyService` via `NewMetadataApplyServiceWithOptions`.
+- `resolveCoverInCandidate` runs before merge for non-preview apply calls. On success the candidate's `Cover.URL` is preserved and `Cover.ID`/`Cover.Path` get the local cover values so override patches store a local-first reference instead of a remote URL.
+- Failures are logged and never block the apply; the apply falls back to writing the external URL form.
+
+**Tests**
+
+- Download round-trips a fake JPEG, stores it, and repeated downloads reuse the cache row (one upstream hit).
+- Non-image content types are rejected.
+- Loopback URLs are rejected when `AllowPrivateHosts` is false.
+- Oversized bodies are rejected when they exceed `MaxBytes`.
+
+**Intentional limits left for later foundation passes**
+
+- No HEAD-then-GET probe; the downloader streams immediately and bails on size violation.
+- No retry/backoff; transient failures during apply simply log and fall back to the URL form.
+- No background prefetch — covers download only at user-initiated apply time.
+
+### 2026-05-22 — Catalog-backed radio stations
+
+**Packages:** `internal/radio`, `internal/api`, `cmd/samo-server`, `migrations/014_radio_stations.sql`
+
+**Database**
+
+- New `radio_stations` table holds station-level fields: name, description, content type, epoch, enabled flag, and a `source` column (`database` for API-created rows, `file` for JSON-imported rows).
+- New `radio_station_items` table holds ordered loop entries: position, source kind, source ID, fallback path, display fields, kind, duration, weight.
+
+**`internal/radio`**
+
+- `ImportConfigIfEmpty` seeds the DB from a JSON `Config` on first ever startup (radio_stations table empty). Once any DB row exists the JSON file is ignored.
+- `LoadStationsFromDB` / `LoadStationByID` hydrate stations with resolved items.
+- `resolveItem` joins music tracks, shelf items, and podcast episodes against `media_files` so playable file paths come from the catalog. Items with broken or remote-only references are marked `missing` and dropped from the runtime loop without removing the DB row.
+- `NewServiceFromDB` constructor and `Service.Reload` rebuild the in-memory schedule from DB records.
+- `Service.CreateStation` / `UpdateStation` / `DeleteStation` / `AddStationItem` / `RemoveStationItem` write through the DB and trigger a reload.
+- Station summary now exposes `enabled` and `source` so admin UIs can distinguish API vs file-managed rows.
+
+**HTTP API**
+
+- `GET/POST /api/v1/radio/admin/stations` — list/create stations (admin).
+- `GET/PATCH/DELETE /api/v1/radio/admin/stations/{id}` — read, patch, delete (admin).
+- `POST /api/v1/radio/admin/stations/{id}/items` — append an item (admin).
+- `DELETE /api/v1/radio/admin/items/{itemId}` — remove an item (admin).
+- Existing public `GET /api/v1/radio/stations` routes are unchanged.
+
+**Item source kinds**
+
+- `path`: explicit absolute path (the legacy JSON shape).
+- `music-track`: catalog music track ID; resolver picks the first linked `media_file`.
+- `shelf-item`: catalog shelf item ID (audiobook or single-file).
+- `shelf-episode`: catalog podcast episode ID; remote-only episodes are skipped until cached locally.
+
+**Tests**
+
+- `ImportConfigIfEmpty` seeds JSON stations and refuses to re-import once rows exist.
+- Station + item CRUD round-trips through the DB.
+- Music track resolution joins through `media_files` and pulls track/artist/album fields when not overridden.
+- `NewServiceFromDB` builds a runnable in-memory station from a DB-only seed.
+
+**Intentional limits left for later foundation passes**
+
+- No reordering API yet; positions are append-only.
+- No playlist-source kind (auto-resolves to current playlist tracks).
+- No smart-query source kind (genre/recently-added/etc.).
+- The radio stream module still reads file bytes directly; remote episode bytes need cache integration before they can stream from a radio station.
+
+### 2026-05-22 — Internet radio metadata probing
+
+**Packages:** `internal/sources`, `internal/api`, `internal/config`, `cmd/samo-server`, `migrations/013_internet_radio_probe.sql`
+
+**Database**
+
+- Added probe columns on `internet_radio_stations`: `now_playing`, `now_playing_artist`, `now_playing_title`, `now_playing_updated_at`, `probe_enabled`, `probe_interval_seconds`, `next_probe_at`, `last_probe_started_at`, `last_probe_finished_at`, `last_probe_error`, `consecutive_probe_errors`, `probe_status`.
+- Index on `(probe_enabled, next_probe_at)` for due-station queries.
+
+**`internal/sources`**
+
+- `ProbeIcyStream` issues an `Icy-MetaData: 1` request, captures ICY headers (`icy-name`, `icy-genre`, `icy-br`, `icy-description`, `icy-url`, `icy-metaint`, `Content-Type`), and reads one Shoutcast metadata frame when the server advertises one. Falls back to a raw HTTP/1.0 dial for legacy Shoutcast v1 servers that respond `ICY 200 OK`.
+- `parseStreamTitle` decodes `StreamTitle='Artist - Title';` payloads (single or double quoted), splits on `" - "` for the artist/title heuristic, and tolerates trailing pairs like `StreamUrl`.
+- `ProbeInternetRadioStation` runs a probe, applies the result without clobbering user-set values, schedules `next_probe_at` from the station's interval, and records failures with capped backoff (60s floor, 6h ceiling).
+- `RunInternetRadioProbeCycle` walks due enabled stations on each tick.
+- `UpdateInternetRadioStation` patches name, description, homepage/image URLs, country, language, tags, enabled flag, and probe settings; rejects intervals outside `[60s, 24h]`.
+- `ProbePoller` runs alongside the existing podcast feed poller.
+
+**Config**
+
+- `SAMO_INTERNET_RADIO_PROBE` (default `true`) — start the probe poller.
+- `SAMO_INTERNET_RADIO_PROBE_TICK` (default `1m`) — scheduler tick interval.
+
+**HTTP API**
+
+- `PATCH /api/v1/internet-radio/stations/{id}` — update station + probe settings (admin).
+- `POST /api/v1/internet-radio/stations/{id}/probe` — probe a single station (admin).
+- `POST /api/v1/internet-radio/stations/probe` — run one cycle of due stations (admin).
+- `GET` station responses include `nowPlaying` and `probe` schedule blocks.
+
+**Tests**
+
+- ICY response with metadata frame yields station headers, codec mapping, and parsed StreamTitle.
+- Probe persists now-playing, codec, and bitrate without overwriting user-set bitrate.
+- Probe failures record `consecutive_probe_errors`, `last_probe_error`, and `probe_status`.
+- Update interval validation and `next_probe_at` clearing when probing is disabled.
+- StreamTitle parsing across quoting styles, with/without artist, and trailing extras.
+
+**Intentional limits left for later foundation passes**
+
+- Probing only consumes one metadata frame per call — long-running listeners that refresh on every track change are out of scope for now.
+- Probe results overwrite stale ICY-derived fields but never user-set name; future work can introduce per-field override flags similar to the metadata override layer.
+- No public read endpoint streams the probed audio bytes through Samo; the public `/internet-radio/{id}/stream` route still redirects to the upstream URL.
 
 ### 2026-05-22 — Library management, scan jobs, and scanner pruning
 
@@ -134,7 +298,7 @@ Record completed foundation-layer work here so later features do not need to reo
 **HTTP API**
 
 - `GET /api/v1/media/covers/{id}` (metadata) and `GET /api/v1/media/covers/{id}/image`
-- Track/item/episode stream shortcuts accept `?mediaFileId=` to choose a specific linked audio file
+- Track/item/episode stream shortcuts are disc- and progress-aware; `?mediaFileId=` still forces a specific file
 
 ### 2026-05-22 — Podcast feed polling and refresh scheduling
 
@@ -163,6 +327,250 @@ Record completed foundation-layer work here so later features do not need to reo
 
 - `SAMO_PODCAST_POLL` (default `true`) — start background poller.
 - `SAMO_PODCAST_POLL_TICK` (default `1m`) — scheduler tick interval.
+
+### 2026-05-22 — Metadata override layer (phase 2)
+
+**Packages:** `internal/catalog`, `internal/scanner`, `internal/sources`, `internal/metadata`, `internal/api`
+
+**Write-time guarding**
+
+- `OverrideIndex` loads override patches once per scan or RSS save.
+- Scanner upserts skip SQL columns and junction-table sync for overridden apply fields.
+- RSS `savePodcastFeed` guards feed and episode metadata before opening write transactions (avoids SQLite lock contention).
+- `PruneStaleMetadataOverrides` removes override rows for deleted catalog entities after scans.
+
+**Admin API**
+
+- `GET /api/v1/metadata/overrides/{targetKind}/{targetId}` — inspect stored override fields.
+- `DELETE /api/v1/metadata/overrides/{targetKind}/{targetId}` — remove all overrides for a target.
+- `PATCH /api/v1/metadata/overrides/{targetKind}/{targetId}` — clear specific override fields (`fields` list).
+
+**Podcast feed reads**
+
+- `GetPodcastFeed` / `ListPodcastFeeds` project `podcast-feed` overrides onto API responses.
+
+**Tests**
+
+- Scanner preserves overridden artist columns in SQLite while catalog projection shows user values.
+- RSS refresh preserves overridden feed title in SQLite while API reads show user values.
+- Override admin get/clear/delete lifecycle.
+
+### 2026-05-22 — Bit-perfect direct playback hardening
+
+**Packages:** `internal/files`, `internal/api`
+
+**`internal/files`**
+
+- Default stream path still serves original on-disk bytes via `http.ServeContent` (Range requests, no transcoding).
+- Resume offsets (`ServeMediaFileAt` / `X-Samo-Stream-Offset-Seconds`) now copy from the computed byte offset with an explicit `Content-Length` for the tail, because `http.ServeContent` resets seek position to zero.
+- Symlink escape and library-root validation tests cover path safety.
+
+**HTTP API**
+
+- Track, shelf item, and episode stream shortcuts unchanged; shelf resume now returns the correct tail bytes end-to-end.
+
+**Tests**
+
+- Full GET and ranged responses match source file bytes (`internal/files`, `internal/api`).
+- Resume offset serves unmodified tail bytes after a computed byte seek.
+- Shelf multi-file stream selects the progress-aware file and resumes within that file.
+
+**Intentional limits left for later foundation passes**
+
+- No transcoded alternate route yet.
+- Subsonic stream compatibility relies on the same files service; dedicated Subsonic byte-equality tests are optional follow-up.
+
+### 2026-05-22 — Music browse views and playlist CRUD
+
+**Packages:** `internal/catalog`, `internal/playlists`, `internal/playback`, `internal/api`
+
+**`internal/catalog`**
+
+- `MusicBrowse` builds favorites, starred, recently-played, and recently-added views from the in-memory catalog with per-user playback overlay (favorite, starred, `lastPlayedAt`, `createdAt`).
+
+**`internal/playlists`**
+
+- `Create` / `Update` / `Delete` for `music_playlists` rows with owner checks, track ID validation, and duration aggregation.
+- Playlist metadata apply uses `music-playlist` override kind; stale override rows prune when playlists are deleted.
+
+**`internal/playback`**
+
+- `ListForUser` loads all playback rows for a target kind (used by browse handlers).
+
+**HTTP API**
+
+- `GET /api/v1/music/browse/favorites|starred|recently-played|recently-added` — paginated browse payloads with user playback overlay.
+- `POST /api/v1/music/playlists`, `PATCH /api/v1/music/playlists/{id}`, `DELETE /api/v1/music/playlists/{id}` — owner-scoped mutations; catalog reload after success.
+
+**Tests**
+
+- Browse filtering/sorting with playback overlay (`internal/catalog`).
+- Playlist create/update/delete and owner enforcement (`internal/playlists`).
+
+**Intentional limits left for later foundation passes**
+
+- Public playlist read filtering (non-owner access rules) not expanded yet.
+- List/detail music routes outside browse still return catalog-global playback JSON unless a dedicated overlay pass is added later.
+
+### 2026-05-22 — Search and filter index (phase 1)
+
+**Packages:** `internal/search`, `internal/api`, `internal/subsonic`
+
+**`internal/search`**
+
+- Owns catalog search indexes rebuilt from `catalog.Seed` on startup and catalog reload.
+- Multi-token text matching (all terms must match) with relevance scoring.
+- Structured filters: `genre`, `year`, `libraryId`, `favorite`, `starred`, `recentlyPlayed`, `recentlyAdded`, `completed`, `minRating`, `mediaType` (shelf).
+- Sort modes: `relevance` (default), `title`, `added`, `played`.
+- Per-user playback overlay for filter/sort fields that depend on user state.
+
+**HTTP API**
+
+- `GET /api/v1/music/search` and `GET /api/v1/shelf/search` accept the filter/sort query params above in addition to `q`.
+- Subsonic `search2` / `search3` use the same music text index via `SearchMusicText`.
+
+**Tests**
+
+- Token matching, genre/favorite filters, sort-by-played, narrator/series shelf search (`internal/search`).
+
+**Intentional limits left for later foundation passes**
+
+- In-memory index only (no SQLite FTS5 or external search engine yet).
+- Filter-only searches with empty `q` are supported but not exposed as browse shortcuts.
+
+### 2026-05-22 — Remote podcast enclosure streaming (phase 1–2)
+
+**Packages:** `internal/podcaststream`, `internal/podcastcache`, `internal/files`, `internal/sources`, `internal/api`, `migrations/011_podcast_episode_cache.sql`
+
+**`internal/podcaststream`**
+
+- Proxies RSS episode enclosure URLs when an episode has no local `media_files` rows.
+- Forwards client `Range` requests; applies resume offsets from saved episode progress via upstream `Range: bytes=N-`.
+- Rejects loopback/private hosts by default (SSRF guard).
+- `FetchEnclosure` supports cache downloads with a per-file byte cap.
+
+**`internal/podcastcache`**
+
+- Downloads enclosures into `{SAMO_DATA_DIR}/podcast-cache/` and records rows in `podcast_episode_cache`.
+- Stream path prefers cached on-disk bytes (`X-Samo-Stream-Source: cache`) before proxying (`enclosure`).
+- Background download after a cache miss while streaming.
+- Retention: max total bytes, max age since last access, stale enclosure URL cleanup, and orphan row cleanup after RSS saves.
+
+**Config**
+
+- `SAMO_PODCAST_CACHE` (default `true`)
+- `SAMO_PODCAST_CACHE_MAX_BYTES` (default `10GiB`)
+- `SAMO_PODCAST_CACHE_MAX_AGE` (default `720h`)
+- `SAMO_PODCAST_CACHE_MAX_FILE_BYTES` (default `500MiB`)
+
+**HTTP API**
+
+- `GET /api/v1/shelf/episodes/{id}/stream` uses local files when present, otherwise cache, otherwise enclosure proxy.
+
+**Tests**
+
+- Upstream proxy with resume offset and client Range forwarding (`internal/podcaststream`).
+- Cache download, retention pruning, and cached stream bytes (`internal/podcastcache`, `internal/api`).
+
+**Intentional limits left for later foundation passes**
+
+- No explicit admin prefetch/evict API yet.
+- Cached bytes are stored as downloaded from publishers, not re-validated with checksums beyond enclosure URL matching.
+
+### 2026-05-22 — Metadata override layer (phase 1)
+
+**Packages:** `internal/catalog`, `internal/metadata`, `migrations/010_metadata_overrides.sql`
+
+**Database**
+
+- Added `metadata_overrides` table storing user-applied field patches keyed by `(target_kind, target_id)`.
+
+**`internal/metadata`**
+
+- Metadata apply now writes override patches instead of mutating catalog SQLite rows directly.
+- Preview/merge behavior is unchanged; apply persists field-level patches for all supported targets.
+
+**`internal/catalog`**
+
+- `LoadSeedFromDB` loads overrides and projects them onto hydrated music/shelf entities before returning the seed.
+- Podcast feed apply overrides project onto the linked shelf podcast item via `podcast_feeds.podcast_id`.
+- Rescans and RSS refreshes may still rewrite source catalog rows, but client-facing catalog projections keep user overrides.
+
+**Tests**
+
+- Apply stores overrides and survives simulated rescan/RSS clobber during catalog reload.
+
+**Intentional limits left for later foundation passes**
+
+- None for the metadata override foundation; phase 1 and phase 2 are complete for this layer.
+
+### 2026-05-22 — Metadata candidate preview and apply
+
+**Packages:** `internal/metadata`, `internal/api`, `cmd/samo-server`
+
+**`internal/metadata`**
+
+- `MetadataApplyService` writes user-selected fields from `SearchResult` candidates into `metadata_overrides` patches (projected at catalog load time).
+- `POST /api/v1/metadata/apply/preview` returns `before`, merged `after`, `allowedFields`, `appliedFields`, and `skippedFields` without writing.
+- `POST /api/v1/metadata/apply` requires a non-empty `fields` list (confirmation gate), merges `externalIds`, updates contributors/series relations for shelf items, and reloads the in-memory catalog.
+- Targets: `shelf-item`, `shelf-episode`, `music-artist`, `music-album`, `music-track`, `podcast-feed`.
+- Apply routes are admin-only because they mutate shared catalog metadata. Search/provider routes are authenticated user routes and do not write.
+- Podcast feed apply writes both the `podcast_feeds` source row and the corresponding `shelf_items.podcast_json` projection in one transaction, so clients reading `/api/v1/shelf/podcasts` see applied metadata immediately after catalog reload.
+
+### 2026-05-22 — Disc-aware default stream selection
+
+**Packages:** `internal/catalog`, `internal/files`, `internal/api`
+
+**`internal/catalog`**
+
+- `SortAudioFiles` orders linked files by disc/track embedded tags, then path.
+- `SelectStreamTarget` resolves the stream file from `mediaFileId`, `disc`, or saved playback progress across multi-file shelf items and episodes.
+- Hydrated catalog audio file lists use the same sort order clients see in stream responses.
+
+**`internal/files`**
+
+- `ServeMediaFileAt` seeks to an approximate byte offset for resume positions and sets `X-Samo-Stream-Offset-Seconds`.
+
+**HTTP API**
+
+- Track/item/episode stream shortcuts set `X-Samo-Media-File-Id` and optional global/offset headers.
+- Music track streams default `disc` to the track's own `discNumber` when multiple files exist.
+
+### 2026-05-22 — Scanner metadata expansion
+
+**Packages:** `internal/scanner`, `internal/watch`
+
+**`internal/scanner`**
+
+- Centralized tag alias resolution (`tags.go`) for ID3, MP4, Vorbis, and iTunes field names (artist, album artist, dates, disc/track numbers, barcodes, podcast fields, series, etc.).
+- `mergeProbeTags` combines embedded tags across all files in an audiobook or podcast folder so multi-part releases keep the richest metadata.
+- Improved explicit detection via iTunes advisory values (`1` explicit, `2` clean) in addition to boolean tags.
+- Audiobook sidecars: `metadata.json` (Audiobookshelf-style), existing `desc.txt` / `reader.txt` / `.opf`, plus `.cue` chapter sheets when embedded chapters are absent.
+- Music sidecars: Kodi-style `album.nfo` for album title, artists, year, genre, label, and UPC.
+- Music artists now persist `sortName` from `artistsort` / `albumartistsort` tags when present.
+- Shelf items store top-level `tags` from embedded tag fields; audiobook items populate `book.tags` consistently.
+- Expanded published-date parsing (RFC3339, common locale formats, year-only fallback).
+
+**`internal/watch`**
+
+- Filesystem watcher retriggers scans for `metadata.json`, `.cue`, and `.nfo` sidecar changes.
+
+### 2026-05-22 — Admin boundaries and local file containment
+
+**Packages:** `internal/api`, `internal/files`
+
+**`internal/api`**
+
+- `requireUser` authenticates every `/api/v1/*` route into a `users.Principal`.
+- `requireAdmin` centralizes role checks for shared-server management actions.
+- Admin-only routes include user list/create, filesystem library management, scan orchestration/job history, podcast feed source mutations, internet-radio source mutations, and metadata apply/preview.
+- Normal users continue to read catalog/search/playback surfaces through the Samo-native API.
+
+**`internal/files`**
+
+- Local media serving now checks both the requested path and its symlink-resolved target against configured library roots and allowed cache roots.
+- Configured roots keep both their declared absolute path and their resolved path, so symlinked library roots still work while symlink escapes inside a library are rejected.
+- Outside-library paths are rejected before file existence is revealed.
 
 ## Startup Flow
 
@@ -196,6 +604,8 @@ Main environment variables:
 - `SAMO_DB_PATH`: SQLite database path, defaults to `data/samo.db`
 - `SAMO_RADIO_CONFIG`: radio JSON config, defaults to `data/radio.json`
 - `SAMO_API_TOKEN`: optional bearer token for `/api/v1/*`
+- `SAMO_BOOTSTRAP_USERNAME`: optional first admin username, defaults to `admin`
+- `SAMO_BOOTSTRAP_PASSWORD`: optional first admin password. If omitted on first run, startup generates and logs a random one-time password; if the named admin already exists, setting this env var updates that admin's password.
 - `SAMO_SCAN_ON_START`: defaults to `true`
 - `SAMO_WATCH_LIBRARIES`: defaults to `true`
 - `SAMO_WATCH_DEBOUNCE`: filesystem change debounce duration, defaults to `3s`
@@ -302,7 +712,7 @@ Responsibilities:
 - map provider-specific JSON into Samo metadata candidates
 - preserve provider IDs and URLs in `catalog.ExternalIDs`/links
 
-It should not write catalog rows directly. A later UI/apply workflow can decide which candidate fields to merge into catalog items.
+It writes user-confirmed fields to `metadata_overrides` via `MetadataApplyService`; catalog projection merges overrides at load time. It must not call external providers automatically during scans or ingestion.
 
 ### `internal/libraries`
 
@@ -379,6 +789,10 @@ Current scanner behavior:
 - reads audiobook sidecars: `desc.txt`, `reader.txt`, and `.opf`
 - discovers local cover images such as `cover.jpg`, `folder.png`, `front.webp`, or `album.jpg`
 - extracts embedded cover art into the cover cache when sidecars are missing
+- resolves tag aliases across ID3/MP4/Vorbis/iTunes field names
+- merges embedded tags across multi-file audiobook and podcast folders
+- reads audiobook `metadata.json`, `.opf`, text sidecars, and `.cue` chapter sheets
+- reads music `album.nfo` sidecars for album-level metadata and UPC
 
 The scanner writes to SQLite. It should not return API response DTOs directly to HTTP.
 
@@ -527,7 +941,7 @@ Current metadata lookup surface:
 
 - enabled metadata provider list
 - explicit metadata search for audiobooks, podcasts, and music
-- no write/apply endpoint yet
+- metadata apply preview/apply with field-level confirmation
 
 The API should preserve rich metadata rather than flattening to the lowest common denominator. Navidrome/OpenSubsonic and Audiobookshelf compatibility should map into or out of Samo-native models.
 
@@ -563,7 +977,7 @@ Rules:
 - `catalog` defines read models and catalog query behavior.
 - `playback` owns listening-state writes.
 - `files` owns validated local media byte serving.
-- `metadata` searches external metadata providers only when explicitly called.
+- `metadata` searches external metadata providers and applies user-confirmed candidate fields when explicitly called.
 - `libraries` owns library records and scan orchestration.
 - `covers` owns embedded artwork extraction and cache rows.
 - `scanner` discovers and writes metadata.
@@ -584,26 +998,145 @@ Rules:
 These are expected first-pass limits, not accidental bugs:
 
 - scanner does not fetch remote metadata; remote RSS ingestion lives in `internal/sources`
-- external metadata lookup is search-only; it does not apply changes to catalog items yet
+- external metadata lookup still does not download remote cover art into the local cache automatically
 - scanner does not download remote cover art (only sidecars + embedded extraction)
 - scanner does not transcode audio
 - relocating a library path assigns a new deterministic library ID; clients must follow the ID returned by `PATCH`
-- stream shortcuts default to the first linked `media_files` row; use `?mediaFileId=` for others
+- stream shortcuts accept `?mediaFileId=` to force a specific linked file; otherwise selection is disc- and progress-aware
 - radio config is still JSON-backed rather than catalog-backed
 - internet radio stations are stored and shared, but not probed for live metadata yet
 - podcast feed deletion removes the remote podcast shelf item; it does not reconcile with a local-file podcast of the same show yet
-- auth is token-gated API access, not full users/sessions yet
+- native API uses per-user bearer tokens; legacy `SAMO_API_TOKEN` maps to bootstrap user `user-server`
+- Subsonic adapter maps Samo music IDs directly; per-library album filtering in `getAlbumList2` is not wired yet
+
+### 2026-05-22 — Subsonic / OpenSubsonic compatibility
+
+**Packages:** `internal/subsonic`, `internal/catalog`, `internal/api`
+
+**`internal/subsonic`**
+
+- JSON Subsonic API under `/rest/{action}` and `/rest/{action}.view`.
+- Maps Samo music libraries, artists, albums, tracks, playlists, search, stream, and cover art onto existing catalog and files services.
+- Auth reuses `SAMO_API_TOKEN` via Subsonic password (`p=`), token auth (`t`/`s`), or Bearer header. Open when no token is configured.
+
+**`internal/catalog`**
+
+- Added relation helpers: albums for artist, tracks for album/playlist, cover art ID resolution.
+
+**HTTP**
+
+- Registered `/rest/*` routes alongside existing Samo-native API (not behind `requireAPIAuth`; Subsonic auth is separate).
+
+**Intentional v1 limits**
+
+- JSON only (`f=json`); XML not implemented yet.
+- No user accounts, starred/frequent album lists, or Subsonic XML yet.
+- `musicFolderId` filtering not applied because albums are not library-scoped in the catalog read model yet.
+
+### 2026-05-22 — Last.fm native scrobbling
+
+**Packages:** `internal/lastfm`, `internal/api`, `internal/config`, `migrations/006_lastfm.sql`
+
+**`internal/lastfm`**
+
+- Last.fm web auth flow with session stored in SQLite.
+- Automatic scrobbling from playback `PATCH`/`PUT`, music/subsonic stream starts, and explicit scrobble events.
+- Subsonic `scrobble` and `updateNowPlaying` compatibility routes.
+- Love/unlove sync when tracks are favorited or starred.
+- Failed submissions queued with audit history; background poller retries; invalid sessions auto-cleared.
+
+**HTTP**
+
+- `GET /api/v1/lastfm/status`, queue, history
+- `POST /api/v1/lastfm/auth/begin`, `POST /api/v1/lastfm/auth/complete`
+- `DELETE /api/v1/lastfm/auth/session`
+- `POST /api/v1/lastfm/queue/flush`
+- `POST /api/v1/scrobble/events`
+- Subsonic `GET /rest/scrobble`, `GET /rest/updateNowPlaying`
+
+**Config**
+
+- `SAMO_LASTFM_API_KEY`, `SAMO_LASTFM_SHARED_SECRET`
+- `SAMO_LASTFM_POLL`, `SAMO_LASTFM_POLL_TICK`
+
+**Intentional limits**
+
+- one linked Last.fm account per Samo user
+- scrobbling is music-track only (not shelf/radio)
+- listen timing uses client-reported progress or stream resume position
+
+### 2026-05-22 — Multi-user accounts and per-user Last.fm
+
+**Packages:** `internal/users`, `internal/api`, `internal/playback`, `internal/lastfm`, `internal/subsonic`, `migrations/008_users.sql`, `migrations/009_lastfm_per_user.sql`
+
+**`internal/users`**
+
+- SQLite users with bcrypt passwords and revocable API tokens.
+- Bootstrap row `user-server` for legacy `SAMO_API_TOKEN` and migrated Last.fm session data.
+- Optional first admin via `SAMO_BOOTSTRAP_USERNAME` / `SAMO_BOOTSTRAP_PASSWORD`.
+- Subsonic auth resolves `u` + password or token auth to a Samo user.
+
+**Data model**
+
+- `user_playback` stores per-user progress/ratings/favorites for catalog targets.
+- `lastfm_user_settings` stores one Last.fm session per Samo user; queue and submission audit rows include `user_id`.
+
+**HTTP**
+
+- `POST /api/v1/auth/login`, `/api/v1/users/*` token and profile routes.
+- Last.fm and playback routes use the authenticated user's ID.
+- Subsonic stream/scrobble routes scrobble for the authenticated Subsonic user.
+
+### 2026-05-22 — Audiobook bookmarks, collections, listening sessions, author/series items
+
+**Packages:** `internal/shelfuser`, `internal/catalog`, `internal/api`, `migrations/012_shelf_user.sql`
+
+**Database**
+
+- `shelf_bookmarks` — per-user position bookmarks on audiobook `shelf_items` only.
+- `shelf_collections` and `shelf_collection_items` — ordered user lists of audiobook items.
+- `shelf_listening_sessions` — append-only progress segments recorded from playback updates.
+
+**`internal/shelfuser`**
+
+- Bookmark CRUD scoped to the authenticated user and audiobook items.
+- Collection CRUD with owner checks; rejects podcast shelf items.
+- `RecordSession` / list-by-item / recent sessions for the user.
+
+**`internal/catalog`**
+
+- `ShelfAuthorDetail` and `ShelfSeriesDetail` embed paginated matching items.
+- `ShelfItemsForAuthor` matches book author contributor IDs; `ShelfItemsForSeries` uses series `itemIds`.
+
+**HTTP API**
+
+- `GET/POST /api/v1/shelf/items/{id}/bookmarks`, `PATCH/DELETE /api/v1/shelf/bookmarks/{id}`
+- `GET/POST /api/v1/shelf/collections`, `GET/PATCH/DELETE /api/v1/shelf/collections/{id}`
+- `GET /api/v1/shelf/items/{id}/sessions`, `GET /api/v1/shelf/listening-sessions`
+- `GET /api/v1/shelf/authors/{id}/items`, `GET /api/v1/shelf/series/{id}/items`
+- `GET /api/v1/shelf/series` — paginated series list (was missing from handlers).
+- Author/series `GET` with `?include=items` returns detail + paginated items in one payload.
+- Playback `PUT`/`PATCH` on `shelf-item` records a listening session when progress changes.
+
+**Tests**
+
+- Bookmark/collection/session lifecycle and podcast rejection in collections (`internal/shelfuser`).
+- Author/series item pagination (`internal/catalog`).
+
+**Intentional limits left for later foundation passes**
+
+- No Audiobookshelf compatibility routes for bookmarks/collections yet.
+- Listening sessions are recorded from API playback writes only (not Subsonic shelf playback).
+- Collections are user-private; no shared or admin-managed shelf lists.
 
 ## Near-Term Build Path
 
 Useful next steps:
 
-1. Expand scanner metadata extraction to cover the full Samo client needs.
-2. Add disc-aware default stream selection for multi-file albums and audiobooks.
-3. Add metadata candidate apply/merge workflows with user confirmation.
-4. Add Subsonic/OpenSubsonic compatibility routes.
-5. Add Audiobookshelf compatibility routes.
-6. Make radio stations optionally source from catalog queries/playlists.
+1. Extend Subsonic coverage (starred, XML, per-library indexes).
+2. Add Audiobookshelf compatibility routes.
+3. Make radio stations optionally source from catalog queries/playlists.
+4. ListenBrainz support or shared-household scrobble policies.
 
 ## Testing Expectations
 
@@ -626,5 +1159,9 @@ Current tests cover:
 - embedded cover extraction, cache rows, and cover ID serving
 - audio file checksum computation and `mediaFileId` stream selection
 - podcast feed poll scheduling, due-feed selection, and refresh without clobbering poll settings
+- tag alias resolution, multi-file tag merge, cue/metadata.json/nfo sidecars, and iTunes explicit mapping
+- disc-aware stream file selection and resume offsets for multi-file shelf items
+- metadata apply preview/apply with field-level confirmation, external ID merge, and override persistence
+- shelf bookmarks, collections, listening sessions, and author/series item lists
 
 Keep tests focused on contracts and package boundaries. Scanner tests should prefer parser/grouping tests and small generated media fixtures when practical.

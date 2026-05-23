@@ -49,4 +49,6 @@ export SAMO_DATA_DIR=/opt/samo/data
 ./samo-server
 ```
 
+On first run, set `SAMO_BOOTSTRAP_PASSWORD` or read the generated bootstrap admin password from the server log. There is no built-in default admin password.
+
 See [storage-and-scanning.md](storage-and-scanning.md) for all scanner environment variables.

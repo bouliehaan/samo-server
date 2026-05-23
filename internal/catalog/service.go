@@ -4,7 +4,6 @@ import (
 	"errors"
 	"slices"
 	"sort"
-	"strings"
 	"sync"
 )
 
@@ -178,44 +177,6 @@ func (s *Service) ListGenres(page PageRequest) Page[GenreSummary] {
 	return paginate(s.genres, page)
 }
 
-func (s *Service) SearchMusic(query string, page PageRequest) MusicSearchResults {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-
-	query = strings.ToLower(strings.TrimSpace(query))
-	results := MusicSearchResults{
-		Limit:  normalizePage(page).Limit,
-		Offset: normalizePage(page).Offset,
-	}
-	if query == "" {
-		return results
-	}
-
-	for _, item := range s.musicArtists {
-		if containsAny(query, item.Name, item.SortName) {
-			results.Artists = append(results.Artists, item)
-		}
-	}
-	for _, item := range s.musicAlbums {
-		if containsAny(query, item.Title, item.SortTitle, strings.Join(item.ArtistNames, " ")) {
-			results.Albums = append(results.Albums, item)
-		}
-	}
-	for _, item := range s.musicTracks {
-		if containsAny(query, item.Title, item.SortTitle, item.AlbumTitle, strings.Join(item.ArtistNames, " ")) {
-			results.Tracks = append(results.Tracks, item)
-		}
-	}
-	for _, item := range s.musicPlaylists {
-		if containsAny(query, item.Name, item.Description) {
-			results.Playlists = append(results.Playlists, item)
-		}
-	}
-
-	results.Total = len(results.Artists) + len(results.Albums) + len(results.Tracks) + len(results.Playlists)
-	return trimMusicSearch(results, page)
-}
-
 func (s *Service) ListShelfLibraries(page PageRequest) Page[ShelfLibrary] {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
@@ -320,44 +281,6 @@ func (s *Service) PodcastEpisode(id string) (PodcastEpisode, error) {
 	return item, nil
 }
 
-func (s *Service) SearchShelf(query string, page PageRequest) ShelfSearchResults {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-
-	query = strings.ToLower(strings.TrimSpace(query))
-	results := ShelfSearchResults{
-		Limit:  normalizePage(page).Limit,
-		Offset: normalizePage(page).Offset,
-	}
-	if query == "" {
-		return results
-	}
-
-	for _, item := range s.shelfItems {
-		if shelfItemMatches(item, query) {
-			results.Items = append(results.Items, item)
-		}
-	}
-	for _, item := range s.shelfAuthors {
-		if containsAny(query, item.Name, item.SortName) {
-			results.Authors = append(results.Authors, item)
-		}
-	}
-	for _, item := range s.shelfSeries {
-		if containsAny(query, item.Name, item.Description) {
-			results.Series = append(results.Series, item)
-		}
-	}
-	for _, item := range s.podcastEpisodes {
-		if containsAny(query, item.Title, item.Subtitle, item.Description) {
-			results.Episodes = append(results.Episodes, item)
-		}
-	}
-
-	results.Total = len(results.Items) + len(results.Authors) + len(results.Series) + len(results.Episodes)
-	return trimShelfSearch(results, page)
-}
-
 func (s *Service) reindex() {
 	s.musicArtistByID = map[string]MusicArtist{}
 	s.musicAlbumByID = map[string]MusicAlbum{}
@@ -443,6 +366,14 @@ func paginate[T any](items []T, page PageRequest) Page[T] {
 	}
 }
 
+func NormalizePage(page PageRequest) PageRequest {
+	return normalizePage(page)
+}
+
+func Paginate[T any](items []T, page PageRequest) Page[T] {
+	return paginate(items, page)
+}
+
 func normalizePage(page PageRequest) PageRequest {
 	if page.Limit <= 0 {
 		page.Limit = 50
@@ -454,68 +385,6 @@ func normalizePage(page PageRequest) PageRequest {
 		page.Offset = 0
 	}
 	return page
-}
-
-func containsAny(query string, values ...string) bool {
-	for _, value := range values {
-		if strings.Contains(strings.ToLower(value), query) {
-			return true
-		}
-	}
-	return false
-}
-
-func trimMusicSearch(results MusicSearchResults, page PageRequest) MusicSearchResults {
-	page = normalizePage(page)
-	results.Limit = page.Limit
-	results.Offset = page.Offset
-	results.Artists = paginate(results.Artists, page).Items
-	results.Albums = paginate(results.Albums, page).Items
-	results.Tracks = paginate(results.Tracks, page).Items
-	results.Playlists = paginate(results.Playlists, page).Items
-	return results
-}
-
-func trimShelfSearch(results ShelfSearchResults, page PageRequest) ShelfSearchResults {
-	page = normalizePage(page)
-	results.Limit = page.Limit
-	results.Offset = page.Offset
-	results.Items = paginate(results.Items, page).Items
-	results.Authors = paginate(results.Authors, page).Items
-	results.Series = paginate(results.Series, page).Items
-	results.Episodes = paginate(results.Episodes, page).Items
-	return results
-}
-
-func shelfItemMatches(item ShelfItem, query string) bool {
-	if containsAny(query, item.ID, item.Path, strings.Join(item.Tags, " "), strings.Join(item.Genres, " ")) {
-		return true
-	}
-	if item.Book != nil {
-		values := []string{
-			item.Book.Title,
-			item.Book.Subtitle,
-			item.Book.SortTitle,
-			item.Book.Description,
-			item.Book.Publisher,
-			strings.Join(item.Book.Tags, " "),
-			strings.Join(item.Book.Genres, " "),
-		}
-		for _, author := range item.Book.Authors {
-			values = append(values, author.Name, author.SortName)
-		}
-		for _, narrator := range item.Book.Narrators {
-			values = append(values, narrator.Name, narrator.SortName)
-		}
-		for _, series := range item.Book.Series {
-			values = append(values, series.Name)
-		}
-		return containsAny(query, values...)
-	}
-	if item.Podcast != nil {
-		return containsAny(query, item.Podcast.Title, item.Podcast.Author, item.Podcast.Description, item.Podcast.FeedURL, strings.Join(item.Podcast.Categories, " "))
-	}
-	return false
 }
 
 func shelfItemTitle(item ShelfItem) string {

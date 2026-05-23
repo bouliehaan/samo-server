@@ -162,39 +162,6 @@ func normalizeTagKey(key string) string {
 	return key
 }
 
-func firstTag(tags catalog.Tags, keys ...string) string {
-	for _, key := range keys {
-		values := tags[normalizeTagKey(key)]
-		if len(values) > 0 && strings.TrimSpace(values[0]) != "" {
-			return strings.TrimSpace(values[0])
-		}
-	}
-	return ""
-}
-
-func splitTag(tags catalog.Tags, keys ...string) []string {
-	value := firstTag(tags, keys...)
-	if value == "" {
-		return nil
-	}
-	parts := strings.FieldsFunc(value, func(r rune) bool {
-		return r == ';' || r == '|' || r == '\\'
-	})
-	return cleanParts(parts)
-}
-
-func splitGenreTag(tags catalog.Tags, keys ...string) []string {
-	value := firstTag(tags, keys...)
-	if value == "" {
-		return nil
-	}
-	value = strings.ReplaceAll(value, "//", "/")
-	parts := strings.FieldsFunc(value, func(r rune) bool {
-		return r == ';' || r == '|' || r == '/' || r == '\\'
-	})
-	return cleanParts(parts)
-}
-
 func cleanParts(parts []string) []string {
 	out := make([]string, 0, len(parts))
 	seen := map[string]struct{}{}
@@ -211,11 +178,6 @@ func cleanParts(parts []string) []string {
 		out = append(out, part)
 	}
 	return out
-}
-
-func boolTag(tags catalog.Tags, keys ...string) bool {
-	value := strings.ToLower(firstTag(tags, keys...))
-	return value == "1" || value == "true" || value == "yes" || value == "y" || value == "explicit"
 }
 
 func parseInt64(value string) int64 {

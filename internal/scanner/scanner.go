@@ -13,6 +13,8 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+
+	"github.com/bouliehaan/samo-server/internal/catalog"
 )
 
 type Library struct {
@@ -29,10 +31,11 @@ type Options struct {
 }
 
 type Scanner struct {
-	db          *sql.DB
-	ffprobePath string
-	covers      CoverResolver
-	activeScan  *scanAccumulator
+	db            *sql.DB
+	ffprobePath   string
+	covers        CoverResolver
+	activeScan    *scanAccumulator
+	overrideIndex *catalog.OverrideIndex
 }
 
 func New(db *sql.DB) *Scanner {
@@ -99,6 +102,8 @@ func (s *Scanner) scanLibrary(ctx context.Context, library Library) error {
 		return s.scanAudiobookLibrary(ctx, library, root, files)
 	case library.Kind == "shelf" && library.MediaType == "podcast":
 		return s.scanPodcastLibrary(ctx, library, root, files)
+	case library.Kind == "mixed":
+		return s.scanMixedLibrary(ctx, library, root, files)
 	default:
 		return fmt.Errorf("unsupported library kind %q media type %q", library.Kind, library.MediaType)
 	}
