@@ -55,6 +55,10 @@ func ProbeIcyStream(ctx context.Context, client *http.Client, streamURL string) 
 	if client == nil {
 		client = &http.Client{Timeout: defaultProbeTimeout}
 	}
+	if resolvedURL, err := ResolveInternetRadioStreamURL(ctx, client, streamURL); err == nil {
+		streamURL = resolvedURL
+		parsed, _ = url.Parse(streamURL)
+	}
 
 	result, err := probeViaHTTP(ctx, client, streamURL)
 	if err == nil {

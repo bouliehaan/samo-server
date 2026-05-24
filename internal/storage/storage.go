@@ -10,7 +10,10 @@ import (
 	"sort"
 	"strings"
 
-	_ "github.com/mattn/go-sqlite3"
+	// modernc.org/sqlite is a pure-Go SQLite driver — no CGO, no libc
+	// dependency. This is what lets samo-server ship as a single statically-
+	// linked binary on any Linux distro.
+	_ "modernc.org/sqlite"
 )
 
 func Open(ctx context.Context, path string) (*sql.DB, error) {
@@ -22,7 +25,7 @@ func Open(ctx context.Context, path string) (*sql.DB, error) {
 		return nil, fmt.Errorf("create database directory: %w", err)
 	}
 
-	db, err := sql.Open("sqlite3", path)
+	db, err := sql.Open("sqlite", path)
 	if err != nil {
 		return nil, fmt.Errorf("open sqlite database: %w", err)
 	}

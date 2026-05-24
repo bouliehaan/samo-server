@@ -2,7 +2,17 @@ package catalog
 
 import "strings"
 
-// ProjectMetadataOverrides overlays user override patches onto a hydrated catalog seed.
+// ProjectMetadataOverrides overlays user override patches onto a hydrated
+// catalog seed. Each domain has its own target_kind:
+//
+//	music-artist / music-album / music-track / music-playlist
+//	audiobook
+//	podcast              (the show)
+//	podcast-episode      (one episode)
+//	podcast-feed         (RSS row in podcast_feeds; overlays its podcast show)
+//
+// The old shelf-* dispatch values are now dead — migration 016 rewrites
+// any existing rows.
 func ProjectMetadataOverrides(seed *Seed, overrides map[MetadataOverrideKey]MetadataOverridePatch, feedPodcastIDs map[string]string) {
 	if seed == nil || len(overrides) == 0 {
 		return
@@ -36,18 +46,25 @@ func ProjectMetadataOverrides(seed *Seed, overrides map[MetadataOverrideKey]Meta
 			seed.MusicTracks[index] = overlayMusicTrack(track, patch)
 		}
 	}
-	for index, item := range seed.ShelfItems {
-		key := MetadataOverrideKey{TargetKind: "shelf-item", TargetID: item.ID}
+	for index, item := range seed.Audiobooks {
+		key := MetadataOverrideKey{TargetKind: "audiobook", TargetID: item.ID}
 		if patch, ok := overrides[key]; ok {
-			item = overlayShelfItem(item, patch)
+			item = overlayAudiobook(item, patch)
+		}
+		seed.Audiobooks[index] = item
+	}
+	for index, item := range seed.Podcasts {
+		key := MetadataOverrideKey{TargetKind: "podcast", TargetID: item.ID}
+		if patch, ok := overrides[key]; ok {
+			item = overlayPodcast(item, patch)
 		}
 		if patch, ok := podcastFeedByPodcastID[item.ID]; ok {
-			item = overlayPodcastFeedOnShelfItem(item, patch)
+			item = overlayPodcastFeedOnPodcast(item, patch)
 		}
-		seed.ShelfItems[index] = item
+		seed.Podcasts[index] = item
 	}
 	for index, episode := range seed.PodcastEpisodes {
-		key := MetadataOverrideKey{TargetKind: "shelf-episode", TargetID: episode.ID}
+		key := MetadataOverrideKey{TargetKind: "podcast-episode", TargetID: episode.ID}
 		if patch, ok := overrides[key]; ok {
 			seed.PodcastEpisodes[index] = overlayPodcastEpisode(episode, patch)
 		}
@@ -129,9 +146,9 @@ func overlayMusicAlbum(album MusicAlbum, patch MetadataOverridePatch) MusicAlbum
 		album.ExternalIDs = value
 	}
 	if value, ok := decodePatchContributors(patch, "artists"); ok {
-		album.ArtistNames = contributorNames(value)
+		album.ArtistNames = contributorRefNames(value)
 		if album.DisplayArtist == "" {
-			album.DisplayArtist = joinContributorNames(value)
+			album.DisplayArtist = joinContributorRefNames(value)
 		}
 	}
 	return album
@@ -175,36 +192,29 @@ func overlayMusicTrack(track MusicTrack, patch MetadataOverridePatch) MusicTrack
 		track.ExternalIDs = value
 	}
 	if value, ok := decodePatchContributors(patch, "artists"); ok {
-		track.ArtistNames = contributorNames(value)
+		track.ArtistNames = contributorRefNames(value)
 		if track.DisplayArtist == "" {
-			track.DisplayArtist = joinContributorNames(value)
+			track.DisplayArtist = joinContributorRefNames(value)
 		}
 	}
 	return track
 }
 
-func contributorNames(contributors []Contributor) []string {
-	names := make([]string, 0, len(contributors))
-	for _, contributor := range contributors {
-		if name := strings.TrimSpace(contributor.Name); name != "" {
+func contributorRefNames(refs []ContributorRef) []string {
+	names := make([]string, 0, len(refs))
+	for _, ref := range refs {
+		if name := strings.TrimSpace(ref.Name); name != "" {
 			names = append(names, name)
 		}
 	}
 	return names
 }
 
-func joinContributorNames(contributors []Contributor) string {
-	return strings.Join(contributorNames(contributors), ", ")
+func joinContributorRefNames(refs []ContributorRef) string {
+	return strings.Join(contributorRefNames(refs), ", ")
 }
 
-func overlayShelfItem(item ShelfItem, patch MetadataOverridePatch) ShelfItem {
-	if item.MediaType == ShelfMediaTypePodcast {
-		return overlayShelfPodcastItem(item, patch)
-	}
-	return overlayShelfBookItem(item, patch)
-}
-
-func overlayShelfBookItem(item ShelfItem, patch MetadataOverridePatch) ShelfItem {
+func overlayAudiobook(item AudiobookItem, patch MetadataOverridePatch) AudiobookItem {
 	book := item.Book
 	if book == nil {
 		book = &BookMetadata{}
@@ -266,7 +276,7 @@ func overlayShelfBookItem(item ShelfItem, patch MetadataOverridePatch) ShelfItem
 	return item
 }
 
-func overlayShelfPodcastItem(item ShelfItem, patch MetadataOverridePatch) ShelfItem {
+func overlayPodcast(item PodcastItem, patch MetadataOverridePatch) PodcastItem {
 	podcast := item.Podcast
 	if podcast == nil {
 		podcast = &PodcastMetadata{}
@@ -306,10 +316,11 @@ func overlayShelfPodcastItem(item ShelfItem, patch MetadataOverridePatch) ShelfI
 	return item
 }
 
-func overlayPodcastFeedOnShelfItem(item ShelfItem, patch MetadataOverridePatch) ShelfItem {
-	if item.MediaType != ShelfMediaTypePodcast {
-		return item
-	}
+// overlayPodcastFeedOnPodcast applies a podcast-feed override to its
+// associated podcast show. Both target_kind = 'podcast' and target_kind =
+// 'podcast-feed' can adjust the same fields; we apply the podcast-feed
+// patch second so it wins on conflict.
+func overlayPodcastFeedOnPodcast(item PodcastItem, patch MetadataOverridePatch) PodcastItem {
 	podcast := item.Podcast
 	if podcast == nil {
 		podcast = &PodcastMetadata{}

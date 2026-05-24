@@ -5,6 +5,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 )
 
@@ -84,5 +85,26 @@ func TestServeEnclosureForwardsClientRange(t *testing.T) {
 	body, _ := io.ReadAll(rec.Body)
 	if !bytesEqual(body, payload[2:6]) {
 		t.Fatalf("body = %q", body)
+	}
+}
+
+func TestFetchEnclosureErrorsWhenUnknownLengthExceedsMax(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if flusher, ok := w.(http.Flusher); ok {
+			flusher.Flush()
+		}
+		_, _ = w.Write([]byte("0123456789"))
+	}))
+	defer upstream.Close()
+
+	service := New(ServiceOptions{AllowPrivateHosts: true})
+	body, _, err := service.FetchEnclosure(context.Background(), upstream.URL, 5)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer body.Close()
+	_, err = io.Copy(io.Discard, body)
+	if err == nil || !strings.Contains(err.Error(), "exceeds max cache file size") {
+		t.Fatalf("err = %v, want max size error", err)
 	}
 }

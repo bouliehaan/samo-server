@@ -34,13 +34,13 @@ func TestEnsureCachedDownloadsAndLookupServesPath(t *testing.T) {
 		t.Fatal(err)
 	}
 	if _, err := db.ExecContext(ctx, `
-		INSERT INTO libraries (id, name, kind, media_type, path)
-		VALUES ('lib-1', 'Podcasts', 'shelf', 'podcast', 'samo://podcast-feeds')`); err != nil {
+		INSERT INTO libraries (id, name, kind, path)
+		VALUES ('lib-1', 'Podcasts', 'podcast', 'samo://podcast-feeds')`); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := db.ExecContext(ctx, `
-		INSERT INTO shelf_items (id, library_id, media_type, media_kind, path)
-		VALUES ('pod-1', 'lib-1', 'podcast', 'podcast', 'samo://show')`); err != nil {
+		INSERT INTO podcasts (id, library_id, path)
+		VALUES ('pod-1', 'lib-1', 'samo://show')`); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := db.ExecContext(ctx, `
@@ -101,13 +101,13 @@ func TestPruneRetentionRemovesOldestWhenOverMaxBytes(t *testing.T) {
 	}
 	now := time.Now().UTC().Format(time.RFC3339)
 	if _, err := db.ExecContext(ctx, `
-		INSERT INTO libraries (id, name, kind, media_type, path)
-		VALUES ('lib', 'Podcasts', 'shelf', 'podcast', 'samo://podcast-feeds')`); err != nil {
+		INSERT INTO libraries (id, name, kind, path)
+		VALUES ('lib', 'Podcasts', 'podcast', 'samo://podcast-feeds')`); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := db.ExecContext(ctx, `
-		INSERT INTO shelf_items (id, library_id, media_type, media_kind, path)
-		VALUES ('pod', 'lib', 'podcast', 'podcast', 'samo://show')`); err != nil {
+		INSERT INTO podcasts (id, library_id, path)
+		VALUES ('pod', 'lib', 'samo://show')`); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := db.ExecContext(ctx, `

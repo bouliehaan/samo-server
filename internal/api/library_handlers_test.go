@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/bouliehaan/samo-server/internal/libraries"
 	"github.com/bouliehaan/samo-server/internal/scanner"
@@ -37,10 +38,9 @@ func TestLibraryScanAPI(t *testing.T) {
 	handler := NewServer(ServerOptions{Libraries: libraryService})
 
 	body, _ := json.Marshal(libraries.CreateLibraryInput{
-		Name:      "Audiobooks",
-		Kind:      libraries.KindShelf,
-		MediaType: libraries.MediaTypeBook,
-		Path:      libraryDir,
+		Name: "Audiobooks",
+		Kind: libraries.KindAudiobook,
+		Path: libraryDir,
 	})
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/libraries", bytes.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
@@ -58,15 +58,38 @@ func TestLibraryScanAPI(t *testing.T) {
 	req = httptest.NewRequest(http.MethodPost, "/api/v1/libraries/"+created.ID+"/scan", nil)
 	rec = httptest.NewRecorder()
 	handler.ServeHTTP(rec, req)
-	if rec.Code != http.StatusOK {
-		t.Fatalf("scan status = %d, want %d body=%s", rec.Code, http.StatusOK, rec.Body.String())
+	// Async contract: POST returns 202 with a "running" job; the dashboard
+	// polls /api/v1/scan/jobs/{id} for completion.
+	if rec.Code != http.StatusAccepted {
+		t.Fatalf("scan status = %d, want %d body=%s", rec.Code, http.StatusAccepted, rec.Body.String())
 	}
 
 	var result libraries.ScanResult
 	if err := json.NewDecoder(rec.Body).Decode(&result); err != nil {
 		t.Fatal(err)
 	}
-	if result.Job.Status != libraries.ScanStatusCompleted {
-		t.Fatalf("job status = %q, want completed", result.Job.Status)
+	if result.Job.Status != libraries.ScanStatusRunning {
+		t.Fatalf("initial job status = %q, want running", result.Job.Status)
+	}
+
+	// Poll the job until the goroutine settles.
+	deadline := time.Now().Add(10 * time.Second)
+	var final libraries.ScanJob
+	for {
+		job, err := libraryService.GetScanJob(ctx, result.Job.ID)
+		if err != nil {
+			t.Fatalf("get scan job: %v", err)
+		}
+		if job.Status != libraries.ScanStatusRunning && job.Status != libraries.ScanStatusPending {
+			final = job
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("scan job %q stuck in %q after 10s", result.Job.ID, job.Status)
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	if final.Status != libraries.ScanStatusCompleted {
+		t.Fatalf("final status = %q, want completed (error=%q)", final.Status, final.Error)
 	}
 }

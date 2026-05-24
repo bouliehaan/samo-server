@@ -6,14 +6,19 @@ import (
 	"encoding/json"
 )
 
+// Override target_kind constants. These string values are persisted in
+// metadata_overrides.target_kind and on the wire in the metadata-apply API,
+// so they MUST stay stable. Migration 016 rewrites old shelf-* values to
+// the audiobook / podcast / podcast-episode forms below.
 const (
-	OverrideKindMusicArtist   = "music-artist"
-	OverrideKindMusicAlbum    = "music-album"
-	OverrideKindMusicTrack    = "music-track"
-	OverrideKindMusicPlaylist = "music-playlist"
-	OverrideKindShelfItem     = "shelf-item"
-	OverrideKindShelfEpisode  = "shelf-episode"
-	OverrideKindPodcastFeed   = "podcast-feed"
+	OverrideKindMusicArtist    = "music-artist"
+	OverrideKindMusicAlbum     = "music-album"
+	OverrideKindMusicTrack     = "music-track"
+	OverrideKindMusicPlaylist  = "music-playlist"
+	OverrideKindAudiobook      = "audiobook"
+	OverrideKindPodcast        = "podcast"
+	OverrideKindPodcastEpisode = "podcast-episode"
+	OverrideKindPodcastFeed    = "podcast-feed"
 )
 
 // OverrideIndex caches metadata override patches for write-time guarding.
@@ -67,12 +72,13 @@ func (idx *OverrideIndex) FeedPatchForPodcast(podcastID string) MetadataOverride
 	return idx.podcastFeedByPodcastID[podcastID]
 }
 
-func (idx *OverrideIndex) CombinedShelfItemPatch(itemID string, mediaType ShelfMediaType) MetadataOverridePatch {
-	patch := idx.Patch(OverrideKindShelfItem, itemID)
-	if mediaType != ShelfMediaTypePodcast {
-		return patch
-	}
-	feedPatch := idx.FeedPatchForPodcast(itemID)
+// CombinedPodcastPatch merges a podcast-level override with the patch from
+// its podcast-feed (RSS) override row. Feed overrides win on conflict —
+// they're typically the user's "fix the RSS title once" surface, while
+// per-show overrides are the rarer manual tweaks.
+func (idx *OverrideIndex) CombinedPodcastPatch(podcastID string) MetadataOverridePatch {
+	patch := idx.Patch(OverrideKindPodcast, podcastID)
+	feedPatch := idx.FeedPatchForPodcast(podcastID)
 	if len(feedPatch) == 0 {
 		return patch
 	}

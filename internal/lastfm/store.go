@@ -15,6 +15,60 @@ type sessionRecord struct {
 	ConnectedAt time.Time
 }
 
+type appConfigRecord struct {
+	Enabled      bool
+	APIKey       string
+	SharedSecret string
+	UpdatedAt    time.Time
+}
+
+func loadAppConfig(ctx context.Context, db *sql.DB) (appConfigRecord, bool, error) {
+	var enabled int
+	var apiKey, sharedSecret, updatedAt string
+	err := db.QueryRowContext(ctx, `
+		SELECT enabled, api_key, shared_secret, updated_at
+		FROM lastfm_app_config
+		WHERE id = 1`).Scan(&enabled, &apiKey, &sharedSecret, &updatedAt)
+	if err == sql.ErrNoRows {
+		return appConfigRecord{}, false, nil
+	}
+	if err != nil {
+		return appConfigRecord{}, false, fmt.Errorf("load last.fm app config: %w", err)
+	}
+	parsed, err := time.Parse(time.RFC3339, updatedAt)
+	if err != nil {
+		parsed = time.Now().UTC()
+	}
+	return appConfigRecord{
+		Enabled:      enabled != 0,
+		APIKey:       apiKey,
+		SharedSecret: sharedSecret,
+		UpdatedAt:    parsed,
+	}, true, nil
+}
+
+func saveAppConfig(ctx context.Context, db *sql.DB, enabled bool, apiKey, sharedSecret string) (appConfigRecord, error) {
+	now := time.Now().UTC().Format(time.RFC3339)
+	_, err := db.ExecContext(ctx, `
+		INSERT INTO lastfm_app_config (id, enabled, api_key, shared_secret, updated_at)
+		VALUES (1, ?, ?, ?, ?)
+		ON CONFLICT(id) DO UPDATE SET
+			enabled = excluded.enabled,
+			api_key = excluded.api_key,
+			shared_secret = excluded.shared_secret,
+			updated_at = excluded.updated_at`,
+		boolInt(enabled),
+		strings.TrimSpace(apiKey),
+		strings.TrimSpace(sharedSecret),
+		now,
+	)
+	if err != nil {
+		return appConfigRecord{}, fmt.Errorf("save last.fm app config: %w", err)
+	}
+	record, _, err := loadAppConfig(ctx, db)
+	return record, err
+}
+
 func loadSession(ctx context.Context, db *sql.DB, userID string) (sessionRecord, error) {
 	var username, sessionKey, connectedAt string
 	err := db.QueryRowContext(ctx, `

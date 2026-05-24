@@ -60,9 +60,9 @@ func (s *MetadataApplyService) loadPodcastFeedByID(ctx context.Context, id strin
 	err := s.db.QueryRowContext(ctx, `
 		SELECT f.id, f.podcast_id, f.feed_url, f.title, f.description, f.author, f.site_url, f.image_url,
 		       f.language, f.explicit, f.categories_json, f.owner_name, f.owner_email, f.episode_count,
-		       i.cover_json, i.podcast_json
+		       p.cover_json, p.podcast_json
 		FROM podcast_feeds f
-		LEFT JOIN shelf_items i ON i.id = f.podcast_id
+		LEFT JOIN podcasts p ON p.id = f.podcast_id
 		WHERE f.id = ?`, id).Scan(
 		&row.ID, &row.PodcastID, &row.FeedURL, &row.Title, &row.Description, &row.Author, &row.SiteURL,
 		&row.ImageURL, &row.Language, &explicit, &categories, &row.OwnerName, &row.OwnerEmail,

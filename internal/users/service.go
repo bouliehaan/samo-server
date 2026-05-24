@@ -4,12 +4,14 @@ import (
 	"context"
 	"database/sql"
 	"strings"
+	"time"
 )
 
 type Service struct {
 	db              *sql.DB
 	legacyAPIToken  string
 	legacyTokenHash string
+	streamTokens    *streamTokenStore
 }
 
 type ServiceOptions struct {
@@ -23,11 +25,43 @@ func New(options ServiceOptions) *Service {
 		db:              options.DB,
 		legacyAPIToken:  token,
 		legacyTokenHash: hashToken(token),
+		streamTokens:    newStreamTokenStore(),
 	}
 }
 
 func (s *Service) Enabled() bool {
 	return s != nil && s.db != nil
+}
+
+// IssueStreamToken mints an ephemeral credential the dashboard can paste into
+// <audio src=...> URLs without leaking the long-lived bearer token. The
+// caller must already be authenticated.
+func (s *Service) IssueStreamToken(userID string) (string, time.Time, error) {
+	if !s.Enabled() {
+		return "", time.Time{}, ErrDisabled
+	}
+	if strings.TrimSpace(userID) == "" {
+		return "", time.Time{}, ErrUnauthorized
+	}
+	return s.streamTokens.issue(strings.TrimSpace(userID))
+}
+
+// AuthenticateStreamToken resolves an ephemeral stream token to the user it
+// was minted for. Used by the request auth path when a route accepts
+// ?stream_token=... in place of a bearer header.
+func (s *Service) AuthenticateStreamToken(ctx context.Context, token string) (Principal, error) {
+	if !s.Enabled() {
+		return Principal{}, ErrDisabled
+	}
+	userID, ok := s.streamTokens.validate(strings.TrimSpace(token))
+	if !ok {
+		return Principal{}, ErrUnauthorized
+	}
+	user, err := loadUserByID(ctx, s.db, userID)
+	if err != nil {
+		return Principal{}, ErrUnauthorized
+	}
+	return Principal{User: user}, nil
 }
 
 func (s *Service) Bootstrap(ctx context.Context, input BootstrapInput) error {

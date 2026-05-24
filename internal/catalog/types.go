@@ -18,9 +18,13 @@ type Page[T any] struct {
 	Offset int `json:"offset"`
 }
 
+// Overview is the home-page summary. Each of music/audiobook/podcast/radio
+// is an independent first-class domain — there is no umbrella "shelf"
+// concept. Radio counts live in the radio service, not here.
 type Overview struct {
-	Music MusicOverview `json:"music"`
-	Shelf ShelfOverview `json:"shelf"`
+	Music     MusicOverview     `json:"music"`
+	Audiobook AudiobookOverview `json:"audiobook"`
+	Podcast   PodcastOverview   `json:"podcast"`
 }
 
 type MusicOverview struct {
@@ -32,14 +36,18 @@ type MusicOverview struct {
 	DurationSeconds int `json:"durationSeconds"`
 }
 
-type ShelfOverview struct {
+type AudiobookOverview struct {
+	LibraryCount     int `json:"libraryCount"`
+	AudiobookCount   int `json:"audiobookCount"`
+	ContributorCount int `json:"contributorCount"`
+	SeriesCount      int `json:"seriesCount"`
+	DurationSeconds  int `json:"durationSeconds"`
+}
+
+type PodcastOverview struct {
 	LibraryCount    int `json:"libraryCount"`
-	ItemCount       int `json:"itemCount"`
-	AudiobookCount  int `json:"audiobookCount"`
 	PodcastCount    int `json:"podcastCount"`
 	EpisodeCount    int `json:"episodeCount"`
-	AuthorCount     int `json:"authorCount"`
-	SeriesCount     int `json:"seriesCount"`
 	DurationSeconds int `json:"durationSeconds"`
 }
 
@@ -121,13 +129,22 @@ type PlaybackState struct {
 	LastPositionAt  *time.Time `json:"lastPositionAt,omitempty"`
 }
 
-type Contributor struct {
+// ContributorRef is the inline "tag" form of a contributor — what you embed
+// inside BookMetadata.Authors / BookMetadata.Narrators. The full entity
+// (with bio, images, counts) is Contributor in audiobook_types.go. We keep
+// these as separate types because the inline list has a stable JSON shape
+// (id/name/sortName/role) that we don't want to drag the entity's heavier
+// fields through every audiobook payload.
+type ContributorRef struct {
 	ID       string `json:"id,omitempty"`
 	Name     string `json:"name"`
 	SortName string `json:"sortName,omitempty"`
 	Role     string `json:"role,omitempty"`
 }
 
+// SeriesRef is the inline form of a series — embedded in BookMetadata.Series
+// with just the sequence info. The entity Series (in audiobook_types.go) is
+// the table-row form.
 type SeriesRef struct {
 	ID           string  `json:"id,omitempty"`
 	Name         string  `json:"name"`

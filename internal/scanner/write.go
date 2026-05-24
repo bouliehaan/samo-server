@@ -165,10 +165,10 @@ func (s *Scanner) setTrackArtists(ctx context.Context, trackID string, artists [
 	return nil
 }
 
-func (s *Scanner) upsertShelfItem(ctx context.Context, item catalog.ShelfItem) error {
+func (s *Scanner) upsertAudiobook(ctx context.Context, item catalog.AudiobookItem) error {
 	if s.overrideIndex != nil {
 		var err error
-		item, err = s.overrideIndex.GuardShelfItem(ctx, s.db, item)
+		item, err = s.overrideIndex.GuardAudiobook(ctx, s.db, item)
 		if err != nil {
 			return err
 		}
@@ -181,22 +181,16 @@ func (s *Scanner) upsertShelfItem(ctx context.Context, item catalog.ShelfItem) e
 	if item.Book != nil {
 		bookJSON = jsonText(item.Book)
 	}
-	var podcastJSON any
-	if item.Podcast != nil {
-		podcastJSON = jsonText(item.Podcast)
-	}
 
 	_, err := s.db.ExecContext(ctx, `
-		INSERT INTO shelf_items (
-		  id, library_id, media_type, media_kind, path, folder_id, inode, size_bytes, missing, invalid,
-		  cover_json, tags_json, genres_json, duration_seconds, progress_json, book_json, podcast_json,
+		INSERT INTO audiobooks (
+		  id, library_id, path, folder_id, inode, size_bytes, missing, invalid,
+		  cover_json, tags_json, genres_json, duration_seconds, progress_json, book_json,
 		  updated_at, last_scan_at
 		)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
 		ON CONFLICT(id) DO UPDATE SET
 		  library_id = excluded.library_id,
-		  media_type = excluded.media_type,
-		  media_kind = excluded.media_kind,
 		  path = excluded.path,
 		  folder_id = excluded.folder_id,
 		  inode = excluded.inode,
@@ -208,21 +202,106 @@ func (s *Scanner) upsertShelfItem(ctx context.Context, item catalog.ShelfItem) e
 		  genres_json = excluded.genres_json,
 		  duration_seconds = excluded.duration_seconds,
 		  book_json = excluded.book_json,
-		  podcast_json = excluded.podcast_json,
 		  updated_at = CURRENT_TIMESTAMP,
 		  last_scan_at = CURRENT_TIMESTAMP`,
-		item.ID, item.LibraryID, item.MediaType, item.MediaKind, item.Path, item.FolderID, item.Inode, item.SizeBytes,
+		item.ID, item.LibraryID, item.Path, item.FolderID, item.Inode, item.SizeBytes,
 		boolInt(item.Missing), boolInt(item.Invalid), coverJSON, jsonText(item.Tags), jsonText(item.Genres),
-		item.DurationSeconds, jsonText(item.Progress), bookJSON, podcastJSON)
+		item.DurationSeconds, jsonText(item.Progress), bookJSON)
+	if err == nil {
+		return nil
+	}
+	if !strings.Contains(strings.ToLower(err.Error()), "unique") {
+		return fmt.Errorf("upsert audiobook %q: %w", item.ID, err)
+	}
+	// Path UNIQUE collision — a row exists at this path under a different
+	// id (e.g. left over from an earlier scan when the library_id hashed
+	// differently). Preserve the existing id and update everything else
+	// against it.
+	_, err = s.db.ExecContext(ctx, `
+		UPDATE audiobooks
+		SET library_id = ?, folder_id = ?, inode = ?, size_bytes = ?, missing = ?, invalid = ?,
+		    cover_json = ?, tags_json = ?, genres_json = ?, duration_seconds = ?, book_json = ?,
+		    updated_at = CURRENT_TIMESTAMP, last_scan_at = CURRENT_TIMESTAMP
+		WHERE path = ?`,
+		item.LibraryID, item.FolderID, item.Inode, item.SizeBytes,
+		boolInt(item.Missing), boolInt(item.Invalid), coverJSON, jsonText(item.Tags), jsonText(item.Genres),
+		item.DurationSeconds, bookJSON, item.Path)
 	if err != nil {
-		return fmt.Errorf("upsert shelf item %q: %w", item.ID, err)
+		return fmt.Errorf("update audiobook by path %q: %w", item.Path, err)
 	}
 	return nil
 }
 
-func (s *Scanner) upsertShelfAuthor(ctx context.Context, author catalog.ShelfAuthor) error {
+func (s *Scanner) upsertPodcast(ctx context.Context, item catalog.PodcastItem) error {
+	if s.overrideIndex != nil {
+		var err error
+		item, err = s.overrideIndex.GuardPodcast(ctx, s.db, item)
+		if err != nil {
+			return err
+		}
+	}
+	coverJSON := "{}"
+	if item.Cover != nil {
+		coverJSON = jsonText(item.Cover)
+	}
+	var podcastJSON any
+	if item.Podcast != nil {
+		podcastJSON = jsonText(item.Podcast)
+	}
+
 	_, err := s.db.ExecContext(ctx, `
-		INSERT INTO shelf_authors (id, name, sort_name, description, images_json, external_ids_json)
+		INSERT INTO podcasts (
+		  id, library_id, path, folder_id, inode, size_bytes, missing, invalid,
+		  cover_json, tags_json, genres_json, duration_seconds, progress_json, podcast_json,
+		  updated_at, last_scan_at
+		)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+		ON CONFLICT(id) DO UPDATE SET
+		  library_id = excluded.library_id,
+		  path = excluded.path,
+		  folder_id = excluded.folder_id,
+		  inode = excluded.inode,
+		  size_bytes = excluded.size_bytes,
+		  missing = excluded.missing,
+		  invalid = excluded.invalid,
+		  cover_json = excluded.cover_json,
+		  tags_json = excluded.tags_json,
+		  genres_json = excluded.genres_json,
+		  duration_seconds = excluded.duration_seconds,
+		  podcast_json = excluded.podcast_json,
+		  updated_at = CURRENT_TIMESTAMP,
+		  last_scan_at = CURRENT_TIMESTAMP`,
+		item.ID, item.LibraryID, item.Path, item.FolderID, item.Inode, item.SizeBytes,
+		boolInt(item.Missing), boolInt(item.Invalid), coverJSON, jsonText(item.Tags), jsonText(item.Genres),
+		item.DurationSeconds, jsonText(item.Progress), podcastJSON)
+	if err == nil {
+		return nil
+	}
+	if !strings.Contains(strings.ToLower(err.Error()), "unique") {
+		return fmt.Errorf("upsert podcast %q: %w", item.ID, err)
+	}
+	// Path UNIQUE collision — see upsertAudiobook for context.
+	_, err = s.db.ExecContext(ctx, `
+		UPDATE podcasts
+		SET library_id = ?, folder_id = ?, inode = ?, size_bytes = ?, missing = ?, invalid = ?,
+		    cover_json = ?, tags_json = ?, genres_json = ?, duration_seconds = ?, podcast_json = ?,
+		    updated_at = CURRENT_TIMESTAMP, last_scan_at = CURRENT_TIMESTAMP
+		WHERE path = ?`,
+		item.LibraryID, item.FolderID, item.Inode, item.SizeBytes,
+		boolInt(item.Missing), boolInt(item.Invalid), coverJSON, jsonText(item.Tags), jsonText(item.Genres),
+		item.DurationSeconds, podcastJSON, item.Path)
+	if err != nil {
+		return fmt.Errorf("update podcast by path %q: %w", item.Path, err)
+	}
+	return nil
+}
+
+// upsertContributor writes a row into the `contributors` table. Used by
+// the audiobook scanner to ensure authors / narrators exist before we link
+// them. Idempotent.
+func (s *Scanner) upsertContributor(ctx context.Context, contributor catalog.Contributor) error {
+	_, err := s.db.ExecContext(ctx, `
+		INSERT INTO contributors (id, name, sort_name, description, images_json, external_ids_json)
 		VALUES (?, ?, ?, ?, ?, ?)
 		ON CONFLICT(id) DO UPDATE SET
 		  name = excluded.name,
@@ -230,40 +309,59 @@ func (s *Scanner) upsertShelfAuthor(ctx context.Context, author catalog.ShelfAut
 		  description = excluded.description,
 		  images_json = excluded.images_json,
 		  external_ids_json = excluded.external_ids_json`,
-		author.ID, author.Name, author.SortName, author.Description, jsonText(author.Images), jsonText(author.ExternalIDs))
+		contributor.ID, contributor.Name, contributor.SortName, contributor.Description,
+		jsonText(contributor.Images), jsonText(contributor.ExternalIDs))
 	if err != nil {
-		return fmt.Errorf("upsert shelf author %q: %w", author.Name, err)
+		return fmt.Errorf("upsert contributor %q: %w", contributor.Name, err)
 	}
 	return nil
 }
 
-func (s *Scanner) setShelfItemAuthors(ctx context.Context, itemID string, authors []catalog.Contributor) error {
+// setAudiobookContributors replaces an audiobook's contributor list
+// (authors + narrators in one slice, distinguished by role). This is the
+// canonical write path — it ALWAYS upserts every contributor row first
+// before inserting the junction row, which closes the "FK constraint
+// failed" hole that bit us when narrators were never written to
+// shelf_authors before being linked.
+func (s *Scanner) setAudiobookContributors(ctx context.Context, audiobookID string, contributors []catalog.ContributorRef) error {
 	if s.overrideIndex != nil {
-		if s.overrideIndex.HasField(catalog.OverrideKindShelfItem, itemID, "authors") ||
-			s.overrideIndex.HasField(catalog.OverrideKindShelfItem, itemID, "narrators") {
+		if s.overrideIndex.HasField(catalog.OverrideKindAudiobook, audiobookID, "authors") ||
+			s.overrideIndex.HasField(catalog.OverrideKindAudiobook, audiobookID, "narrators") {
 			return nil
 		}
 	}
-	if _, err := s.db.ExecContext(ctx, `DELETE FROM shelf_item_authors WHERE item_id = ?`, itemID); err != nil {
-		return fmt.Errorf("clear shelf item authors: %w", err)
+	if _, err := s.db.ExecContext(ctx, `DELETE FROM audiobook_contributors WHERE audiobook_id = ?`, audiobookID); err != nil {
+		return fmt.Errorf("clear audiobook contributors: %w", err)
 	}
-	for index, author := range authors {
-		if author.ID == "" {
+	for _, ref := range contributors {
+		if ref.ID == "" {
+			continue
+		}
+		if err := s.upsertContributor(ctx, catalog.Contributor{
+			ID:       ref.ID,
+			Name:     ref.Name,
+			SortName: ref.SortName,
+		}); err != nil {
+			return err
+		}
+	}
+	for index, ref := range contributors {
+		if ref.ID == "" {
 			continue
 		}
 		if _, err := s.db.ExecContext(ctx, `
-			INSERT INTO shelf_item_authors (item_id, author_id, role, position)
+			INSERT INTO audiobook_contributors (audiobook_id, contributor_id, role, position)
 			VALUES (?, ?, ?, ?)`,
-			itemID, author.ID, author.Role, index); err != nil {
-			return fmt.Errorf("insert shelf item author: %w", err)
+			audiobookID, ref.ID, ref.Role, index); err != nil {
+			return fmt.Errorf("insert audiobook contributor: %w", err)
 		}
 	}
 	return nil
 }
 
-func (s *Scanner) upsertShelfSeries(ctx context.Context, series catalog.ShelfSeries) error {
+func (s *Scanner) upsertSeries(ctx context.Context, series catalog.Series) error {
 	_, err := s.db.ExecContext(ctx, `
-		INSERT INTO shelf_series (id, name, description, authors_json, item_ids_json, external_ids_json)
+		INSERT INTO series (id, name, description, authors_json, item_ids_json, external_ids_json)
 		VALUES (?, ?, ?, ?, ?, ?)
 		ON CONFLICT(id) DO UPDATE SET
 		  name = excluded.name,
@@ -271,29 +369,30 @@ func (s *Scanner) upsertShelfSeries(ctx context.Context, series catalog.ShelfSer
 		  authors_json = excluded.authors_json,
 		  item_ids_json = excluded.item_ids_json,
 		  external_ids_json = excluded.external_ids_json`,
-		series.ID, series.Name, series.Description, jsonText(series.Authors), jsonText(series.ItemIDs), jsonText(series.ExternalIDs))
+		series.ID, series.Name, series.Description, jsonText(series.Authors),
+		jsonText(series.AudiobookIDs), jsonText(series.ExternalIDs))
 	if err != nil {
-		return fmt.Errorf("upsert shelf series %q: %w", series.Name, err)
+		return fmt.Errorf("upsert series %q: %w", series.Name, err)
 	}
 	return nil
 }
 
-func (s *Scanner) setShelfItemSeries(ctx context.Context, itemID string, series []catalog.SeriesRef) error {
-	if s.overrideIndex != nil && s.overrideIndex.HasField(catalog.OverrideKindShelfItem, itemID, "series") {
+func (s *Scanner) setAudiobookSeries(ctx context.Context, audiobookID string, series []catalog.SeriesRef) error {
+	if s.overrideIndex != nil && s.overrideIndex.HasField(catalog.OverrideKindAudiobook, audiobookID, "series") {
 		return nil
 	}
-	if _, err := s.db.ExecContext(ctx, `DELETE FROM shelf_item_series WHERE item_id = ?`, itemID); err != nil {
-		return fmt.Errorf("clear shelf item series: %w", err)
+	if _, err := s.db.ExecContext(ctx, `DELETE FROM audiobook_series WHERE audiobook_id = ?`, audiobookID); err != nil {
+		return fmt.Errorf("clear audiobook series: %w", err)
 	}
 	for _, entry := range series {
 		if entry.ID == "" {
 			continue
 		}
 		if _, err := s.db.ExecContext(ctx, `
-			INSERT INTO shelf_item_series (item_id, series_id, sequence, sequence_text)
+			INSERT INTO audiobook_series (audiobook_id, series_id, sequence, sequence_text)
 			VALUES (?, ?, ?, ?)`,
-			itemID, entry.ID, entry.Sequence, entry.SequenceText); err != nil {
-			return fmt.Errorf("insert shelf item series: %w", err)
+			audiobookID, entry.ID, entry.Sequence, entry.SequenceText); err != nil {
+			return fmt.Errorf("insert audiobook series: %w", err)
 		}
 	}
 	return nil
@@ -341,24 +440,36 @@ func (s *Scanner) upsertPodcastEpisode(ctx context.Context, episode catalog.Podc
 	return nil
 }
 
-func (s *Scanner) replaceChapters(ctx context.Context, itemID string, episodeID string, chapters []catalog.AudioChapter) error {
-	if episodeID != "" {
-		if _, err := s.db.ExecContext(ctx, `DELETE FROM shelf_chapters WHERE episode_id = ?`, episodeID); err != nil {
-			return fmt.Errorf("clear episode chapters: %w", err)
-		}
-	} else {
-		if _, err := s.db.ExecContext(ctx, `DELETE FROM shelf_chapters WHERE item_id = ? AND episode_id IS NULL`, itemID); err != nil {
-			return fmt.Errorf("clear item chapters: %w", err)
+// replaceAudiobookChapters rewrites the audiobook's chapter list. Audio
+// books and podcast episodes have separate chapter tables now (was: shared
+// shelf_chapters) so the two flows do not race each other.
+func (s *Scanner) replaceAudiobookChapters(ctx context.Context, audiobookID string, chapters []catalog.AudioChapter) error {
+	if _, err := s.db.ExecContext(ctx, `DELETE FROM audiobook_chapters WHERE audiobook_id = ?`, audiobookID); err != nil {
+		return fmt.Errorf("clear audiobook chapters: %w", err)
+	}
+	for _, chapter := range chapters {
+		chapter.ID = stableID("chapter", "audiobook", audiobookID, fmt.Sprint(chapter.Index), chapter.Title, fmt.Sprint(chapter.StartSeconds))
+		if _, err := s.db.ExecContext(ctx, `
+			INSERT INTO audiobook_chapters (id, audiobook_id, chapter_index, title, start_seconds, end_seconds)
+			VALUES (?, ?, ?, ?, ?, ?)`,
+			chapter.ID, audiobookID, chapter.Index, chapter.Title, chapter.StartSeconds, chapter.EndSeconds); err != nil {
+			return fmt.Errorf("insert audiobook chapter %q: %w", chapter.Title, err)
 		}
 	}
+	return nil
+}
 
+func (s *Scanner) replaceEpisodeChapters(ctx context.Context, episodeID string, chapters []catalog.AudioChapter) error {
+	if _, err := s.db.ExecContext(ctx, `DELETE FROM episode_chapters WHERE episode_id = ?`, episodeID); err != nil {
+		return fmt.Errorf("clear episode chapters: %w", err)
+	}
 	for _, chapter := range chapters {
-		chapter.ID = stableID("chapter", itemID, episodeID, fmt.Sprint(chapter.Index), chapter.Title, fmt.Sprint(chapter.StartSeconds))
+		chapter.ID = stableID("chapter", "episode", episodeID, fmt.Sprint(chapter.Index), chapter.Title, fmt.Sprint(chapter.StartSeconds))
 		if _, err := s.db.ExecContext(ctx, `
-			INSERT INTO shelf_chapters (id, item_id, episode_id, chapter_index, title, start_seconds, end_seconds)
-			VALUES (?, ?, ?, ?, ?, ?, ?)`,
-			chapter.ID, itemID, nullableString(episodeID), chapter.Index, chapter.Title, chapter.StartSeconds, chapter.EndSeconds); err != nil {
-			return fmt.Errorf("insert chapter %q: %w", chapter.Title, err)
+			INSERT INTO episode_chapters (id, episode_id, chapter_index, title, start_seconds, end_seconds)
+			VALUES (?, ?, ?, ?, ?, ?)`,
+			chapter.ID, episodeID, chapter.Index, chapter.Title, chapter.StartSeconds, chapter.EndSeconds); err != nil {
+			return fmt.Errorf("insert episode chapter %q: %w", chapter.Title, err)
 		}
 	}
 	return nil
@@ -367,14 +478,15 @@ func (s *Scanner) replaceChapters(ctx context.Context, itemID string, episodeID 
 func (s *Scanner) upsertAudioFile(ctx context.Context, libraryID string, owner audioFileOwner, file catalog.AudioFile) error {
 	_, err := s.db.ExecContext(ctx, `
 		INSERT INTO media_files (
-		  id, library_id, item_id, track_id, episode_id, path, relative_path, file_name, inode, size_bytes,
+		  id, library_id, audiobook_id, podcast_id, track_id, episode_id, path, relative_path, file_name, inode, size_bytes,
 		  modified_at, container, mime_type, codec, codec_profile, metadata_formats_json, bitrate, bit_depth, sample_rate, channels,
 		  channel_layout, duration_seconds, checksum, embedded_tags_json, updated_at
 		)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
 		ON CONFLICT(id) DO UPDATE SET
 		  library_id = excluded.library_id,
-		  item_id = excluded.item_id,
+		  audiobook_id = excluded.audiobook_id,
+		  podcast_id = excluded.podcast_id,
 		  track_id = excluded.track_id,
 		  episode_id = excluded.episode_id,
 		  path = excluded.path,
@@ -397,7 +509,8 @@ func (s *Scanner) upsertAudioFile(ctx context.Context, libraryID string, owner a
 		  checksum = excluded.checksum,
 		  embedded_tags_json = excluded.embedded_tags_json,
 		  updated_at = CURRENT_TIMESTAMP`,
-		file.ID, libraryID, nullableString(owner.ItemID), nullableString(owner.TrackID), nullableString(owner.EpisodeID),
+		file.ID, libraryID, nullableString(owner.AudiobookID), nullableString(owner.PodcastID),
+		nullableString(owner.TrackID), nullableString(owner.EpisodeID),
 		file.Path, file.RelativePath, file.FileName, fileInode(file.Path), file.SizeBytes, timeString(file.ModifiedAt),
 		file.Container, file.MimeType, file.Codec, file.CodecProfile, jsonText(file.MetadataFormats), file.Bitrate, file.BitDepth, file.SampleRate,
 		file.Channels, file.ChannelLayout, file.DurationSeconds, file.Checksum, jsonText(file.EmbeddedTags))
@@ -410,10 +523,15 @@ func (s *Scanner) upsertAudioFile(ctx context.Context, libraryID string, owner a
 	return nil
 }
 
+// audioFileOwner identifies which domain row a media_files row belongs to.
+// At most one of the four IDs is populated. Music tracks set TrackID;
+// audiobook files set AudiobookID; podcast-episode files set both
+// PodcastID and EpisodeID (PodcastID is denormalized for fast joins).
 type audioFileOwner struct {
-	ItemID    string
-	TrackID   string
-	EpisodeID string
+	AudiobookID string
+	PodcastID   string
+	TrackID     string
+	EpisodeID   string
 }
 
 func (s *Scanner) upsertGenre(ctx context.Context, kind string, name string) error {
@@ -427,6 +545,16 @@ func (s *Scanner) upsertGenre(ctx context.Context, kind string, name string) err
 		ON CONFLICT(name, kind) DO NOTHING`,
 		name, kind)
 	return err
+}
+
+// RefreshStats recomputes the aggregate count and duration columns that
+// catalog reads project to clients (libraries.item_count, music_artists.album_count,
+// music_artists.track_count, etc.). The scanner runs this at the tail of every
+// scan; call it directly at startup to repair drifted counts on existing data
+// (e.g. after migration 016 renamed shelf libraries, or after Cursor's
+// refactor changed schemas before the scanner had a chance to re-run).
+func (s *Scanner) RefreshStats(ctx context.Context) error {
+	return s.refreshStats(ctx)
 }
 
 func (s *Scanner) refreshStats(ctx context.Context) error {
@@ -444,28 +572,54 @@ func (s *Scanner) refreshStats(ctx context.Context) error {
 		       JOIN music_track_artists ta ON ta.track_id = t.id
 		       WHERE ta.artist_id = music_artists.id
 		     ), 0)`,
-		`UPDATE shelf_items
-		 SET duration_seconds = COALESCE((SELECT SUM(duration_seconds) FROM media_files WHERE item_id = shelf_items.id), duration_seconds)`,
-		`UPDATE shelf_authors
-		 SET item_count = COALESCE((SELECT COUNT(DISTINCT item_id) FROM shelf_item_authors WHERE author_id = shelf_authors.id), 0),
+		`UPDATE audiobooks
+		 SET duration_seconds = COALESCE((SELECT SUM(duration_seconds) FROM media_files WHERE audiobook_id = audiobooks.id), duration_seconds)`,
+		`UPDATE podcasts
+		 SET duration_seconds = COALESCE((SELECT SUM(duration_seconds) FROM media_files WHERE podcast_id = podcasts.id), duration_seconds)`,
+		`UPDATE contributors
+		 SET item_count = COALESCE((SELECT COUNT(DISTINCT audiobook_id) FROM audiobook_contributors WHERE contributor_id = contributors.id), 0),
 		     duration_seconds = COALESCE((
-		       SELECT SUM(si.duration_seconds)
-		       FROM shelf_items si
-		       JOIN shelf_item_authors sia ON sia.item_id = si.id
-		       WHERE sia.author_id = shelf_authors.id
+		       SELECT SUM(a.duration_seconds)
+		       FROM audiobooks a
+		       JOIN audiobook_contributors ac ON ac.audiobook_id = a.id
+		       WHERE ac.contributor_id = contributors.id
 		     ), 0)`,
-		`UPDATE shelf_series
-		 SET item_count = COALESCE((SELECT COUNT(DISTINCT item_id) FROM shelf_item_series WHERE series_id = shelf_series.id), 0),
+		`UPDATE series
+		 SET item_count = COALESCE((SELECT COUNT(DISTINCT audiobook_id) FROM audiobook_series WHERE series_id = series.id), 0),
 		     duration_seconds = COALESCE((
-		       SELECT SUM(si.duration_seconds)
-		       FROM shelf_items si
-		       JOIN shelf_item_series sis ON sis.item_id = si.id
-		       WHERE sis.series_id = shelf_series.id
+		       SELECT SUM(a.duration_seconds)
+		       FROM audiobooks a
+		       JOIN audiobook_series aas ON aas.audiobook_id = a.id
+		       WHERE aas.series_id = series.id
 		     ), 0)`,
+		// libraries.item_count surfaces on the home dashboard and the
+		// settings "attached libraries" panel. Count what a human would
+		// count for that kind:
+		//   - music:     distinct music_tracks
+		//   - audiobook: rows in audiobooks
+		//   - podcast:   rows in podcasts (the show, not episodes)
+		//   - mixed:     all three summed (any combination the scanner
+		//                discovered in this root)
+		// This statement runs every Scan, including partial-failure
+		// scans, so counts stay current even when one library throws.
 		`UPDATE libraries
 		 SET item_count = CASE
-		   WHEN kind = 'music' THEN COALESCE((SELECT COUNT(*) FROM media_files WHERE library_id = libraries.id), 0)
-		   WHEN kind = 'shelf' THEN COALESCE((SELECT COUNT(*) FROM shelf_items WHERE library_id = libraries.id), 0)
+		   WHEN kind = 'music' THEN COALESCE((
+		     SELECT COUNT(DISTINCT t.id)
+		     FROM music_tracks t
+		     JOIN media_files mf ON mf.track_id = t.id
+		     WHERE mf.library_id = libraries.id
+		   ), 0)
+		   WHEN kind = 'audiobook' THEN COALESCE((SELECT COUNT(*) FROM audiobooks WHERE library_id = libraries.id), 0)
+		   WHEN kind = 'podcast' THEN COALESCE((SELECT COUNT(*) FROM podcasts WHERE library_id = libraries.id), 0)
+		   WHEN kind = 'mixed' THEN COALESCE((
+		     SELECT COUNT(DISTINCT t.id)
+		     FROM music_tracks t
+		     JOIN media_files mf ON mf.track_id = t.id
+		     WHERE mf.library_id = libraries.id
+		   ), 0)
+		     + COALESCE((SELECT COUNT(*) FROM audiobooks WHERE library_id = libraries.id), 0)
+		     + COALESCE((SELECT COUNT(*) FROM podcasts WHERE library_id = libraries.id), 0)
 		   ELSE item_count
 		 END`,
 	}

@@ -23,7 +23,19 @@ type responseBody struct {
 	SearchResult3          *searchResult3          `json:"searchResult3,omitempty"`
 	Playlists              *playlists              `json:"playlists,omitempty"`
 	Playlist               *playlist               `json:"playlist,omitempty"`
+	Starred                *starredResult          `json:"starred,omitempty"`
+	RandomSongs            *randomSongs            `json:"randomSongs,omitempty"`
 	OpenSubsonicExtensions *openSubsonicExtensions `json:"openSubsonicExtensions,omitempty"`
+}
+
+type starredResult struct {
+	Artist []artist `json:"artist,omitempty"`
+	Album  []child  `json:"album,omitempty"`
+	Song   []child  `json:"song,omitempty"`
+}
+
+type randomSongs struct {
+	Song []child `json:"song,omitempty"`
 }
 
 type errorPayload struct {
@@ -114,6 +126,8 @@ type child struct {
 	Path        string `json:"path,omitempty"`
 	Size        int64  `json:"size,omitempty"`
 	Suffix      string `json:"suffix,omitempty"`
+	Starred     int64  `json:"starred,omitempty"`
+	UserRating  int    `json:"userRating,omitempty"`
 }
 
 type song struct {
@@ -133,6 +147,8 @@ type song struct {
 	Path        string `json:"path,omitempty"`
 	Size        int64  `json:"size,omitempty"`
 	Suffix      string `json:"suffix,omitempty"`
+	Starred     int64  `json:"starred,omitempty"`
+	UserRating  int    `json:"userRating,omitempty"`
 }
 
 type searchResult2 struct {

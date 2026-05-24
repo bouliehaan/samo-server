@@ -15,6 +15,7 @@ import (
 	"github.com/bouliehaan/samo-server/internal/files"
 	"github.com/bouliehaan/samo-server/internal/lastfm"
 	"github.com/bouliehaan/samo-server/internal/libraries"
+	"github.com/bouliehaan/samo-server/internal/playback"
 	"github.com/bouliehaan/samo-server/internal/search"
 	"github.com/bouliehaan/samo-server/internal/users"
 )
@@ -30,6 +31,7 @@ type Options struct {
 	Search        *search.Service
 	Libraries     *libraries.Service
 	Files         *files.Service
+	Playback      *playback.Service
 	LastFM        *lastfm.Service
 	Users         *users.Service
 	APIToken      string
@@ -41,6 +43,7 @@ type Server struct {
 	search        *search.Service
 	libraries     *libraries.Service
 	files         *files.Service
+	playback      *playback.Service
 	lastfm        *lastfm.Service
 	users         *users.Service
 	apiToken      string
@@ -57,6 +60,7 @@ func New(options Options) *Server {
 		search:        options.Search,
 		libraries:     options.Libraries,
 		files:         options.Files,
+		playback:      options.Playback,
 		lastfm:        options.LastFM,
 		users:         options.Users,
 		apiToken:      strings.TrimSpace(options.APIToken),
@@ -142,6 +146,18 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		s.getPlaylists(w, r)
 	case "getplaylist":
 		s.getPlaylist(w, r)
+	case "getstarred":
+		s.getStarred(w, r)
+	case "getstarred2":
+		s.getStarred(w, r)
+	case "star":
+		s.star(w, r)
+	case "unstar":
+		s.unstar(w, r)
+	case "setrating":
+		s.setRating(w, r)
+	case "getrandomsongs":
+		s.getRandomSongs(w, r)
 	case "getopensubsonicextensions":
 		s.writeOK(w, responseBody{OpenSubsonicExtensions: &openSubsonicExtensions{OpenSubsonicExtension: nil}})
 	case "scrobble":
@@ -289,10 +305,20 @@ func (s *Server) getMusicDirectory(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) getAlbumList2(w http.ResponseWriter, r *http.Request) {
+	listType := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("type")))
+	switch listType {
+	case "starred":
+		s.albumListFromBrowse(w, r, catalog.MusicBrowseStarred)
+		return
+	case "frequent":
+		s.albumListFromBrowse(w, r, catalog.MusicBrowseRecentlyPlayed)
+		return
+	}
+
 	page := s.catalog.ListMusicAlbums(catalog.PageRequest{Limit: 500})
 	albums := append([]catalog.MusicAlbum(nil), page.Items...)
 
-	switch strings.ToLower(strings.TrimSpace(r.URL.Query().Get("type"))) {
+	switch listType {
 	case "newest", "recent":
 		sort.SliceStable(albums, func(i, j int) bool {
 			return albums[i].ReleaseYear > albums[j].ReleaseYear
@@ -380,7 +406,12 @@ func (s *Server) writeSearch(w http.ResponseWriter, r *http.Request, version int
 }
 
 func (s *Server) getPlaylists(w http.ResponseWriter, r *http.Request) {
-	page := s.catalog.ListMusicPlaylists(catalog.PageRequest{Limit: 500})
+	principal, ok := principalFromContext(r.Context())
+	if !ok {
+		s.writeFailed(w, 40, "Wrong username or password")
+		return
+	}
+	page := s.catalog.ListMusicPlaylistsForUser(principal.User.ID, catalog.PageRequest{Limit: 500})
 	items := make([]playlistSummary, 0, len(page.Items))
 	for _, playlist := range page.Items {
 		items = append(items, playlistSummary{
@@ -401,7 +432,12 @@ func (s *Server) getPlaylist(w http.ResponseWriter, r *http.Request) {
 		s.writeFailed(w, 10, "required parameter id is missing")
 		return
 	}
-	playlistItem, err := s.catalog.MusicPlaylist(id)
+	principal, ok := principalFromContext(r.Context())
+	if !ok {
+		s.writeFailed(w, 40, "Wrong username or password")
+		return
+	}
+	playlistItem, err := s.catalog.MusicPlaylistForUser(principal.User.ID, id)
 	if err != nil {
 		s.writeFailed(w, 70, "playlist not found")
 		return
@@ -491,7 +527,7 @@ func (s *Server) scrobble(w http.ResponseWriter, r *http.Request) {
 		s.writeFailed(w, 40, "Wrong username or password")
 		return
 	}
-	if err := s.lastfm.SubmitSubsonicScrobble(r.Context(), principal.User.ID, track, playedAt); err != nil {
+	if err := s.lastfm.SubmitScrobble(r.Context(), principal.User.ID, track, playedAt, 0, "subsonic-compat"); err != nil {
 		s.writeFailed(w, 0, err.Error())
 		return
 	}
@@ -513,7 +549,7 @@ func (s *Server) updateNowPlaying(w http.ResponseWriter, r *http.Request) {
 		s.writeFailed(w, 40, "Wrong username or password")
 		return
 	}
-	if err := s.lastfm.SubmitSubsonicNowPlaying(r.Context(), principal.User.ID, track); err != nil {
+	if err := s.lastfm.SubmitNowPlaying(r.Context(), principal.User.ID, track, "subsonic-compat"); err != nil {
 		s.writeFailed(w, 0, err.Error())
 		return
 	}

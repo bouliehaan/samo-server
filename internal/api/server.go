@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"html/template"
 	"log"
 	"net/http"
 	"net/url"
@@ -13,6 +12,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/bouliehaan/samo-server/internal/bookmarks"
 	"github.com/bouliehaan/samo-server/internal/catalog"
 	"github.com/bouliehaan/samo-server/internal/covers"
 	"github.com/bouliehaan/samo-server/internal/files"
@@ -25,7 +25,6 @@ import (
 	"github.com/bouliehaan/samo-server/internal/podcaststream"
 	"github.com/bouliehaan/samo-server/internal/radio"
 	"github.com/bouliehaan/samo-server/internal/search"
-	"github.com/bouliehaan/samo-server/internal/shelfuser"
 	"github.com/bouliehaan/samo-server/internal/sources"
 	"github.com/bouliehaan/samo-server/internal/subsonic"
 	"github.com/bouliehaan/samo-server/internal/users"
@@ -44,7 +43,7 @@ type ServerOptions struct {
 	PodcastStream *podcaststream.Service
 	PodcastCache  *podcastcache.Service
 	Search        *search.Service
-	ShelfUser     *shelfuser.Service
+	Bookmarks     *bookmarks.Service
 	Radio         *radio.Service
 	Sources       *sources.Service
 	LastFM        *lastfm.Service
@@ -65,7 +64,7 @@ type Server struct {
 	podcastStream *podcaststream.Service
 	podcastCache  *podcastcache.Service
 	search        *search.Service
-	shelfUser     *shelfuser.Service
+	bookmarks     *bookmarks.Service
 	mux           *http.ServeMux
 	radio         *radio.Service
 	sources       *sources.Service
@@ -110,7 +109,7 @@ func NewServer(options ServerOptions) http.Handler {
 		podcastStream: podcastStreamService,
 		podcastCache:  options.PodcastCache,
 		search:        searchService,
-		shelfUser:     options.ShelfUser,
+		bookmarks:     options.Bookmarks,
 		mux:           http.NewServeMux(),
 		radio:         radioService,
 		sources:       options.Sources,
@@ -128,11 +127,16 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) routes() {
 	s.mux.HandleFunc("GET /", s.home)
+	s.mux.HandleFunc("GET /app", s.appPage)
+	s.mux.HandleFunc("GET /app/", s.appPage)
+	s.mux.HandleFunc("GET /login", s.loginPage)
+	s.mux.HandleFunc("GET /login/", s.loginPage)
 	s.mux.HandleFunc("GET /setup", s.setupPage)
 	s.mux.HandleFunc("GET /setup/", s.setupPage)
 	s.mux.HandleFunc("GET /health", s.health)
 
 	s.mux.HandleFunc("POST /api/v1/auth/login", s.loginUser)
+	s.handleAPI("POST /api/v1/auth/stream-token", s.issueStreamToken)
 
 	// Setup routes intentionally bypass requireUser so a first-time admin
 	// can be created without a token. Each handler self-checks whether
@@ -183,6 +187,9 @@ func (s *Server) routes() {
 	s.handleAPI("PATCH /api/v1/playback/{kind}/{id}", s.patchPlayback)
 
 	s.handleAPI("GET /api/v1/lastfm/status", s.getLastFMStatus)
+	s.handleAPI("GET /api/v1/lastfm/config", s.getLastFMConfig)
+	s.handleAPI("PUT /api/v1/lastfm/config", s.updateLastFMConfig)
+	s.handleAPI("DELETE /api/v1/lastfm/config", s.clearLastFMConfig)
 	s.handleAPI("POST /api/v1/lastfm/auth/begin", s.beginLastFMAuth)
 	s.handleAPI("POST /api/v1/lastfm/auth/complete", s.completeLastFMAuth)
 	s.handleAPI("DELETE /api/v1/lastfm/auth/session", s.disconnectLastFM)
@@ -199,9 +206,16 @@ func (s *Server) routes() {
 	s.handleAPI("GET /api/v1/media/files/{id}/stream", s.streamMediaFile)
 	s.handleAPI("GET /api/v1/music/tracks/{id}/stream", s.streamMusicTrack)
 	s.handleAPI("GET /api/v1/music/albums/{id}/cover", s.serveMusicAlbumCover)
-	s.handleAPI("GET /api/v1/shelf/items/{id}/stream", s.streamShelfItem)
-	s.handleAPI("GET /api/v1/shelf/items/{id}/cover", s.serveShelfItemCover)
-	s.handleAPI("GET /api/v1/shelf/episodes/{id}/stream", s.streamShelfEpisode)
+	s.handleAPI("GET /api/v1/audiobooks/{id}/stream", s.streamAudiobook)
+	s.handleAPI("GET /api/v1/audiobooks/{id}/cover", s.serveAudiobookCover)
+	// Note: /api/v1/podcasts/{id}/cover would clash with the
+	// /api/v1/podcasts/episodes/{id} routes — Go's ServeMux can't decide
+	// between `/podcasts/episodes/cover` matching either pattern. Cover
+	// + stream sit under /shows/ so each podcast verb has an unambiguous
+	// path.
+	s.handleAPI("GET /api/v1/podcasts/shows/{id}/cover", s.servePodcastCover)
+	s.handleAPI("GET /api/v1/podcasts/shows/{id}/episodes", s.listPodcastShowEpisodes)
+	s.handleAPI("GET /api/v1/podcasts/episodes/{id}/stream", s.streamPodcastEpisode)
 
 	s.handleAPI("GET /api/v1/metadata/providers", s.listMetadataProviders)
 	s.handleAPI("GET /api/v1/metadata/search", s.searchMetadata)
@@ -213,6 +227,7 @@ func (s *Server) routes() {
 
 	s.handleAPI("GET /api/v1/music/artists", s.listMusicArtists)
 	s.handleAPI("GET /api/v1/music/artists/{id}", s.getMusicArtist)
+	s.handleAPI("GET /api/v1/music/artists/{id}/albums", s.listMusicArtistAlbums)
 	s.handleAPI("GET /api/v1/music/albums", s.listMusicAlbums)
 	s.handleAPI("GET /api/v1/music/albums/{id}", s.getMusicAlbum)
 	s.handleAPI("GET /api/v1/music/tracks", s.listMusicTracks)
@@ -220,7 +235,9 @@ func (s *Server) routes() {
 	s.handleAPI("GET /api/v1/music/genres", s.listMusicGenres)
 	s.handleAPI("GET /api/v1/music/playlists", s.listMusicPlaylists)
 	s.handleAPI("GET /api/v1/music/playlists/{id}", s.getMusicPlaylist)
+	s.handleAPI("GET /api/v1/music/playlists/{id}/tracks", s.listMusicPlaylistTracks)
 	s.handleAPI("POST /api/v1/music/playlists", s.createMusicPlaylist)
+	s.handleAPI("POST /api/v1/music/playlists/import", s.importMusicPlaylist)
 	s.handleAPI("PATCH /api/v1/music/playlists/{id}", s.updateMusicPlaylist)
 	s.handleAPI("DELETE /api/v1/music/playlists/{id}", s.deleteMusicPlaylist)
 	s.handleAPI("GET /api/v1/music/browse/favorites", s.browseMusicFavorites)
@@ -229,39 +246,45 @@ func (s *Server) routes() {
 	s.handleAPI("GET /api/v1/music/browse/recently-added", s.browseMusicRecentlyAdded)
 	s.handleAPI("GET /api/v1/music/search", s.searchMusic)
 
-	s.handleAPI("GET /api/v1/shelf/libraries", s.listShelfLibraries)
-	s.handleAPI("GET /api/v1/shelf/libraries/{id}", s.getShelfLibrary)
-	s.handleAPI("GET /api/v1/shelf/items", s.listShelfItems)
-	s.handleAPI("GET /api/v1/shelf/items/{id}", s.getShelfItem)
-	s.handleAPI("GET /api/v1/shelf/audiobooks", s.listAudiobooks)
-	s.handleAPI("GET /api/v1/shelf/authors", s.listShelfAuthors)
-	s.handleAPI("GET /api/v1/shelf/authors/{id}", s.getShelfAuthor)
-	s.handleAPI("GET /api/v1/shelf/authors/{id}/items", s.listShelfAuthorItems)
-	s.handleAPI("GET /api/v1/shelf/series", s.listShelfSeries)
-	s.handleAPI("GET /api/v1/shelf/series/{id}", s.getShelfSeries)
-	s.handleAPI("GET /api/v1/shelf/series/{id}/items", s.listShelfSeriesItems)
-	s.handleAPI("GET /api/v1/shelf/items/{id}/bookmarks", s.listShelfItemBookmarks)
-	s.handleAPI("POST /api/v1/shelf/items/{id}/bookmarks", s.createShelfItemBookmark)
-	s.handleAPI("PATCH /api/v1/shelf/bookmarks/{id}", s.updateShelfBookmark)
-	s.handleAPI("DELETE /api/v1/shelf/bookmarks/{id}", s.deleteShelfBookmark)
-	s.handleAPI("GET /api/v1/shelf/collections", s.listShelfCollections)
-	s.handleAPI("POST /api/v1/shelf/collections", s.createShelfCollection)
-	s.handleAPI("GET /api/v1/shelf/collections/{id}", s.getShelfCollection)
-	s.handleAPI("PATCH /api/v1/shelf/collections/{id}", s.updateShelfCollection)
-	s.handleAPI("DELETE /api/v1/shelf/collections/{id}", s.deleteShelfCollection)
-	s.handleAPI("GET /api/v1/shelf/items/{id}/sessions", s.listShelfItemSessions)
-	s.handleAPI("GET /api/v1/shelf/listening-sessions", s.listShelfListeningSessions)
-	s.handleAPI("GET /api/v1/shelf/podcasts", s.listPodcasts)
-	s.handleAPI("GET /api/v1/shelf/podcast-feeds", s.listPodcastFeeds)
-	s.handleAPI("POST /api/v1/shelf/podcast-feeds", s.createPodcastFeed)
-	s.handleAPI("GET /api/v1/shelf/podcast-feeds/{id}", s.getPodcastFeed)
-	s.handleAPI("PATCH /api/v1/shelf/podcast-feeds/{id}", s.updatePodcastFeed)
-	s.handleAPI("POST /api/v1/shelf/podcast-feeds/poll", s.runPodcastPollCycle)
-	s.handleAPI("POST /api/v1/shelf/podcast-feeds/{id}/refresh", s.refreshPodcastFeed)
-	s.handleAPI("DELETE /api/v1/shelf/podcast-feeds/{id}", s.deletePodcastFeed)
-	s.handleAPI("GET /api/v1/shelf/episodes", s.listPodcastEpisodes)
-	s.handleAPI("GET /api/v1/shelf/episodes/{id}", s.getPodcastEpisode)
-	s.handleAPI("GET /api/v1/shelf/search", s.searchShelf)
+	// Audiobook domain. Music, audiobooks, podcasts, and radio are all
+	// independent product domains in Samo. Their URL namespaces match.
+	s.handleAPI("GET /api/v1/audiobooks", s.listAudiobooks)
+	s.handleAPI("GET /api/v1/audiobooks/{id}", s.getAudiobook)
+	s.handleAPI("GET /api/v1/audiobooks/{id}/bookmarks", s.listAudiobookBookmarks)
+	s.handleAPI("POST /api/v1/audiobooks/{id}/bookmarks", s.createAudiobookBookmark)
+	s.handleAPI("GET /api/v1/audiobooks/{id}/sessions", s.listAudiobookSessions)
+	s.handleAPI("GET /api/v1/audiobooks/search", s.searchAudiobooks)
+	s.handleAPI("GET /api/v1/contributors", s.listContributors)
+	s.handleAPI("GET /api/v1/contributors/{id}", s.getContributor)
+	s.handleAPI("GET /api/v1/contributors/{id}/audiobooks", s.listContributorAudiobooks)
+	s.handleAPI("GET /api/v1/series", s.listSeries)
+	s.handleAPI("GET /api/v1/series/{id}", s.getSeries)
+	s.handleAPI("GET /api/v1/series/{id}/audiobooks", s.listSeriesAudiobooks)
+	s.handleAPI("GET /api/v1/bookmarks", s.listUserBookmarks)
+	s.handleAPI("PATCH /api/v1/bookmarks/{id}", s.updateBookmark)
+	s.handleAPI("DELETE /api/v1/bookmarks/{id}", s.deleteBookmark)
+	s.handleAPI("GET /api/v1/collections", s.listCollections)
+	s.handleAPI("POST /api/v1/collections", s.createCollection)
+	s.handleAPI("GET /api/v1/collections/{id}", s.getCollection)
+	s.handleAPI("PATCH /api/v1/collections/{id}", s.updateCollection)
+	s.handleAPI("DELETE /api/v1/collections/{id}", s.deleteCollection)
+	s.handleAPI("GET /api/v1/listening-sessions", s.listListeningSessions)
+
+	// Podcast domain. Shows and episodes are split into separate
+	// /shows/ and /episodes/ prefixes; that keeps the ServeMux happy and
+	// makes the URL shape match the data model.
+	s.handleAPI("GET /api/v1/podcasts", s.listPodcasts)
+	s.handleAPI("GET /api/v1/podcasts/shows/{id}", s.getPodcast)
+	s.handleAPI("GET /api/v1/podcasts/episodes", s.listPodcastEpisodes)
+	s.handleAPI("GET /api/v1/podcasts/episodes/{id}", s.getPodcastEpisode)
+	s.handleAPI("GET /api/v1/podcasts/search", s.searchPodcasts)
+	s.handleAPI("GET /api/v1/podcasts/feeds", s.listPodcastFeeds)
+	s.handleAPI("POST /api/v1/podcasts/feeds", s.createPodcastFeed)
+	s.handleAPI("GET /api/v1/podcasts/feeds/{id}", s.getPodcastFeed)
+	s.handleAPI("PATCH /api/v1/podcasts/feeds/{id}", s.updatePodcastFeed)
+	s.handleAPI("POST /api/v1/podcasts/feeds/poll", s.runPodcastPollCycle)
+	s.handleAPI("POST /api/v1/podcasts/feeds/{id}/refresh", s.refreshPodcastFeed)
+	s.handleAPI("DELETE /api/v1/podcasts/feeds/{id}", s.deletePodcastFeed)
 
 	s.handleAPI("GET /api/v1/internet-radio/stations", s.listInternetRadioStations)
 	s.handleAPI("POST /api/v1/internet-radio/stations", s.createInternetRadioStation)
@@ -281,6 +304,7 @@ func (s *Server) routes() {
 		Search:        s.search,
 		Libraries:     s.libraries,
 		Files:         s.files,
+		Playback:      s.playback,
 		LastFM:        s.lastfm,
 		Users:         s.users,
 		APIToken:      s.apiToken,
@@ -506,168 +530,13 @@ func (w flushWriter) Write(data []byte) (int, error) {
 	return n, err
 }
 
-var homeTemplate = template.Must(template.New("home").Parse(`<!doctype html>
-<html lang="en">
-<head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>SAMO SERVER</title>
-  <style>` + samoBaseCSS + `</style>
-  <style>
-    .stations-empty {
-      padding: 22px;
-      font-family: var(--mono);
-      font-size: 0.85rem;
-      color: var(--text-dim);
-      border: 1px dashed var(--line);
-      background: var(--surface);
-    }
-    .station {
-      display: grid;
-      grid-template-columns: minmax(0, 1fr) auto;
-      gap: 24px;
-      padding: 20px 22px;
-      border: 1px solid var(--line);
-      background: var(--surface);
-      align-items: center;
-    }
-    .station + .station { border-top: 0; }
-    .station .name {
-      font-family: var(--sans);
-      font-size: 1.25rem;
-      font-weight: 800;
-      letter-spacing: -0.01em;
-      margin: 0 0 6px;
-    }
-    .station .description { color: var(--text-dim); font-size: 0.92rem; margin: 0 0 12px; max-width: 60ch; }
-    .station .now {
-      font-family: var(--mono);
-      font-size: 0.78rem;
-      letter-spacing: 0.14em;
-      text-transform: uppercase;
-      color: var(--accent);
-      display: flex;
-      align-items: center;
-      gap: 8px;
-    }
-    .station .now .dot {
-      width: 7px; height: 7px; background: var(--accent); display: inline-block;
-      box-shadow: 0 0 10px var(--accent);
-      animation: pulse 1.6s ease-in-out infinite;
-    }
-    .station .now.idle { color: var(--muted); }
-    .station .now.idle .dot { background: var(--muted); box-shadow: none; animation: none; }
-    .station .now .title { color: var(--text); font-family: var(--mono); }
-    .station .now .artist { color: var(--text-dim); }
-    @keyframes pulse {
-      0%, 100% { opacity: 1; }
-      50% { opacity: 0.35; }
-    }
-    .station .links { display: flex; gap: 8px; flex-direction: column; align-items: flex-end; }
-    .section-head {
-      display: flex;
-      align-items: baseline;
-      justify-content: space-between;
-      margin-bottom: 14px;
-    }
-    .section-head h2 {
-      margin: 0;
-      font-family: var(--mono);
-      font-size: 0.78rem;
-      letter-spacing: 0.22em;
-      text-transform: uppercase;
-      color: var(--text-dim);
-    }
-    .section-head .meta {
-      font-family: var(--mono);
-      font-size: 0.7rem;
-      letter-spacing: 0.18em;
-      color: var(--muted);
-    }
-  </style>
-</head>
-<body>
-  <div class="grid-bg"></div>
-  <main>
-    <header class="samo-head">
-      <div class="wordmark">
-        <div class="word">SAMO</div>
-        <div class="word dim">SERVER</div>
-        <div class="status">
-          <span class="dot"></span><span class="status-text">ONLINE · CATALOG READY</span>
-        </div>
-      </div>
-      <div class="ledger">
-        <div><span class="label">PROTOCOL</span><span class="value">SAMO-NATIVE V1</span></div>
-        <div><span class="label">STATIONS</span><span class="value">{{len .Stations}}</span></div>
-      </div>
-    </header>
-
-    <section>
-      <div class="section-head">
-        <h2>// RADIO</h2>
-        <div class="meta">[ STATION LOOP ]</div>
-      </div>
-      {{if .Stations}}
-        {{range .Stations}}
-        <div class="station">
-          <div>
-            <h3 class="name">{{.Name}}</h3>
-            {{if .Description}}<p class="description">{{.Description}}</p>{{end}}
-            {{if .Now}}
-              <div class="now"><span class="dot"></span><span>NOW</span><span class="title">{{.Now.Title}}</span>{{if .Now.Artist}}<span class="artist">/ {{.Now.Artist}}</span>{{end}}</div>
-            {{else}}
-              <div class="now idle"><span class="dot"></span><span>IDLE</span></div>
-            {{end}}
-          </div>
-          <div class="links">
-            <a class="btn ghost" href="{{.StreamPath}}">STREAM &rarr;</a>
-            <a class="btn ghost" href="{{.PlaylistPath}}">M3U &rarr;</a>
-          </div>
-        </div>
-        {{end}}
-      {{else}}
-        <div class="stations-empty">// no stations programmed yet · use /api/v1/radio/admin to add one</div>
-      {{end}}
-    </section>
-  </main>
-</body>
-</html>`))
-
-type homeStation struct {
-	Name         string
-	Description  string
-	Now          *radio.ProgramSlot
-	StreamPath   string
-	PlaylistPath string
-}
-
+// home is the front door. Setup pending → wizard. Otherwise → /app (which
+// handles its own login bounce when no token is present). No standalone
+// landing page; the dashboard is the product.
 func (s *Server) home(w http.ResponseWriter, r *http.Request) {
 	if status, err := s.computeSetupStatus(r.Context()); err == nil && status.NeedsSetup {
 		http.Redirect(w, r, "/setup", http.StatusFound)
 		return
 	}
-
-	stations := s.radio.ListStations()
-	view := struct {
-		Stations []homeStation
-	}{Stations: make([]homeStation, 0, len(stations))}
-
-	for _, station := range stations {
-		item := homeStation{
-			Name:         station.Name,
-			Description:  station.Description,
-			StreamPath:   "/radio/" + url.PathEscape(station.ID) + "/stream",
-			PlaylistPath: "/radio/" + url.PathEscape(station.ID) + "/playlist.m3u",
-		}
-		if now, err := s.radio.CurrentSlot(station.ID, time.Now().UTC()); err == nil {
-			item.Now = &now
-		}
-		view.Stations = append(view.Stations, item)
-	}
-
-	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	if err := homeTemplate.Execute(w, view); err != nil {
-		log.Printf("failed to render home page: %v", err)
-	}
+	http.Redirect(w, r, "/app", http.StatusFound)
 }

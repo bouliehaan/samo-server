@@ -16,7 +16,7 @@ import (
 	"github.com/bouliehaan/samo-server/migrations"
 )
 
-func TestStreamShelfItemSelectsFileFromPlaybackProgress(t *testing.T) {
+func TestStreamAudiobookSelectsFileFromPlaybackProgress(t *testing.T) {
 	ctx := context.Background()
 	root := t.TempDir()
 	bookDir := filepath.Join(root, "books", "Signal Manual")
@@ -45,14 +45,14 @@ func TestStreamShelfItemSelectsFileFromPlaybackProgress(t *testing.T) {
 	libraryID := "library-books"
 	itemID := "item-signal"
 	if _, err := db.ExecContext(ctx, `
-		INSERT INTO libraries (id, name, kind, media_type, path)
-		VALUES (?, 'Books', 'shelf', 'book', ?)`,
+		INSERT INTO libraries (id, name, kind, path)
+		VALUES (?, 'Books', 'audiobook', ?)`,
 		libraryID, filepath.Join(root, "books")); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := db.ExecContext(ctx, `
-		INSERT INTO shelf_items (id, library_id, media_type, media_kind, path, duration_seconds, progress_json)
-		VALUES (?, ?, 'book', 'audiobook', ?, 15, ?)`,
+		INSERT INTO audiobooks (id, library_id, path, duration_seconds, progress_json)
+		VALUES (?, ?, ?, 15, ?)`,
 		itemID, libraryID, bookDir, `{"progressSeconds":12}`); err != nil {
 		t.Fatal(err)
 	}
@@ -64,7 +64,7 @@ func TestStreamShelfItemSelectsFileFromPlaybackProgress(t *testing.T) {
 		{"file-2", part2, 5},
 	} {
 		if _, err := db.ExecContext(ctx, `
-			INSERT INTO media_files (id, library_id, item_id, path, relative_path, file_name, mime_type, size_bytes, duration_seconds)
+			INSERT INTO media_files (id, library_id, audiobook_id, path, relative_path, file_name, mime_type, size_bytes, duration_seconds)
 			VALUES (?, ?, ?, ?, ?, ?, 'audio/mpeg', ?, ?)`,
 			row.id, libraryID, itemID, row.path, filepath.Base(row.path), filepath.Base(row.path), 10, row.duration); err != nil {
 			t.Fatal(err)
@@ -84,7 +84,7 @@ func TestStreamShelfItemSelectsFileFromPlaybackProgress(t *testing.T) {
 		Files:    filesService,
 	})
 
-	req := httptest.NewRequest(http.MethodGet, "/api/v1/shelf/items/"+itemID+"/stream", nil)
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/audiobooks/"+itemID+"/stream", nil)
 	rec := httptest.NewRecorder()
 	handler.ServeHTTP(rec, req)
 

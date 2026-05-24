@@ -7,6 +7,32 @@ import (
 	"github.com/bouliehaan/samo-server/internal/users"
 )
 
+// issueStreamToken mints a short-lived credential the dashboard can put in
+// stream/cover URLs so HTML5 audio/img elements don't need to send the
+// bearer header (which they can't). The caller must already be
+// authenticated via the standard requireUser path.
+func (s *Server) issueStreamToken(w http.ResponseWriter, r *http.Request) {
+	principal, ok := s.currentUser(r)
+	if !ok {
+		writeError(w, http.StatusUnauthorized, "unauthorized")
+		return
+	}
+	service := s.usersService()
+	if service == nil || !service.Enabled() {
+		writeError(w, http.StatusServiceUnavailable, "user accounts are not configured")
+		return
+	}
+	token, expiresAt, err := service.IssueStreamToken(principal.User.ID)
+	if err != nil {
+		writeUserError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"token":     token,
+		"expiresAt": expiresAt,
+	})
+}
+
 func (s *Server) loginUser(w http.ResponseWriter, r *http.Request) {
 	service := s.usersService()
 	if service == nil || !service.Enabled() {

@@ -40,11 +40,7 @@ func (s *Server) putPlayback(w http.ResponseWriter, r *http.Request) {
 	}
 	id := r.PathValue("id")
 	var before catalog.PlaybackState
-	if kind == playback.TargetMusicTrack {
-		if state, err := s.playbackService().Get(r.Context(), principal.User.ID, kind, id); err == nil {
-			before = state
-		}
-	} else if kind == playback.TargetShelfItem {
+	if kind == playback.TargetMusicTrack || kind == playback.TargetAudiobook {
 		if state, err := s.playbackService().Get(r.Context(), principal.User.ID, kind, id); err == nil {
 			before = state
 		}
@@ -61,8 +57,8 @@ func (s *Server) putPlayback(w http.ResponseWriter, r *http.Request) {
 	if kind == playback.TargetMusicTrack {
 		s.notifyMusicTrackLastFM(r.Context(), principal.User.ID, id, before, updated, nil, "playback-put", 0)
 	}
-	if kind == playback.TargetShelfItem {
-		s.recordShelfListeningSession(r.Context(), principal.User.ID, id, before, updated, nil)
+	if kind == playback.TargetAudiobook {
+		s.recordAudiobookListeningSession(r.Context(), principal.User.ID, id, before, updated, nil)
 	}
 	writeJSON(w, http.StatusOK, updated)
 }
@@ -80,11 +76,7 @@ func (s *Server) patchPlayback(w http.ResponseWriter, r *http.Request) {
 	}
 	id := r.PathValue("id")
 	var before catalog.PlaybackState
-	if kind == playback.TargetMusicTrack && s.lastfm != nil && s.lastfm.Enabled() {
-		if state, err := s.playbackService().Get(r.Context(), principal.User.ID, kind, id); err == nil {
-			before = state
-		}
-	} else if kind == playback.TargetShelfItem {
+	if (kind == playback.TargetMusicTrack && s.lastfm != nil && s.lastfm.Enabled()) || kind == playback.TargetAudiobook {
 		if state, err := s.playbackService().Get(r.Context(), principal.User.ID, kind, id); err == nil {
 			before = state
 		}
@@ -101,8 +93,8 @@ func (s *Server) patchPlayback(w http.ResponseWriter, r *http.Request) {
 	if kind == playback.TargetMusicTrack {
 		s.notifyMusicTrackLastFM(r.Context(), principal.User.ID, id, before, updated, &patch, "playback-patch", 0)
 	}
-	if kind == playback.TargetShelfItem {
-		s.recordShelfListeningSession(r.Context(), principal.User.ID, id, before, updated, &patch)
+	if kind == playback.TargetAudiobook {
+		s.recordAudiobookListeningSession(r.Context(), principal.User.ID, id, before, updated, &patch)
 	}
 	writeJSON(w, http.StatusOK, updated)
 }

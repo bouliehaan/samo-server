@@ -30,7 +30,7 @@ type StationRecord struct {
 }
 
 // LoadStationsFromDB hydrates all stored stations and resolves their item
-// references against music tracks, shelf items, and podcast episodes so the
+// references against music tracks, audiobooks, and podcast episodes so the
 // runtime has playable file paths.
 func LoadStationsFromDB(ctx context.Context, db *sql.DB) ([]StationRecord, error) {
 	if db == nil {
@@ -143,10 +143,10 @@ func resolveItem(ctx context.Context, db *sql.DB, item *StationItem) error {
 		return nil
 	case ItemSourceMusicTrack:
 		return resolveMusicTrack(ctx, db, item)
-	case ItemSourceShelfItem:
-		return resolveShelfItem(ctx, db, item)
-	case ItemSourceShelfEpisode:
-		return resolveShelfEpisode(ctx, db, item)
+	case ItemSourceAudiobook:
+		return resolveAudiobook(ctx, db, item)
+	case ItemSourcePodcastEpisode:
+		return resolvePodcastEpisode(ctx, db, item)
 	default:
 		item.Missing = true
 		return nil
@@ -198,27 +198,29 @@ func resolveMusicTrack(ctx context.Context, db *sql.DB, item *StationItem) error
 	return nil
 }
 
-func resolveShelfItem(ctx context.Context, db *sql.DB, item *StationItem) error {
+// resolveAudiobook finds the on-disk path of an audiobook's primary media
+// file. resolvePodcastEpisode is below — they used to share a query against
+// shelf_items, but with the schema split they now hit distinct tables.
+func resolveAudiobook(ctx context.Context, db *sql.DB, item *StationItem) error {
 	if item.SourceID == "" {
 		item.Missing = true
 		return nil
 	}
 	var path sql.NullString
 	var duration sql.NullInt64
-	var mediaType sql.NullString
 	err := db.QueryRowContext(ctx, `
-		SELECT mf.path, mf.duration_seconds, si.media_type
-		FROM shelf_items si
-		LEFT JOIN media_files mf ON mf.item_id = si.id
-		WHERE si.id = ?
+		SELECT mf.path, mf.duration_seconds
+		FROM audiobooks a
+		LEFT JOIN media_files mf ON mf.audiobook_id = a.id
+		WHERE a.id = ?
 		ORDER BY mf.relative_path, mf.id
-		LIMIT 1`, item.SourceID).Scan(&path, &duration, &mediaType)
+		LIMIT 1`, item.SourceID).Scan(&path, &duration)
 	if errors.Is(err, sql.ErrNoRows) {
 		item.Missing = true
 		return nil
 	}
 	if err != nil {
-		return fmt.Errorf("resolve shelf item %q: %w", item.SourceID, err)
+		return fmt.Errorf("resolve audiobook %q: %w", item.SourceID, err)
 	}
 	if !path.Valid || strings.TrimSpace(path.String) == "" {
 		item.Missing = true
@@ -229,17 +231,12 @@ func resolveShelfItem(ctx context.Context, db *sql.DB, item *StationItem) error 
 		item.DurationSeconds = int(duration.Int64)
 	}
 	if item.Kind == "" || item.Kind == string(media.KindOther) {
-		switch mediaType.String {
-		case "podcast":
-			item.Kind = string(media.KindPodcast)
-		case "book":
-			item.Kind = string(media.KindAudiobook)
-		}
+		item.Kind = string(media.KindAudiobook)
 	}
 	return nil
 }
 
-func resolveShelfEpisode(ctx context.Context, db *sql.DB, item *StationItem) error {
+func resolvePodcastEpisode(ctx context.Context, db *sql.DB, item *StationItem) error {
 	if item.SourceID == "" {
 		item.Missing = true
 		return nil
@@ -258,7 +255,7 @@ func resolveShelfEpisode(ctx context.Context, db *sql.DB, item *StationItem) err
 		return nil
 	}
 	if err != nil {
-		return fmt.Errorf("resolve shelf episode %q: %w", item.SourceID, err)
+		return fmt.Errorf("resolve podcast episode %q: %w", item.SourceID, err)
 	}
 	if !path.Valid || strings.TrimSpace(path.String) == "" {
 		item.Missing = true
@@ -622,7 +619,7 @@ func insertStationItem(ctx context.Context, tx *sql.Tx, stationID string, positi
 		if strings.TrimSpace(input.SourcePath) == "" {
 			return errors.New("source path is required for path items")
 		}
-	case ItemSourceMusicTrack, ItemSourceShelfItem, ItemSourceShelfEpisode:
+	case ItemSourceMusicTrack, ItemSourceAudiobook, ItemSourcePodcastEpisode:
 		if strings.TrimSpace(input.SourceID) == "" {
 			return fmt.Errorf("source id required for %s items", kind)
 		}

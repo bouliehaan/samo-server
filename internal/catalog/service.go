@@ -4,21 +4,26 @@ import (
 	"errors"
 	"slices"
 	"sort"
+	"strings"
 	"sync"
 )
 
 var ErrNotFound = errors.New("catalog item not found")
 
+// Seed is the input to catalog.Service — the projection assembled from
+// SQLite at startup / after a scan. Audiobooks and podcasts are kept in
+// separate slices because they are independent product domains in Samo;
+// there is no shared "library item" umbrella type.
 type Seed struct {
 	MusicArtists    []MusicArtist
 	MusicAlbums     []MusicAlbum
 	MusicTracks     []MusicTrack
 	MusicPlaylists  []MusicPlaylist
 	Genres          []GenreSummary
-	ShelfLibraries  []ShelfLibrary
-	ShelfItems      []ShelfItem
-	ShelfAuthors    []ShelfAuthor
-	ShelfSeries     []ShelfSeries
+	Audiobooks      []AudiobookItem
+	Podcasts        []PodcastItem
+	Contributors    []Contributor
+	Series          []Series
 	PodcastEpisodes []PodcastEpisode
 }
 
@@ -31,21 +36,23 @@ type Service struct {
 	musicPlaylists []MusicPlaylist
 	genres         []GenreSummary
 
-	shelfLibraries  []ShelfLibrary
-	shelfItems      []ShelfItem
-	shelfAuthors    []ShelfAuthor
-	shelfSeries     []ShelfSeries
+	audiobooks      []AudiobookItem
+	podcasts        []PodcastItem
+	contributors    []Contributor
+	series          []Series
 	podcastEpisodes []PodcastEpisode
 
-	musicArtistByID  map[string]MusicArtist
-	musicAlbumByID   map[string]MusicAlbum
-	musicTrackByID   map[string]MusicTrack
-	playlistByID     map[string]MusicPlaylist
-	shelfLibraryByID map[string]ShelfLibrary
-	shelfItemByID    map[string]ShelfItem
-	shelfAuthorByID  map[string]ShelfAuthor
-	shelfSeriesByID  map[string]ShelfSeries
-	episodeByID      map[string]PodcastEpisode
+	musicArtistByID map[string]MusicArtist
+	musicAlbumByID  map[string]MusicAlbum
+	musicTrackByID  map[string]MusicTrack
+	playlistByID    map[string]MusicPlaylist
+	audiobookByID   map[string]AudiobookItem
+	podcastByID     map[string]PodcastItem
+	contributorByID map[string]Contributor
+	seriesByID      map[string]Series
+	episodeByID     map[string]PodcastEpisode
+	audiobookLibIDs map[string]struct{}
+	podcastLibIDs   map[string]struct{}
 }
 
 func NewService(seed Seed) *Service {
@@ -69,20 +76,17 @@ func (s *Service) Overview() Overview {
 		musicDuration += track.DurationSeconds
 	}
 
-	audiobooks := 0
-	podcasts := 0
-	shelfDuration := 0
-	for _, item := range s.shelfItems {
-		switch item.MediaType {
-		case ShelfMediaTypeBook:
-			audiobooks++
-		case ShelfMediaTypePodcast:
-			podcasts++
-		}
-		shelfDuration += item.DurationSeconds
+	audiobookDuration := 0
+	for _, item := range s.audiobooks {
+		audiobookDuration += item.DurationSeconds
+	}
+
+	podcastDuration := 0
+	for _, item := range s.podcasts {
+		podcastDuration += item.DurationSeconds
 	}
 	for _, episode := range s.podcastEpisodes {
-		shelfDuration += episode.DurationSeconds
+		podcastDuration += episode.DurationSeconds
 	}
 
 	return Overview{
@@ -94,18 +98,23 @@ func (s *Service) Overview() Overview {
 			GenreCount:      len(s.genres),
 			DurationSeconds: musicDuration,
 		},
-		Shelf: ShelfOverview{
-			LibraryCount:    len(s.shelfLibraries),
-			ItemCount:       len(s.shelfItems),
-			AudiobookCount:  audiobooks,
-			PodcastCount:    podcasts,
+		Audiobook: AudiobookOverview{
+			LibraryCount:     len(s.audiobookLibIDs),
+			AudiobookCount:   len(s.audiobooks),
+			ContributorCount: len(s.contributors),
+			SeriesCount:      len(s.series),
+			DurationSeconds:  audiobookDuration,
+		},
+		Podcast: PodcastOverview{
+			LibraryCount:    len(s.podcastLibIDs),
+			PodcastCount:    len(s.podcasts),
 			EpisodeCount:    len(s.podcastEpisodes),
-			AuthorCount:     len(s.shelfAuthors),
-			SeriesCount:     len(s.shelfSeries),
-			DurationSeconds: shelfDuration,
+			DurationSeconds: podcastDuration,
 		},
 	}
 }
+
+// -- Music ------------------------------------------------------------------
 
 func (s *Service) ListMusicArtists(page PageRequest) Page[MusicArtist] {
 	s.mu.RLock()
@@ -161,6 +170,18 @@ func (s *Service) ListMusicPlaylists(page PageRequest) Page[MusicPlaylist] {
 	return paginate(s.musicPlaylists, page)
 }
 
+func (s *Service) ListMusicPlaylistsForUser(userID string, page PageRequest) Page[MusicPlaylist] {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	items := make([]MusicPlaylist, 0, len(s.musicPlaylists))
+	for _, item := range s.musicPlaylists {
+		if PlaylistVisibleToUser(item, userID) {
+			items = append(items, item)
+		}
+	}
+	return paginate(items, page)
+}
+
 func (s *Service) MusicPlaylist(id string) (MusicPlaylist, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
@@ -171,98 +192,177 @@ func (s *Service) MusicPlaylist(id string) (MusicPlaylist, error) {
 	return item, nil
 }
 
+func (s *Service) MusicPlaylistForUser(userID, id string) (MusicPlaylist, error) {
+	item, err := s.MusicPlaylist(id)
+	if err != nil {
+		return MusicPlaylist{}, err
+	}
+	if !PlaylistVisibleToUser(item, userID) {
+		return MusicPlaylist{}, ErrNotFound
+	}
+	return item, nil
+}
+
+func PlaylistVisibleToUser(item MusicPlaylist, userID string) bool {
+	if item.Public || strings.TrimSpace(item.OwnerID) == "" {
+		return true
+	}
+	return strings.TrimSpace(userID) != "" && item.OwnerID == strings.TrimSpace(userID)
+}
+
 func (s *Service) ListGenres(page PageRequest) Page[GenreSummary] {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	return paginate(s.genres, page)
 }
 
-func (s *Service) ListShelfLibraries(page PageRequest) Page[ShelfLibrary] {
+// -- Audiobooks -------------------------------------------------------------
+
+func (s *Service) ListAudiobooks(page PageRequest) Page[AudiobookItem] {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	return paginate(s.shelfLibraries, page)
+	return paginate(s.audiobooks, page)
 }
 
-func (s *Service) ShelfLibrary(id string) (ShelfLibrary, error) {
+func (s *Service) Audiobook(id string) (AudiobookItem, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	item, ok := s.shelfLibraryByID[id]
+	item, ok := s.audiobookByID[id]
 	if !ok {
-		return ShelfLibrary{}, ErrNotFound
+		return AudiobookItem{}, ErrNotFound
 	}
 	return item, nil
 }
 
-func (s *Service) ListShelfItems(page PageRequest) Page[ShelfItem] {
+func (s *Service) ListContributors(page PageRequest) Page[Contributor] {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	return paginate(s.shelfItems, page)
+	return paginate(s.contributors, page)
 }
 
-func (s *Service) ListAudiobooks(page PageRequest) Page[ShelfItem] {
+func (s *Service) Contributor(id string) (Contributor, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	items := make([]ShelfItem, 0)
-	for _, item := range s.shelfItems {
-		if item.MediaType == ShelfMediaTypeBook {
-			items = append(items, item)
+	item, ok := s.contributorByID[id]
+	if !ok {
+		return Contributor{}, ErrNotFound
+	}
+	return item, nil
+}
+
+func (s *Service) ListSeries(page PageRequest) Page[Series] {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return paginate(s.series, page)
+}
+
+func (s *Service) Series(id string) (Series, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	item, ok := s.seriesByID[id]
+	if !ok {
+		return Series{}, ErrNotFound
+	}
+	return item, nil
+}
+
+// ContributorDetail returns the contributor plus the audiobooks they
+// contributed to. The audiobooks are filtered by whether their
+// BookMetadata.Authors or BookMetadata.Narrators inline list contains the
+// contributor's ID. We don't consult the junction table here because the
+// catalog already projects junction rows into the inline lists at hydration
+// time — see catalog/sqlite.go.
+func (s *Service) ContributorDetail(id string, page PageRequest) (ContributorDetail, error) {
+	contributor, err := s.Contributor(id)
+	if err != nil {
+		return ContributorDetail{}, err
+	}
+	audiobooks, err := s.AudiobooksForContributor(id, page)
+	if err != nil {
+		return ContributorDetail{}, err
+	}
+	return ContributorDetail{Contributor: contributor, Audiobooks: audiobooks}, nil
+}
+
+func (s *Service) AudiobooksForContributor(contributorID string, page PageRequest) (Page[AudiobookItem], error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	contributorID = strings.TrimSpace(contributorID)
+	if _, ok := s.contributorByID[contributorID]; !ok {
+		return Page[AudiobookItem]{}, ErrNotFound
+	}
+	matches := make([]AudiobookItem, 0)
+	for _, item := range s.audiobooks {
+		if audiobookMatchesContributor(item, contributorID) {
+			matches = append(matches, item)
 		}
 	}
-	return paginate(items, page)
+	return paginate(matches, page), nil
 }
 
-func (s *Service) ShelfItem(id string) (ShelfItem, error) {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	item, ok := s.shelfItemByID[id]
-	if !ok {
-		return ShelfItem{}, ErrNotFound
+func (s *Service) SeriesDetail(id string, page PageRequest) (SeriesDetail, error) {
+	series, err := s.Series(id)
+	if err != nil {
+		return SeriesDetail{}, err
 	}
-	return item, nil
-}
-
-func (s *Service) ListShelfAuthors(page PageRequest) Page[ShelfAuthor] {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	return paginate(s.shelfAuthors, page)
-}
-
-func (s *Service) ShelfAuthor(id string) (ShelfAuthor, error) {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	item, ok := s.shelfAuthorByID[id]
-	if !ok {
-		return ShelfAuthor{}, ErrNotFound
+	audiobooks, err := s.AudiobooksForSeries(id, page)
+	if err != nil {
+		return SeriesDetail{}, err
 	}
-	return item, nil
+	return SeriesDetail{Series: series, Audiobooks: audiobooks}, nil
 }
 
-func (s *Service) ListShelfSeries(page PageRequest) Page[ShelfSeries] {
+func (s *Service) AudiobooksForSeries(seriesID string, page PageRequest) (Page[AudiobookItem], error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	return paginate(s.shelfSeries, page)
-}
-
-func (s *Service) ShelfSeries(id string) (ShelfSeries, error) {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	item, ok := s.shelfSeriesByID[id]
+	series, ok := s.seriesByID[seriesID]
 	if !ok {
-		return ShelfSeries{}, ErrNotFound
+		return Page[AudiobookItem]{}, ErrNotFound
 	}
-	return item, nil
+	matches := make([]AudiobookItem, 0, len(series.AudiobookIDs))
+	for _, audiobookID := range series.AudiobookIDs {
+		item, ok := s.audiobookByID[audiobookID]
+		if !ok {
+			continue
+		}
+		matches = append(matches, item)
+	}
+	return paginate(matches, page), nil
 }
 
-func (s *Service) ListPodcasts(page PageRequest) Page[ShelfItem] {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	items := make([]ShelfItem, 0)
-	for _, item := range s.shelfItems {
-		if item.MediaType == ShelfMediaTypePodcast {
-			items = append(items, item)
+func audiobookMatchesContributor(item AudiobookItem, contributorID string) bool {
+	if item.Book == nil {
+		return false
+	}
+	for _, ref := range item.Book.Authors {
+		if ref.ID == contributorID {
+			return true
 		}
 	}
-	return paginate(items, page)
+	for _, ref := range item.Book.Narrators {
+		if ref.ID == contributorID {
+			return true
+		}
+	}
+	return false
+}
+
+// -- Podcasts ---------------------------------------------------------------
+
+func (s *Service) ListPodcasts(page PageRequest) Page[PodcastItem] {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return paginate(s.podcasts, page)
+}
+
+func (s *Service) Podcast(id string) (PodcastItem, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	item, ok := s.podcastByID[id]
+	if !ok {
+		return PodcastItem{}, ErrNotFound
+	}
+	return item, nil
 }
 
 func (s *Service) ListPodcastEpisodes(page PageRequest) Page[PodcastEpisode] {
@@ -281,16 +381,39 @@ func (s *Service) PodcastEpisode(id string) (PodcastEpisode, error) {
 	return item, nil
 }
 
+// EpisodesForPodcast returns every episode whose PodcastID matches. Episodes
+// sit in newest-first projection order so feed refreshes surface fresh drops
+// without the UI needing to know every sorting rule.
+func (s *Service) EpisodesForPodcast(podcastID string, page PageRequest) (Page[PodcastEpisode], error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	podcastID = strings.TrimSpace(podcastID)
+	if _, ok := s.podcastByID[podcastID]; !ok {
+		return Page[PodcastEpisode]{}, ErrNotFound
+	}
+	matches := make([]PodcastEpisode, 0)
+	for _, episode := range s.podcastEpisodes {
+		if episode.PodcastID == podcastID {
+			matches = append(matches, episode)
+		}
+	}
+	return paginate(matches, page), nil
+}
+
+// -- Internal ---------------------------------------------------------------
+
 func (s *Service) reindex() {
 	s.musicArtistByID = map[string]MusicArtist{}
 	s.musicAlbumByID = map[string]MusicAlbum{}
 	s.musicTrackByID = map[string]MusicTrack{}
 	s.playlistByID = map[string]MusicPlaylist{}
-	s.shelfLibraryByID = map[string]ShelfLibrary{}
-	s.shelfItemByID = map[string]ShelfItem{}
-	s.shelfAuthorByID = map[string]ShelfAuthor{}
-	s.shelfSeriesByID = map[string]ShelfSeries{}
+	s.audiobookByID = map[string]AudiobookItem{}
+	s.podcastByID = map[string]PodcastItem{}
+	s.contributorByID = map[string]Contributor{}
+	s.seriesByID = map[string]Series{}
 	s.episodeByID = map[string]PodcastEpisode{}
+	s.audiobookLibIDs = map[string]struct{}{}
+	s.podcastLibIDs = map[string]struct{}{}
 
 	for _, item := range s.musicArtists {
 		s.musicArtistByID[item.ID] = item
@@ -304,17 +427,23 @@ func (s *Service) reindex() {
 	for _, item := range s.musicPlaylists {
 		s.playlistByID[item.ID] = item
 	}
-	for _, item := range s.shelfLibraries {
-		s.shelfLibraryByID[item.ID] = item
+	for _, item := range s.audiobooks {
+		s.audiobookByID[item.ID] = item
+		if item.LibraryID != "" {
+			s.audiobookLibIDs[item.LibraryID] = struct{}{}
+		}
 	}
-	for _, item := range s.shelfItems {
-		s.shelfItemByID[item.ID] = item
+	for _, item := range s.podcasts {
+		s.podcastByID[item.ID] = item
+		if item.LibraryID != "" {
+			s.podcastLibIDs[item.LibraryID] = struct{}{}
+		}
 	}
-	for _, item := range s.shelfAuthors {
-		s.shelfAuthorByID[item.ID] = item
+	for _, item := range s.contributors {
+		s.contributorByID[item.ID] = item
 	}
-	for _, item := range s.shelfSeries {
-		s.shelfSeriesByID[item.ID] = item
+	for _, item := range s.series {
+		s.seriesByID[item.ID] = item
 	}
 	for _, item := range s.podcastEpisodes {
 		s.episodeByID[item.ID] = item
@@ -324,11 +453,21 @@ func (s *Service) reindex() {
 	sort.Slice(s.musicAlbums, func(i, j int) bool { return s.musicAlbums[i].Title < s.musicAlbums[j].Title })
 	sort.Slice(s.musicTracks, func(i, j int) bool { return s.musicTracks[i].Title < s.musicTracks[j].Title })
 	sort.Slice(s.musicPlaylists, func(i, j int) bool { return s.musicPlaylists[i].Name < s.musicPlaylists[j].Name })
-	sort.Slice(s.shelfLibraries, func(i, j int) bool { return s.shelfLibraries[i].Name < s.shelfLibraries[j].Name })
-	sort.Slice(s.shelfItems, func(i, j int) bool { return shelfItemTitle(s.shelfItems[i]) < shelfItemTitle(s.shelfItems[j]) })
-	sort.Slice(s.shelfAuthors, func(i, j int) bool { return s.shelfAuthors[i].Name < s.shelfAuthors[j].Name })
-	sort.Slice(s.shelfSeries, func(i, j int) bool { return s.shelfSeries[i].Name < s.shelfSeries[j].Name })
-	sort.Slice(s.podcastEpisodes, func(i, j int) bool { return s.podcastEpisodes[i].Title < s.podcastEpisodes[j].Title })
+	sort.Slice(s.audiobooks, func(i, j int) bool { return audiobookTitle(s.audiobooks[i]) < audiobookTitle(s.audiobooks[j]) })
+	sort.Slice(s.podcasts, func(i, j int) bool { return podcastTitle(s.podcasts[i]) < podcastTitle(s.podcasts[j]) })
+	sort.Slice(s.contributors, func(i, j int) bool { return s.contributors[i].Name < s.contributors[j].Name })
+	sort.Slice(s.series, func(i, j int) bool { return s.series[i].Name < s.series[j].Name })
+	sort.Slice(s.podcastEpisodes, func(i, j int) bool {
+		left := podcastEpisodeSortStamp(s.podcastEpisodes[i])
+		right := podcastEpisodeSortStamp(s.podcastEpisodes[j])
+		if left != right {
+			return left > right
+		}
+		if s.podcastEpisodes[i].Title != s.podcastEpisodes[j].Title {
+			return s.podcastEpisodes[i].Title < s.podcastEpisodes[j].Title
+		}
+		return s.podcastEpisodes[i].ID < s.podcastEpisodes[j].ID
+	})
 	sort.Slice(s.genres, func(i, j int) bool { return s.genres[i].Name < s.genres[j].Name })
 }
 
@@ -338,10 +477,10 @@ func (s *Service) applySeed(seed Seed) {
 	s.musicTracks = slices.Clone(seed.MusicTracks)
 	s.musicPlaylists = slices.Clone(seed.MusicPlaylists)
 	s.genres = slices.Clone(seed.Genres)
-	s.shelfLibraries = slices.Clone(seed.ShelfLibraries)
-	s.shelfItems = slices.Clone(seed.ShelfItems)
-	s.shelfAuthors = slices.Clone(seed.ShelfAuthors)
-	s.shelfSeries = slices.Clone(seed.ShelfSeries)
+	s.audiobooks = slices.Clone(seed.Audiobooks)
+	s.podcasts = slices.Clone(seed.Podcasts)
+	s.contributors = slices.Clone(seed.Contributors)
+	s.series = slices.Clone(seed.Series)
 	s.podcastEpisodes = slices.Clone(seed.PodcastEpisodes)
 	s.reindex()
 }
@@ -387,12 +526,29 @@ func normalizePage(page PageRequest) PageRequest {
 	return page
 }
 
-func shelfItemTitle(item ShelfItem) string {
+func audiobookTitle(item AudiobookItem) string {
 	if item.Book != nil {
 		return item.Book.Title
 	}
+	return item.ID
+}
+
+func podcastTitle(item PodcastItem) string {
 	if item.Podcast != nil {
 		return item.Podcast.Title
 	}
 	return item.ID
+}
+
+func podcastEpisodeSortStamp(item PodcastEpisode) int64 {
+	if item.PublishedAt != nil {
+		return item.PublishedAt.UnixNano()
+	}
+	if item.AddedAt != nil {
+		return item.AddedAt.UnixNano()
+	}
+	if item.UpdatedAt != nil {
+		return item.UpdatedAt.UnixNano()
+	}
+	return 0
 }

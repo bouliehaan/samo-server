@@ -160,12 +160,48 @@ func (idx *OverrideIndex) GuardMusicTrack(ctx context.Context, db *sql.DB, incom
 	return out, nil
 }
 
-func (idx *OverrideIndex) GuardShelfItem(ctx context.Context, db *sql.DB, incoming ShelfItem) (ShelfItem, error) {
-	patch := idx.CombinedShelfItemPatch(incoming.ID, incoming.MediaType)
+// GuardAudiobook stops a scanner write from clobbering user-applied
+// audiobook metadata. For any field the user explicitly overrode, we read
+// the current DB value and force that field on the outgoing row.
+func (idx *OverrideIndex) GuardAudiobook(ctx context.Context, db *sql.DB, incoming AudiobookItem) (AudiobookItem, error) {
+	patch := idx.Patch(OverrideKindAudiobook, incoming.ID)
 	if len(patch) == 0 {
 		return incoming, nil
 	}
-	existing, found, err := loadExistingShelfItem(ctx, db, incoming.ID)
+	existing, found, err := loadExistingAudiobook(ctx, db, incoming.ID)
+	if err != nil {
+		return incoming, err
+	}
+	if !found {
+		return incoming, nil
+	}
+	out := incoming
+	if patchHasField(patch, "cover") {
+		out.Cover = existing.Cover
+		if out.Cover != nil {
+			copied := *out.Cover
+			out.Cover = &copied
+		}
+	}
+	if patchHasField(patch, "tags") {
+		out.Tags = append([]string(nil), existing.Tags...)
+	}
+	if patchHasField(patch, "genres") {
+		out.Genres = append([]string(nil), existing.Genres...)
+	}
+	out.Book = guardBookMetadata(existing.Book, out.Book, patch)
+	return out, nil
+}
+
+// GuardPodcast is the podcast-show equivalent of GuardAudiobook. It also
+// merges in any podcast-feed override (CombinedPodcastPatch) so the RSS
+// ingester's overrides survive scanner overwrites.
+func (idx *OverrideIndex) GuardPodcast(ctx context.Context, db *sql.DB, incoming PodcastItem) (PodcastItem, error) {
+	patch := idx.CombinedPodcastPatch(incoming.ID)
+	if len(patch) == 0 {
+		return incoming, nil
+	}
+	existing, found, err := loadExistingPodcast(ctx, db, incoming.ID)
 	if err != nil {
 		return incoming, err
 	}
@@ -186,11 +222,7 @@ func (idx *OverrideIndex) GuardShelfItem(ctx context.Context, db *sql.DB, incomi
 	if patchHasField(patch, "genres") || patchHasField(patch, "categories") {
 		out.Genres = append([]string(nil), existing.Genres...)
 	}
-	if incoming.MediaType == ShelfMediaTypePodcast {
-		out.Podcast = guardPodcastMetadata(existing.Podcast, out.Podcast, patch)
-	} else {
-		out.Book = guardBookMetadata(existing.Book, out.Book, patch)
-	}
+	out.Podcast = guardPodcastMetadata(existing.Podcast, out.Podcast, patch)
 	return out, nil
 }
 
@@ -239,10 +271,10 @@ func guardBookMetadata(existing, incoming *BookMetadata, patch MetadataOverrideP
 		out.Abridged = existing.Abridged
 	}
 	if patchHasField(patch, "authors") {
-		out.Authors = append([]Contributor(nil), existing.Authors...)
+		out.Authors = append([]ContributorRef(nil), existing.Authors...)
 	}
 	if patchHasField(patch, "narrators") {
-		out.Narrators = append([]Contributor(nil), existing.Narrators...)
+		out.Narrators = append([]ContributorRef(nil), existing.Narrators...)
 	}
 	if patchHasField(patch, "series") {
 		out.Series = append([]SeriesRef(nil), existing.Series...)
@@ -289,7 +321,7 @@ func guardPodcastMetadata(existing, incoming *PodcastMetadata, patch MetadataOve
 }
 
 func (idx *OverrideIndex) GuardPodcastEpisode(ctx context.Context, db *sql.DB, incoming PodcastEpisode) (PodcastEpisode, error) {
-	patch := idx.Patch(OverrideKindShelfEpisode, incoming.ID)
+	patch := idx.Patch(OverrideKindPodcastEpisode, incoming.ID)
 	if len(patch) == 0 {
 		return incoming, nil
 	}
@@ -467,19 +499,19 @@ func loadExistingMusicTrack(ctx context.Context, db *sql.DB, id string) (MusicTr
 	return track, true, nil
 }
 
-func loadExistingShelfItem(ctx context.Context, db *sql.DB, id string) (ShelfItem, bool, error) {
-	var item ShelfItem
+func loadExistingAudiobook(ctx context.Context, db *sql.DB, id string) (AudiobookItem, bool, error) {
+	var item AudiobookItem
 	var coverJSON, tagsJSON, genresJSON string
-	var bookJSON, podcastJSON sql.NullString
+	var bookJSON sql.NullString
 	err := db.QueryRowContext(ctx, `
-		SELECT media_type, cover_json, tags_json, genres_json, book_json, podcast_json
-		FROM shelf_items WHERE id = ?`, id).
-		Scan(&item.MediaType, &coverJSON, &tagsJSON, &genresJSON, &bookJSON, &podcastJSON)
+		SELECT cover_json, tags_json, genres_json, book_json
+		FROM audiobooks WHERE id = ?`, id).
+		Scan(&coverJSON, &tagsJSON, &genresJSON, &bookJSON)
 	if err == sql.ErrNoRows {
-		return ShelfItem{}, false, nil
+		return AudiobookItem{}, false, nil
 	}
 	if err != nil {
-		return ShelfItem{}, false, fmt.Errorf("load existing shelf item: %w", err)
+		return AudiobookItem{}, false, fmt.Errorf("load existing audiobook: %w", err)
 	}
 	var cover Image
 	decodeJSONString(coverJSON, &cover)
@@ -493,6 +525,31 @@ func loadExistingShelfItem(ctx context.Context, db *sql.DB, id string) (ShelfIte
 		decodeJSONString(bookJSON.String, &book)
 		item.Book = &book
 	}
+	item.ID = id
+	return item, true, nil
+}
+
+func loadExistingPodcast(ctx context.Context, db *sql.DB, id string) (PodcastItem, bool, error) {
+	var item PodcastItem
+	var coverJSON, tagsJSON, genresJSON string
+	var podcastJSON sql.NullString
+	err := db.QueryRowContext(ctx, `
+		SELECT cover_json, tags_json, genres_json, podcast_json
+		FROM podcasts WHERE id = ?`, id).
+		Scan(&coverJSON, &tagsJSON, &genresJSON, &podcastJSON)
+	if err == sql.ErrNoRows {
+		return PodcastItem{}, false, nil
+	}
+	if err != nil {
+		return PodcastItem{}, false, fmt.Errorf("load existing podcast: %w", err)
+	}
+	var cover Image
+	decodeJSONString(coverJSON, &cover)
+	if cover.ID != "" || cover.URL != "" || cover.Path != "" {
+		item.Cover = &cover
+	}
+	decodeJSONString(tagsJSON, &item.Tags)
+	decodeJSONString(genresJSON, &item.Genres)
 	if podcastJSON.Valid && podcastJSON.String != "" {
 		var podcast PodcastMetadata
 		decodeJSONString(podcastJSON.String, &podcast)
@@ -531,9 +588,9 @@ func loadExistingPodcastFeedRow(ctx context.Context, db *sql.DB, feedID, podcast
 	var coverJSON, podcastJSON sql.NullString
 	err := db.QueryRowContext(ctx, `
 		SELECT f.title, f.description, f.author, f.site_url, f.image_url, f.language, f.explicit, f.categories_json,
-		       i.cover_json, i.podcast_json
+		       p.cover_json, p.podcast_json
 		FROM podcast_feeds f
-		LEFT JOIN shelf_items i ON i.id = f.podcast_id
+		LEFT JOIN podcasts p ON p.id = f.podcast_id
 		WHERE f.id = ?`, feedID).
 		Scan(&row.Title, &row.Description, &row.Author, &row.SiteURL, &row.ImageURL, &row.Language, &explicit,
 			&categoriesJSON, &coverJSON, &podcastJSON)

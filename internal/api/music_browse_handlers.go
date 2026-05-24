@@ -39,13 +39,14 @@ func (s *Server) writeMusicBrowse(w http.ResponseWriter, r *http.Request, view c
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	writeJSON(w, http.StatusOK, s.catalog.MusicBrowse(
+	writeJSON(w, http.StatusOK, s.catalog.MusicBrowseForUser(
 		states.tracks,
 		states.albums,
 		states.artists,
 		states.playlists,
 		view,
 		page,
+		principal.User.ID,
 	))
 }
 

@@ -72,18 +72,24 @@ func overrideFieldValue(
 			return nil, false, nil
 		}
 		return musicTrackOverrideValue(track, field, candidate)
-	case ApplyTargetShelfItem:
-		item, ok := after.(catalog.ShelfItem)
+	case ApplyTargetAudiobook:
+		item, ok := after.(catalog.AudiobookItem)
 		if !ok {
 			return nil, false, nil
 		}
-		return shelfItemOverrideValue(item, field, candidate)
-	case ApplyTargetShelfEpisode:
+		return audiobookOverrideValue(item, field, candidate)
+	case ApplyTargetPodcast:
+		item, ok := after.(catalog.PodcastItem)
+		if !ok {
+			return nil, false, nil
+		}
+		return podcastOverrideValue(item, field)
+	case ApplyTargetPodcastEpisode:
 		episode, ok := after.(catalog.PodcastEpisode)
 		if !ok {
 			return nil, false, nil
 		}
-		return shelfEpisodeOverrideValue(episode, field)
+		return podcastEpisodeOverrideValue(episode, field)
 	case ApplyTargetPodcastFeed:
 		feed, ok := after.(podcastFeedApplyRow)
 		if !ok {
@@ -192,14 +198,7 @@ func musicTrackOverrideValue(track catalog.MusicTrack, field string, candidate S
 	}
 }
 
-func shelfItemOverrideValue(item catalog.ShelfItem, field string, candidate SearchResult) (any, bool, error) {
-	if item.MediaType == catalog.ShelfMediaTypePodcast {
-		return shelfPodcastItemOverrideValue(item, field)
-	}
-	return shelfBookItemOverrideValue(item, field, candidate)
-}
-
-func shelfBookItemOverrideValue(item catalog.ShelfItem, field string, candidate SearchResult) (any, bool, error) {
+func audiobookOverrideValue(item catalog.AudiobookItem, field string, candidate SearchResult) (any, bool, error) {
 	book := item.Book
 	if book == nil {
 		book = &catalog.BookMetadata{}
@@ -247,7 +246,7 @@ func shelfBookItemOverrideValue(item catalog.ShelfItem, field string, candidate 
 	}
 }
 
-func shelfPodcastItemOverrideValue(item catalog.ShelfItem, field string) (any, bool, error) {
+func podcastOverrideValue(item catalog.PodcastItem, field string) (any, bool, error) {
 	podcast := item.Podcast
 	if podcast == nil {
 		podcast = &catalog.PodcastMetadata{}
@@ -281,7 +280,7 @@ func shelfPodcastItemOverrideValue(item catalog.ShelfItem, field string) (any, b
 	}
 }
 
-func shelfEpisodeOverrideValue(episode catalog.PodcastEpisode, field string) (any, bool, error) {
+func podcastEpisodeOverrideValue(episode catalog.PodcastEpisode, field string) (any, bool, error) {
 	switch field {
 	case "title":
 		return episode.Title, episode.Title != "", nil

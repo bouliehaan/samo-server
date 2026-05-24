@@ -8,20 +8,28 @@ import (
 	"strings"
 )
 
-// scanMixedLibrary walks a "mixed" root and splits its files into music vs.
-// audiobook bundles per subfolder. Each top-level subfolder (relative to the
-// root) is classified once; files in the root itself are treated as music.
-// Audiobook detection runs first because its signals are stronger and more
-// expensive to misroute (a long-form file dropped into music_tracks loses its
-// chapter/series metadata).
+// scanMixedLibrary walks a "mixed" root and routes each subfolder bundle
+// into the right domain scanner: audiobooks, podcasts, or music. Each
+// top-level subfolder is classified once; loose files at the root default
+// to music.
+//
+// Audiobook detection is the most conservative path because its signals
+// are strongest (sidecars, .m4b containers, single huge files). Podcast
+// detection is the second-most-conservative — show-name folders full of
+// "Show - Episode N.mp3" entries, or any folder whose existing scan history
+// already wrote it to the podcasts table. Anything that fails both falls
+// back to music, which matches user intent for the common case of a
+// mixed library that is mostly an album collection.
 func (s *Scanner) scanMixedLibrary(ctx context.Context, library Library, root string, files []string) error {
 	groups := splitMixedGroups(root, files)
 
 	for _, group := range groups.audiobooks {
-		bookLib := library
-		bookLib.Kind = "shelf"
-		bookLib.MediaType = "book"
-		if err := s.scanAudiobook(ctx, bookLib, root, group); err != nil {
+		if err := s.scanAudiobook(ctx, library, root, group); err != nil {
+			return err
+		}
+	}
+	for _, group := range groups.podcasts {
+		if err := s.scanPodcast(ctx, library, root, group); err != nil {
 			return err
 		}
 	}
@@ -37,6 +45,7 @@ func (s *Scanner) scanMixedLibrary(ctx context.Context, library Library, root st
 
 type mixedGroups struct {
 	audiobooks []groupedAudio
+	podcasts   []groupedAudio
 	music      []string
 }
 
@@ -69,19 +78,26 @@ func splitMixedGroups(root string, files []string) mixedGroups {
 			out.music = append(out.music, folderFiles...)
 			continue
 		}
-		if classifyFolderAsAudiobook(folder, folderFiles) {
+		switch {
+		case classifyFolderAsAudiobook(folder, folderFiles):
 			// Use the highest-level audiobook root (the folder directly
 			// under the library root, or the actual folder if it is one).
 			bookRoot := audiobookRoot(rootAbs, folder)
-			out.audiobooks = mergeAudiobookGroup(out.audiobooks, bookRoot, folderFiles)
-		} else {
+			out.audiobooks = mergeGroup(out.audiobooks, bookRoot, folderFiles)
+		case classifyFolderAsPodcast(folder, folderFiles):
+			showRoot := audiobookRoot(rootAbs, folder)
+			out.podcasts = mergeGroup(out.podcasts, showRoot, folderFiles)
+		default:
 			out.music = append(out.music, folderFiles...)
 		}
 	}
 
-	// Sort audiobook groups for deterministic output.
+	// Sort groups for deterministic output.
 	sort.Slice(out.audiobooks, func(i, j int) bool {
 		return out.audiobooks[i].Root < out.audiobooks[j].Root
+	})
+	sort.Slice(out.podcasts, func(i, j int) bool {
+		return out.podcasts[i].Root < out.podcasts[j].Root
 	})
 	sort.Strings(out.music)
 	return out
@@ -101,7 +117,11 @@ func audiobookRoot(libraryRoot, folder string) string {
 	}
 }
 
-func mergeAudiobookGroup(groups []groupedAudio, root string, files []string) []groupedAudio {
+// mergeGroup merges files into an existing group with the same root, or
+// appends a new group if none exists. Used by both audiobook and podcast
+// classification to dedupe disc subfolders / season subfolders under one
+// logical bundle.
+func mergeGroup(groups []groupedAudio, root string, files []string) []groupedAudio {
 	for index, group := range groups {
 		if group.Root == root {
 			groups[index].Files = append(groups[index].Files, files...)
@@ -110,6 +130,50 @@ func mergeAudiobookGroup(groups []groupedAudio, root string, files []string) []g
 		}
 	}
 	return append(groups, groupedAudio{Root: root, Files: append([]string(nil), files...)})
+}
+
+// classifyFolderAsPodcast picks out the podcast-shaped folders inside a
+// mixed library. Signals (any one wins):
+//   - filename pattern "Show Name - <Date or NN>" repeated across files
+//   - .opml / podcasts.json sidecar
+//   - large episode counts (>=8) with short-ish (< 90 min) per-file durations
+//     are NOT used here because we don't probe in classification — too slow
+//     for a synchronous scan. Instead we lean on filename/sidecar signals
+//     and accept that a borderline mixed-library show may need its parent
+//     folder configured as a real podcast library.
+func classifyFolderAsPodcast(folder string, files []string) bool {
+	if len(files) < 3 {
+		return false
+	}
+	for _, name := range []string{"podcasts.json", "podcast.json", "feed.opml", "feed.xml", "podcast.opml"} {
+		if _, err := os.Stat(filepath.Join(folder, name)); err == nil {
+			return true
+		}
+	}
+	// Heuristic: at least half the files share the same "Show Name -" prefix
+	// (which is the most common episode naming convention).
+	prefix := ""
+	matched := 0
+	for _, file := range files {
+		base := strings.TrimSuffix(filepath.Base(file), filepath.Ext(file))
+		dash := strings.Index(base, " - ")
+		if dash <= 0 {
+			continue
+		}
+		candidate := strings.TrimSpace(base[:dash])
+		if prefix == "" {
+			prefix = candidate
+			matched = 1
+			continue
+		}
+		if strings.EqualFold(candidate, prefix) {
+			matched++
+		}
+	}
+	if prefix != "" && matched*2 >= len(files) {
+		return true
+	}
+	return false
 }
 
 // classifyFolderAsAudiobook decides whether a single folder's contents look

@@ -9,12 +9,13 @@ import (
 type TargetKind string
 
 const (
-	TargetMusicArtist   TargetKind = "music-artist"
-	TargetMusicAlbum    TargetKind = "music-album"
-	TargetMusicTrack    TargetKind = "music-track"
-	TargetMusicPlaylist TargetKind = "music-playlist"
-	TargetShelfItem     TargetKind = "shelf-item"
-	TargetShelfEpisode  TargetKind = "shelf-episode"
+	TargetMusicArtist    TargetKind = "music-artist"
+	TargetMusicAlbum     TargetKind = "music-album"
+	TargetMusicTrack     TargetKind = "music-track"
+	TargetMusicPlaylist  TargetKind = "music-playlist"
+	TargetAudiobook      TargetKind = "audiobook"
+	TargetPodcast        TargetKind = "podcast"
+	TargetPodcastEpisode TargetKind = "podcast-episode"
 )
 
 type State = catalog.PlaybackState

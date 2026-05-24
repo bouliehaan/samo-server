@@ -1,6 +1,7 @@
 package sources
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"database/sql"
@@ -17,7 +18,6 @@ import (
 	"time"
 
 	"github.com/bouliehaan/samo-server/internal/catalog"
-	"github.com/bouliehaan/samo-server/internal/media"
 	"github.com/bouliehaan/samo-server/internal/podcastcache"
 )
 
@@ -70,7 +70,7 @@ func (s *Service) AddPodcastFeed(ctx context.Context, input AddPodcastFeedInput)
 		return PodcastFeed{}, err
 	}
 
-	parsed, err := s.fetchPodcastFeed(ctx, feedURL)
+	parsed, resolvedFeedURL, err := s.fetchPodcastFeed(ctx, feedURL)
 	if err != nil {
 		return PodcastFeed{}, err
 	}
@@ -78,13 +78,13 @@ func (s *Service) AddPodcastFeed(ctx context.Context, input AddPodcastFeedInput)
 		parsed.Title = title
 	}
 	if parsed.Title == "" {
-		parsed.Title = feedURL
+		parsed.Title = resolvedFeedURL
 	}
 
-	if err := s.savePodcastFeed(ctx, feedURL, parsed); err != nil {
+	if err := s.savePodcastFeed(ctx, resolvedFeedURL, parsed); err != nil {
 		return PodcastFeed{}, err
 	}
-	return s.GetPodcastFeed(ctx, podcastFeedID(feedURL))
+	return s.GetPodcastFeed(ctx, podcastFeedID(resolvedFeedURL))
 }
 
 func (s *Service) RefreshPodcastFeed(ctx context.Context, id string) (PodcastFeed, error) {
@@ -100,7 +100,7 @@ func (s *Service) RefreshPodcastFeed(ctx context.Context, id string) (PodcastFee
 		return PodcastFeed{}, err
 	}
 
-	parsed, err := s.fetchPodcastFeed(ctx, existing.FeedURL)
+	parsed, _, err := s.fetchPodcastFeed(ctx, existing.FeedURL)
 	if err != nil {
 		_ = s.markPollFailure(ctx, existing.ID, err)
 		return PodcastFeed{}, err
@@ -183,7 +183,7 @@ func (s *Service) DeletePodcastFeed(ctx context.Context, id string) error {
 		}
 		return fmt.Errorf("find podcast feed: %w", err)
 	}
-	if _, err := tx.ExecContext(ctx, `DELETE FROM shelf_items WHERE id = ?`, podcastID); err != nil {
+	if _, err := tx.ExecContext(ctx, `DELETE FROM podcasts WHERE id = ?`, podcastID); err != nil {
 		return fmt.Errorf("delete podcast feed item: %w", err)
 	}
 	if _, err := tx.ExecContext(ctx, `
@@ -311,24 +311,49 @@ func (s *Service) DeleteInternetRadioStation(ctx context.Context, id string) err
 	return err
 }
 
-func (s *Service) fetchPodcastFeed(ctx context.Context, feedURL string) (parsedPodcastFeed, error) {
+func (s *Service) fetchPodcastFeed(ctx context.Context, feedURL string) (parsedPodcastFeed, string, error) {
+	return s.fetchPodcastFeedURL(ctx, feedURL, true)
+}
+
+func (s *Service) fetchPodcastFeedURL(ctx context.Context, feedURL string, allowDiscovery bool) (parsedPodcastFeed, string, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, feedURL, nil)
 	if err != nil {
-		return parsedPodcastFeed{}, err
+		return parsedPodcastFeed{}, "", err
 	}
 	req.Header.Set("Accept", "application/rss+xml, application/xml;q=0.9, text/xml;q=0.8, */*;q=0.5")
 	req.Header.Set("User-Agent", "Samo Server/0.1")
 
 	resp, err := s.client.Do(req)
 	if err != nil {
-		return parsedPodcastFeed{}, fmt.Errorf("fetch podcast feed: %w", err)
+		return parsedPodcastFeed{}, "", fmt.Errorf("fetch podcast feed: %w", err)
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return parsedPodcastFeed{}, fmt.Errorf("fetch podcast feed: status %d", resp.StatusCode)
+		return parsedPodcastFeed{}, "", fmt.Errorf("fetch podcast feed: status %d", resp.StatusCode)
 	}
-	return parsePodcastFeedXML(io.LimitReader(resp.Body, maxFeedBytes))
+	body, err := io.ReadAll(io.LimitReader(resp.Body, maxFeedBytes+1))
+	if err != nil {
+		return parsedPodcastFeed{}, "", fmt.Errorf("read podcast feed: %w", err)
+	}
+	if len(body) > maxFeedBytes {
+		return parsedPodcastFeed{}, "", fmt.Errorf("podcast feed exceeds %d bytes", maxFeedBytes)
+	}
+
+	resolvedURL := feedURL
+	if resp.Request != nil && resp.Request.URL != nil {
+		resolvedURL = resp.Request.URL.String()
+	}
+	parsed, parseErr := parsePodcastFeedXML(bytes.NewReader(body))
+	if parseErr == nil {
+		return parsed, resolvedURL, nil
+	}
+	if allowDiscovery && resp.Request != nil {
+		if discovered, ok := discoverPodcastRSSURL(body, resp.Request.URL); ok && discovered != "" && discovered != resolvedURL {
+			return s.fetchPodcastFeedURL(ctx, discovered, false)
+		}
+	}
+	return parsedPodcastFeed{}, "", parseErr
 }
 
 func (s *Service) savePodcastFeed(ctx context.Context, feedURL string, parsed parsedPodcastFeed) error {
@@ -388,15 +413,13 @@ func (s *Service) savePodcastFeed(ctx context.Context, feedURL string, parsed pa
 	}
 
 	if _, err := tx.ExecContext(ctx, `
-		INSERT INTO shelf_items (
-		  id, library_id, media_type, media_kind, path, folder_id, cover_json, tags_json, genres_json,
+		INSERT INTO podcasts (
+		  id, library_id, path, folder_id, cover_json, tags_json, genres_json,
 		  duration_seconds, podcast_json, updated_at, last_scan_at
 		)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
 		ON CONFLICT(id) DO UPDATE SET
 		  library_id = excluded.library_id,
-		  media_type = excluded.media_type,
-		  media_kind = excluded.media_kind,
 		  path = excluded.path,
 		  folder_id = excluded.folder_id,
 		  cover_json = excluded.cover_json,
@@ -406,7 +429,7 @@ func (s *Service) savePodcastFeed(ctx context.Context, feedURL string, parsed pa
 		  podcast_json = excluded.podcast_json,
 		  updated_at = CURRENT_TIMESTAMP,
 		  last_scan_at = CURRENT_TIMESTAMP`,
-		podcastID, remotePodcastLibraryID, catalog.ShelfMediaTypePodcast, media.KindPodcast, feedURL,
+		podcastID, remotePodcastLibraryID, feedURL,
 		stableID("folder", feedURL), coverJSON, jsonText(categories), jsonText(categories), durationSeconds, jsonText(podcastMeta)); err != nil {
 		return fmt.Errorf("upsert podcast feed item: %w", err)
 	}
@@ -498,9 +521,11 @@ func (s *Service) recordPodcastFeedError(ctx context.Context, id string, cause e
 }
 
 func upsertRemotePodcastLibrary(ctx context.Context, tx *sql.Tx) error {
+	// media_type is intentionally NULL on `podcast` libraries — it is a
+	// leftover column from the old shelf-era schema.
 	_, err := tx.ExecContext(ctx, `
 		INSERT INTO libraries (id, name, kind, media_type, path, description, updated_at)
-		VALUES (?, 'Podcast Feeds', 'shelf', ?, ?, 'Remote RSS podcast subscriptions.', CURRENT_TIMESTAMP)
+		VALUES (?, 'Podcast Feeds', 'podcast', NULL, ?, 'Remote RSS podcast subscriptions.', CURRENT_TIMESTAMP)
 		ON CONFLICT(id) DO UPDATE SET
 		  name = excluded.name,
 		  kind = excluded.kind,
@@ -508,7 +533,7 @@ func upsertRemotePodcastLibrary(ctx context.Context, tx *sql.Tx) error {
 		  path = excluded.path,
 		  description = excluded.description,
 		  updated_at = CURRENT_TIMESTAMP`,
-		remotePodcastLibraryID, catalog.ShelfMediaTypePodcast, remotePodcastLibraryPath)
+		remotePodcastLibraryID, remotePodcastLibraryPath)
 	if err != nil {
 		return fmt.Errorf("upsert remote podcast library: %w", err)
 	}
@@ -518,7 +543,7 @@ func upsertRemotePodcastLibrary(ctx context.Context, tx *sql.Tx) error {
 func refreshRemotePodcastLibraryStats(ctx context.Context, tx *sql.Tx) error {
 	_, err := tx.ExecContext(ctx, `
 		UPDATE libraries
-		SET item_count = COALESCE((SELECT COUNT(*) FROM shelf_items WHERE library_id = libraries.id), 0),
+		SET item_count = COALESCE((SELECT COUNT(*) FROM podcasts WHERE library_id = libraries.id), 0),
 		    updated_at = CURRENT_TIMESTAMP
 		WHERE id = ?`, remotePodcastLibraryID)
 	if err != nil {

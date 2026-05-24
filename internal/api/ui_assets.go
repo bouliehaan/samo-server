@@ -40,7 +40,8 @@ html, body {
   z-index: 0;
   mask-image: radial-gradient(ellipse at center, black 30%, transparent 80%);
 }
-main {
+/* Pages own their own <main> layout — only the wizard uses .page-main. */
+.page-main {
   position: relative;
   z-index: 1;
   max-width: 880px;
@@ -50,29 +51,31 @@ main {
   gap: 48px;
 }
 
-.samo-head {
-  display: grid;
-  grid-template-columns: 1fr auto;
-  align-items: end;
-  gap: 24px;
-}
-.wordmark {
-  display: grid;
-  gap: 2px;
-}
-.wordmark .word {
+/* ---- Unified wordmark + status ---- */
+/* One component, three size variants (head/hero/bar) so every page reads the
+ * same: setup uses .head, login uses .hero, the app shell uses .bar. */
+.samo-wm {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 10px;
   font-family: var(--sans);
-  font-size: clamp(2.5rem, 6vw, 4.5rem);
   font-weight: 900;
-  line-height: 0.9;
   letter-spacing: -0.04em;
+  line-height: 0.9;
   color: var(--text);
 }
-.wordmark .word.dim {
-  color: var(--text-dim);
+.samo-wm .word { color: var(--text); display: inline-block; }
+.samo-wm .word.dim { color: var(--text-dim); }
+.samo-wm.head,
+.samo-wm.hero {
+  flex-direction: column;
+  align-items: flex-start;
 }
-.wordmark .status {
-  margin-top: 14px;
+.samo-wm.head { font-size: clamp(2.5rem, 6vw, 4.5rem); gap: 2px; }
+.samo-wm.hero { font-size: clamp(3rem, 9vw, 6.5rem); gap: 4px; letter-spacing: -0.045em; }
+.samo-wm.bar  { font-size: 1.2rem; letter-spacing: -0.02em; gap: 8px; }
+
+.samo-status {
   display: inline-flex;
   align-items: center;
   gap: 8px;
@@ -82,14 +85,29 @@ main {
   text-transform: uppercase;
   color: var(--muted);
 }
-.wordmark .status .dot {
+.samo-status .dot {
   width: 8px;
   height: 8px;
   background: var(--accent);
   box-shadow: 0 0 12px var(--accent);
   display: inline-block;
 }
-.ledger {
+.samo-status.pulse .dot { animation: samoPulse 1.8s ease-in-out infinite; }
+.samo-status.bar { font-size: 0.66rem; letter-spacing: 0.16em; }
+.samo-status.bar .dot { width: 6px; height: 6px; box-shadow: 0 0 8px var(--accent); }
+@keyframes samoPulse { 0%,100%{opacity:1} 50%{opacity:0.35} }
+
+/* Standalone page header: wordmark + optional ledger on the right.
+ * Used by setup wizard; .samo-head.hero stacks for the login split layout. */
+.samo-head {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  align-items: end;
+  gap: 24px;
+}
+.samo-head .samo-status { margin-top: 14px; }
+
+.samo-ledger {
   display: grid;
   gap: 6px;
   text-align: right;
@@ -98,14 +116,14 @@ main {
   letter-spacing: 0.16em;
   text-transform: uppercase;
 }
-.ledger > div {
+.samo-ledger > div {
   display: grid;
   grid-template-columns: 1fr auto;
   gap: 12px;
   color: var(--text);
 }
-.ledger .label { color: var(--muted); }
-.ledger .value { color: var(--text); }
+.samo-ledger .label { color: var(--muted); }
+.samo-ledger .value { color: var(--text); }
 
 .card {
   background: var(--surface);

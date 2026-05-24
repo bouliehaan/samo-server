@@ -87,16 +87,15 @@ func (s *Server) scanAllLibraries(w http.ResponseWriter, r *http.Request) {
 	if _, ok := s.requireAdmin(w, r); !ok {
 		return
 	}
+	// Scans run in a background goroutine; this handler returns the job
+	// row as soon as it's created so the dashboard can start polling for
+	// progress. The catalog reload is wired into Service.OnScanComplete.
 	result, err := s.librariesService().ScanAll(r.Context(), libraries.TriggerAPI)
 	if err != nil {
 		writeLibraryScanError(w, result, err)
 		return
 	}
-	if err := s.reloadCatalogProjection(r); err != nil {
-		writeError(w, http.StatusInternalServerError, err.Error())
-		return
-	}
-	writeJSON(w, http.StatusOK, result)
+	writeJSON(w, http.StatusAccepted, result)
 }
 
 func (s *Server) scanLibrary(w http.ResponseWriter, r *http.Request) {
@@ -108,11 +107,7 @@ func (s *Server) scanLibrary(w http.ResponseWriter, r *http.Request) {
 		writeLibraryScanError(w, result, err)
 		return
 	}
-	if err := s.reloadCatalogProjection(r); err != nil {
-		writeError(w, http.StatusInternalServerError, err.Error())
-		return
-	}
-	writeJSON(w, http.StatusOK, result)
+	writeJSON(w, http.StatusAccepted, result)
 }
 
 func (s *Server) listScanJobs(w http.ResponseWriter, r *http.Request) {
@@ -165,9 +160,20 @@ func writeLibraryError(w http.ResponseWriter, err error) {
 }
 
 func writeLibraryScanError(w http.ResponseWriter, result libraries.ScanResult, err error) {
-	if result.Job.ID != "" {
-		writeJSON(w, http.StatusConflict, result)
-		return
+	// A scan that started but failed mid-run leaves a job row with status
+	// "failed" and the real error captured in job.Error. Surface that
+	// message rather than the generic wrapped error; clients show it
+	// inline so the operator can see exactly what broke (ffprobe failure,
+	// missing path, SQLite contention, etc.).
+	switch {
+	case errors.Is(err, libraries.ErrScanInProgress):
+		writeError(w, http.StatusConflict, err.Error())
+	case result.Job.ID != "" && result.Job.Error != "":
+		writeJSON(w, http.StatusInternalServerError, map[string]any{
+			"error": "scan failed: " + result.Job.Error,
+			"job":   result.Job,
+		})
+	default:
+		writeLibraryError(w, err)
 	}
-	writeLibraryError(w, err)
 }

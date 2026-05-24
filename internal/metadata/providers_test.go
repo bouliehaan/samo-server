@@ -85,6 +85,9 @@ func TestApplePodcastProviderMapsPodcastMetadata(t *testing.T) {
 	if results[0].ExternalIDs.ITunesID != "42" {
 		t.Fatalf("itunes id = %q, want 42", results[0].ExternalIDs.ITunesID)
 	}
+	if results[0].ExternalIDs.FeedGUID != "" {
+		t.Fatalf("feed guid = %q, want provider to leave RSS feed guid alone", results[0].ExternalIDs.FeedGUID)
+	}
 	if !strings.Contains(strings.Join(results[0].ExternalIDs.URLs, " "), "feed.xml") {
 		t.Fatalf("urls = %#v, want feed url", results[0].ExternalIDs.URLs)
 	}

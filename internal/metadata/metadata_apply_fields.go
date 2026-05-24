@@ -1,26 +1,25 @@
 package metadata
 
-import (
-	"strings"
+import "strings"
 
-	"github.com/bouliehaan/samo-server/internal/catalog"
-)
-
-func allowedFieldsForTarget(kind ApplyTargetKind, mediaType catalog.ShelfMediaType) []string {
+// allowedFieldsForTarget returns the apply-fields whitelist for each
+// target kind. There is no longer a `mediaType` parameter — audiobooks
+// and podcasts are different ApplyTargetKinds, so the right field list
+// is selected unambiguously.
+func allowedFieldsForTarget(kind ApplyTargetKind) []string {
 	switch kind {
-	case ApplyTargetShelfItem:
-		if mediaType == catalog.ShelfMediaTypePodcast {
-			return []string{
-				"title", "description", "author", "siteUrl", "language", "genres", "categories",
-				"explicit", "cover", "externalIds",
-			}
-		}
+	case ApplyTargetAudiobook:
 		return []string{
 			"title", "subtitle", "sortTitle", "description", "publisher", "publishedDate", "publishedYear",
 			"language", "genres", "tags", "explicit", "abridged", "authors", "narrators", "series",
 			"cover", "externalIds",
 		}
-	case ApplyTargetShelfEpisode:
+	case ApplyTargetPodcast:
+		return []string{
+			"title", "description", "author", "siteUrl", "language", "genres", "categories",
+			"explicit", "cover", "externalIds",
+		}
+	case ApplyTargetPodcastEpisode:
 		return []string{
 			"title", "subtitle", "description", "publishedAt", "explicit", "externalIds",
 		}
@@ -64,12 +63,15 @@ func normalizeApplyFields(fields []string) []string {
 	return out
 }
 
-func validateApplyFields(kind ApplyTargetKind, mediaType catalog.ShelfMediaType, fields []string) ([]string, error) {
+func validateApplyFields(kind ApplyTargetKind, fields []string) ([]string, error) {
 	fields = normalizeApplyFields(fields)
-	if len(fields) == 0 {
-		return nil, ErrEmptyApplyFields
+	allowed := allowedFieldsForTarget(kind)
+	if len(allowed) == 0 {
+		return nil, ErrInvalidApplyTarget
 	}
-	allowed := allowedFieldsForTarget(kind, mediaType)
+	if len(fields) == 0 {
+		return append([]string(nil), allowed...), nil
+	}
 	allowedSet := map[string]struct{}{}
 	for _, field := range allowed {
 		allowedSet[field] = struct{}{}

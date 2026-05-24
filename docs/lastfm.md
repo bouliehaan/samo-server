@@ -4,7 +4,7 @@ Samo sends music listens to Last.fm from the server. Clients report playback thr
 
 ## Enable
 
-Create API credentials at [last.fm/api/account/create](https://www.last.fm/api/account/create), then set:
+Create API credentials at [last.fm/api/account/create](https://www.last.fm/api/account/create), then add them in Settings -> Account -> Last.fm API Credentials. Operators can also set:
 
 ```sh
 SAMO_LASTFM_API_KEY=your-api-key
@@ -18,11 +18,11 @@ SAMO_LASTFM_POLL=true
 SAMO_LASTFM_POLL_TICK=1m
 ```
 
-Restart `samo-server`. Startup logs show `last.fm scrobbling: enabled` when both env vars are present.
+Startup logs show `last.fm scrobbling: enabled` when credentials are active. Credentials saved through the UI take effect without restarting.
 
 ## Link an account
 
-All routes require the caller's Samo user token (`Authorization: Bearer …` or `X-Samo-Token`). Each Samo user links their own Last.fm account; scrobbles and queue/history are scoped to that user.
+All routes require the caller's Samo user token (`Authorization: Bearer ...` or `X-Samo-Token`). Each Samo user links their own Last.fm account; scrobbles and queue/history are scoped to that user.
 
 1. `POST /api/v1/lastfm/auth/begin`
 
@@ -102,7 +102,7 @@ Scrobbles include artist, track, album, duration, and MusicBrainz recording ID w
 ## Current limits
 
 - one linked Last.fm account per Samo user (not per device)
-- scrobbling is music-track only (not shelf items or radio)
+- scrobbling is music-track only (not audiobooks, podcasts, or radio)
 - listen timing comes from client-reported progress or stream resume position, not byte-count inference mid-stream
 
 See also [docs/api.md](api.md).

@@ -15,19 +15,24 @@ var (
 
 type ApplyTargetKind string
 
+// ApplyTargetKind constants use the Samo-native domain names. Audiobooks
+// and podcasts are independent — there is intentionally no shared "shelf"
+// apply target — and podcast episodes are distinct from podcast shows.
 const (
-	ApplyTargetShelfItem    ApplyTargetKind = "shelf-item"
-	ApplyTargetShelfEpisode ApplyTargetKind = "shelf-episode"
-	ApplyTargetMusicArtist  ApplyTargetKind = "music-artist"
-	ApplyTargetMusicAlbum   ApplyTargetKind = "music-album"
-	ApplyTargetMusicTrack   ApplyTargetKind = "music-track"
-	ApplyTargetPodcastFeed  ApplyTargetKind = "podcast-feed"
+	ApplyTargetAudiobook      ApplyTargetKind = "audiobook"
+	ApplyTargetPodcast        ApplyTargetKind = "podcast"
+	ApplyTargetPodcastEpisode ApplyTargetKind = "podcast-episode"
+	ApplyTargetMusicArtist    ApplyTargetKind = "music-artist"
+	ApplyTargetMusicAlbum     ApplyTargetKind = "music-album"
+	ApplyTargetMusicTrack     ApplyTargetKind = "music-track"
+	ApplyTargetPodcastFeed    ApplyTargetKind = "podcast-feed"
 )
 
 func ParseApplyTargetKind(raw string) (ApplyTargetKind, error) {
 	switch ApplyTargetKind(raw) {
-	case ApplyTargetShelfItem, ApplyTargetShelfEpisode, ApplyTargetMusicArtist,
-		ApplyTargetMusicAlbum, ApplyTargetMusicTrack, ApplyTargetPodcastFeed:
+	case ApplyTargetAudiobook, ApplyTargetPodcast, ApplyTargetPodcastEpisode,
+		ApplyTargetMusicArtist, ApplyTargetMusicAlbum, ApplyTargetMusicTrack,
+		ApplyTargetPodcastFeed:
 		return ApplyTargetKind(raw), nil
 	default:
 		return "", ErrInvalidApplyTarget

@@ -37,9 +37,15 @@ type SearchRequest struct {
 }
 
 type SearchResponse struct {
-	Query     SearchRequest    `json:"query"`
-	Providers []ProviderStatus `json:"providers"`
-	Results   []SearchResult   `json:"results"`
+	Query          SearchRequest    `json:"query"`
+	Providers      []ProviderStatus `json:"providers"`
+	Results        []SearchResult   `json:"results"`
+	ProviderErrors []ProviderError  `json:"providerErrors,omitempty"`
+}
+
+type ProviderError struct {
+	Provider string `json:"provider"`
+	Error    string `json:"error"`
 }
 
 type ProviderStatus struct {
@@ -51,29 +57,29 @@ type ProviderStatus struct {
 }
 
 type SearchResult struct {
-	ID              string                `json:"id"`
-	Provider        string                `json:"provider"`
-	MediaType       string                `json:"mediaType"`
-	Score           int                   `json:"score,omitempty"`
-	Title           string                `json:"title"`
-	Subtitle        string                `json:"subtitle,omitempty"`
-	SortTitle       string                `json:"sortTitle,omitempty"`
-	Description     string                `json:"description,omitempty"`
-	Authors         []catalog.Contributor `json:"authors,omitempty"`
-	Narrators       []catalog.Contributor `json:"narrators,omitempty"`
-	Series          []catalog.SeriesRef   `json:"series,omitempty"`
-	Publisher       string                `json:"publisher,omitempty"`
-	PublishedDate   string                `json:"publishedDate,omitempty"`
-	PublishedYear   string                `json:"publishedYear,omitempty"`
-	Language        string                `json:"language,omitempty"`
-	Genres          []string              `json:"genres,omitempty"`
-	Tags            []string              `json:"tags,omitempty"`
-	DurationSeconds int                   `json:"durationSeconds,omitempty"`
-	Explicit        bool                  `json:"explicit,omitempty"`
-	Cover           *catalog.Image        `json:"cover,omitempty"`
-	ExternalIDs     catalog.ExternalIDs   `json:"externalIds,omitempty"`
-	Links           []Link                `json:"links,omitempty"`
-	Raw             map[string]any        `json:"raw,omitempty"`
+	ID              string                   `json:"id"`
+	Provider        string                   `json:"provider"`
+	MediaType       string                   `json:"mediaType"`
+	Score           int                      `json:"score,omitempty"`
+	Title           string                   `json:"title"`
+	Subtitle        string                   `json:"subtitle,omitempty"`
+	SortTitle       string                   `json:"sortTitle,omitempty"`
+	Description     string                   `json:"description,omitempty"`
+	Authors         []catalog.ContributorRef `json:"authors,omitempty"`
+	Narrators       []catalog.ContributorRef `json:"narrators,omitempty"`
+	Series          []catalog.SeriesRef      `json:"series,omitempty"`
+	Publisher       string                   `json:"publisher,omitempty"`
+	PublishedDate   string                   `json:"publishedDate,omitempty"`
+	PublishedYear   string                   `json:"publishedYear,omitempty"`
+	Language        string                   `json:"language,omitempty"`
+	Genres          []string                 `json:"genres,omitempty"`
+	Tags            []string                 `json:"tags,omitempty"`
+	DurationSeconds int                      `json:"durationSeconds,omitempty"`
+	Explicit        bool                     `json:"explicit,omitempty"`
+	Cover           *catalog.Image           `json:"cover,omitempty"`
+	ExternalIDs     catalog.ExternalIDs      `json:"externalIds,omitempty"`
+	Links           []Link                   `json:"links,omitempty"`
+	Raw             map[string]any           `json:"raw,omitempty"`
 }
 
 type Link struct {

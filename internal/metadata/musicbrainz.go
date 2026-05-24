@@ -290,14 +290,14 @@ func luceneField(field string, value string) string {
 	return field + `:"` + value + `"`
 }
 
-func musicBrainzContributors(credits []musicBrainzArtistCredit) []catalog.Contributor {
-	contributors := make([]catalog.Contributor, 0, len(credits))
+func musicBrainzContributors(credits []musicBrainzArtistCredit) []catalog.ContributorRef {
+	contributors := make([]catalog.ContributorRef, 0, len(credits))
 	for _, credit := range credits {
 		name := first(credit.Name, credit.Artist.Name)
 		if name == "" {
 			continue
 		}
-		contributors = append(contributors, catalog.Contributor{
+		contributors = append(contributors, catalog.ContributorRef{
 			ID:       credit.Artist.ID,
 			Name:     name,
 			SortName: credit.Artist.SortName,

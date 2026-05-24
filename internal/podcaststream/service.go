@@ -140,9 +140,31 @@ func (s *Service) FetchEnclosure(ctx context.Context, rawURL string, maxBytes in
 	}
 	contentType := strings.TrimSpace(resp.Header.Get("Content-Type"))
 	if maxBytes > 0 {
-		return io.NopCloser(io.LimitReader(resp.Body, maxBytes)), contentType, nil
+		return &maxBytesReadCloser{ReadCloser: resp.Body, remaining: maxBytes}, contentType, nil
 	}
 	return resp.Body, contentType, nil
+}
+
+type maxBytesReadCloser struct {
+	io.ReadCloser
+	remaining int64
+}
+
+func (r *maxBytesReadCloser) Read(p []byte) (int, error) {
+	if r.remaining > 0 {
+		if int64(len(p)) > r.remaining {
+			p = p[:int(r.remaining)]
+		}
+		n, err := r.ReadCloser.Read(p)
+		r.remaining -= int64(n)
+		return n, err
+	}
+	var probe [1]byte
+	n, err := r.ReadCloser.Read(probe[:])
+	if n > 0 {
+		return 0, fmt.Errorf("%w: enclosure exceeds max cache file size", ErrUpstream)
+	}
+	return 0, err
 }
 
 func validateEnclosureURL(raw string) (*url.URL, error) {

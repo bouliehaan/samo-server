@@ -8,6 +8,13 @@ import (
 	"github.com/bouliehaan/samo-server/internal/catalog"
 )
 
+// MetadataApplyService persists user-confirmed metadata candidates as
+// overrides in `metadata_overrides`. It is intentionally domain-aware:
+// audiobooks, podcasts, podcast episodes, podcast feeds, and music tracks
+// all have separate apply targets so we can validate field sets, candidate
+// shapes, and store the override under the correct target_kind.
+var _ = catalog.OverrideKindAudiobook // ensure the catalog import is used
+
 // CoverDownloader is the minimal interface the apply service needs to convert
 // an external image URL into a locally-cached cover entry. The covers package
 // implements it directly; tests can supply a stub.
@@ -89,15 +96,10 @@ func (s *MetadataApplyService) Preview(ctx context.Context, request MetadataAppl
 		return MetadataApplyPreview{}, err
 	}
 
-	mediaType := catalog.ShelfMediaTypeBook
-	if item, ok := before.(catalog.ShelfItem); ok {
-		mediaType = item.MediaType
-	}
-
 	return MetadataApplyPreview{
 		TargetKind:      string(kind),
 		TargetID:        targetID,
-		AllowedFields:   allowedFieldsForTarget(kind, mediaType),
+		AllowedFields:   allowedFieldsForTarget(kind),
 		RequestedFields: fields,
 		AppliedFields:   applied,
 		SkippedFields:   skipped,
@@ -143,18 +145,11 @@ func (s *MetadataApplyService) normalizeRequest(request MetadataApplyRequest) (A
 		return "", "", nil, SearchResult{}, ErrInvalidRequest
 	}
 
-	mediaType := catalog.ShelfMediaTypeBook
-	if kind == ApplyTargetShelfItem {
-		mediaType, err = s.loadShelfMediaType(context.Background(), targetID)
-		if err != nil {
-			return "", "", nil, SearchResult{}, err
-		}
-	}
-	fields, err := validateApplyFields(kind, mediaType, request.Fields)
+	fields, err := validateApplyFields(kind, request.Fields)
 	if err != nil {
 		return "", "", nil, SearchResult{}, err
 	}
-	if err := validateCandidateForTarget(kind, mediaType, candidate); err != nil {
+	if err := validateCandidateForTarget(kind, candidate); err != nil {
 		return "", "", nil, SearchResult{}, err
 	}
 	return kind, targetID, fields, candidate, nil
@@ -172,10 +167,12 @@ func (s *MetadataApplyService) mergeTarget(
 		candidate = s.resolveCoverInCandidate(ctx, candidate)
 	}
 	switch kind {
-	case ApplyTargetShelfItem:
-		return s.applyShelfItem(ctx, targetID, candidate, fields, dryRun)
-	case ApplyTargetShelfEpisode:
-		return s.applyShelfEpisode(ctx, targetID, candidate, fields, dryRun)
+	case ApplyTargetAudiobook:
+		return s.applyAudiobook(ctx, targetID, candidate, fields, dryRun)
+	case ApplyTargetPodcast:
+		return s.applyPodcast(ctx, targetID, candidate, fields, dryRun)
+	case ApplyTargetPodcastEpisode:
+		return s.applyPodcastEpisode(ctx, targetID, candidate, fields, dryRun)
 	case ApplyTargetMusicArtist:
 		return s.applyMusicArtist(ctx, targetID, candidate, fields, dryRun)
 	case ApplyTargetMusicAlbum:
@@ -189,20 +186,18 @@ func (s *MetadataApplyService) mergeTarget(
 	}
 }
 
-func validateCandidateForTarget(kind ApplyTargetKind, mediaType catalog.ShelfMediaType, candidate SearchResult) error {
+func validateCandidateForTarget(kind ApplyTargetKind, candidate SearchResult) error {
 	mediaTypeName := strings.ToLower(strings.TrimSpace(candidate.MediaType))
 	switch kind {
-	case ApplyTargetShelfItem:
-		if mediaType == catalog.ShelfMediaTypePodcast {
-			if mediaTypeName != "" && mediaTypeName != "podcast" {
-				return ErrApplyCandidateKind
-			}
-			return nil
-		}
+	case ApplyTargetAudiobook:
 		if mediaTypeName != "" && mediaTypeName != "audiobook" && mediaTypeName != "book" {
 			return ErrApplyCandidateKind
 		}
-	case ApplyTargetShelfEpisode:
+	case ApplyTargetPodcast:
+		if mediaTypeName != "" && mediaTypeName != "podcast" {
+			return ErrApplyCandidateKind
+		}
+	case ApplyTargetPodcastEpisode:
 		if mediaTypeName != "" && mediaTypeName != "podcast" && mediaTypeName != "podcastepisode" {
 			return ErrApplyCandidateKind
 		}

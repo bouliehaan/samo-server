@@ -58,3 +58,48 @@ func TestLastFMStatusWhenConfigured(t *testing.T) {
 		t.Fatalf("body = %s", rec.Body.String())
 	}
 }
+
+func TestLastFMConfigCanBeSavedViaAPI(t *testing.T) {
+	ctx := context.Background()
+	db, err := storage.Open(ctx, t.TempDir()+"/samo.db")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	if err := storage.ApplyMigrations(ctx, db, migrations.Files); err != nil {
+		t.Fatal(err)
+	}
+
+	service := lastfm.NewService(lastfm.ServiceOptions{DB: db})
+	handler := NewServer(ServerOptions{
+		LastFM:   service,
+		Playback: playback.New(db),
+	})
+
+	req := httptest.NewRequest(http.MethodPut, "/api/v1/lastfm/config", strings.NewReader(`{
+		"apiKey": "key",
+		"sharedSecret": "secret"
+	}`))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("save status = %d, want %d body=%s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+	if !service.Enabled() {
+		t.Fatal("service should be enabled after saving config")
+	}
+	if !strings.Contains(rec.Body.String(), `"source":"ui"`) {
+		t.Fatalf("body = %s", rec.Body.String())
+	}
+
+	req = httptest.NewRequest(http.MethodDelete, "/api/v1/lastfm/config", nil)
+	rec = httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("clear status = %d, want %d body=%s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+	if service.Enabled() {
+		t.Fatal("service should be disabled after clearing config")
+	}
+}

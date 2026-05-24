@@ -192,8 +192,9 @@ func PruneStaleMetadataOverrides(ctx context.Context, db *sql.DB) error {
 		`DELETE FROM metadata_overrides WHERE target_kind = 'music-track' AND target_id NOT IN (SELECT id FROM music_tracks)`,
 		`DELETE FROM metadata_overrides WHERE target_kind = 'music-album' AND target_id NOT IN (SELECT id FROM music_albums)`,
 		`DELETE FROM metadata_overrides WHERE target_kind = 'music-artist' AND target_id NOT IN (SELECT id FROM music_artists)`,
-		`DELETE FROM metadata_overrides WHERE target_kind = 'shelf-item' AND target_id NOT IN (SELECT id FROM shelf_items)`,
-		`DELETE FROM metadata_overrides WHERE target_kind = 'shelf-episode' AND target_id NOT IN (SELECT id FROM podcast_episodes)`,
+		`DELETE FROM metadata_overrides WHERE target_kind = 'audiobook' AND target_id NOT IN (SELECT id FROM audiobooks)`,
+		`DELETE FROM metadata_overrides WHERE target_kind = 'podcast' AND target_id NOT IN (SELECT id FROM podcasts)`,
+		`DELETE FROM metadata_overrides WHERE target_kind = 'podcast-episode' AND target_id NOT IN (SELECT id FROM podcast_episodes)`,
 		`DELETE FROM metadata_overrides WHERE target_kind = 'music-playlist' AND target_id NOT IN (SELECT id FROM music_playlists)`,
 		`DELETE FROM metadata_overrides WHERE target_kind = 'podcast-feed' AND target_id NOT IN (SELECT id FROM podcast_feeds)`,
 	}
@@ -352,12 +353,12 @@ func decodePatchStringSlice(patch MetadataOverridePatch, field string) ([]string
 	return value, true
 }
 
-func decodePatchContributors(patch MetadataOverridePatch, field string) ([]Contributor, bool) {
+func decodePatchContributors(patch MetadataOverridePatch, field string) ([]ContributorRef, bool) {
 	raw, ok := patch[field]
 	if !ok {
 		return nil, false
 	}
-	var value []Contributor
+	var value []ContributorRef
 	if err := json.Unmarshal(raw, &value); err != nil {
 		return nil, false
 	}

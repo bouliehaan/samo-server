@@ -121,6 +121,64 @@ func TestHandleScrobbleEventComplete(t *testing.T) {
 	}
 }
 
+func TestScrobblesUseSeparateUserSessions(t *testing.T) {
+	ctx := context.Background()
+	var sessionKeys []string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if err := r.ParseForm(); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		if r.PostForm.Get("method") == "track.scrobble" {
+			sessionKeys = append(sessionKeys, r.PostForm.Get("sk"))
+		}
+		_, _ = w.Write([]byte(`{}`))
+	}))
+	defer server.Close()
+
+	db := openTestDB(t)
+	userService := users.New(users.ServiceOptions{DB: db})
+	if err := userService.Bootstrap(ctx, users.BootstrapInput{AdminUsername: "owner", AdminPassword: "owner-pass-123"}); err != nil {
+		t.Fatal(err)
+	}
+	owner, err := userService.AuthenticateCredentials(ctx, "owner", "owner-pass-123")
+	if err != nil {
+		t.Fatal(err)
+	}
+	listener, err := userService.Create(ctx, owner, users.CreateUserInput{
+		Username: "listener",
+		Password: "listener-pass-123",
+		Role:     users.RoleUser,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	seedLastFMSessionForUser(t, db, owner.User.ID, "one", "session-one")
+	seedLastFMSessionForUser(t, db, listener.ID, "two", "session-two")
+	service := newTestService(t, db, server)
+
+	if err := service.SubmitScrobble(ctx, owner.User.ID, testTrack(), time.Unix(1000, 0), 0, "native-test"); err != nil {
+		t.Fatal(err)
+	}
+	if err := service.SubmitScrobble(ctx, listener.ID, testTrack(), time.Unix(2000, 0), 0, "native-test"); err != nil {
+		t.Fatal(err)
+	}
+	if len(sessionKeys) != 2 || sessionKeys[0] != "session-one" || sessionKeys[1] != "session-two" {
+		t.Fatalf("session keys = %#v", sessionKeys)
+	}
+	one, err := service.ListHistory(ctx, owner.User.ID, 10, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	two, err := service.ListHistory(ctx, listener.ID, 10, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if one.Total != 1 || two.Total != 1 {
+		t.Fatalf("history totals: one=%d two=%d", one.Total, two.Total)
+	}
+}
+
 func TestLoveTrackOnFavoriteChange(t *testing.T) {
 	ctx := context.Background()
 	var loved bool
@@ -179,9 +237,14 @@ func newTestService(t *testing.T, db *sql.DB, server *httptest.Server) *Service 
 
 func seedLastFMSession(t *testing.T, db *sql.DB) {
 	t.Helper()
+	seedLastFMSessionForUser(t, db, users.BootstrapUserID, "jake", "session-key")
+}
+
+func seedLastFMSessionForUser(t *testing.T, db *sql.DB, userID, username, sessionKey string) {
+	t.Helper()
 	if _, err := db.ExecContext(context.Background(), `
 		INSERT INTO lastfm_user_settings (user_id, lastfm_username, session_key, connected_at)
-		VALUES (?, 'jake', 'session-key', CURRENT_TIMESTAMP)`, users.BootstrapUserID); err != nil {
+		VALUES (?, ?, ?, CURRENT_TIMESTAMP)`, userID, username, sessionKey); err != nil {
 		t.Fatal(err)
 	}
 }

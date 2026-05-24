@@ -154,7 +154,8 @@ func relocateLibrary(ctx context.Context, db *sql.DB, current Library, newPath, 
 		args  []any
 	}{
 		{`UPDATE media_files SET library_id = ? WHERE library_id = ?`, []any{newID, current.ID}},
-		{`UPDATE shelf_items SET library_id = ? WHERE library_id = ?`, []any{newID, current.ID}},
+		{`UPDATE audiobooks SET library_id = ? WHERE library_id = ?`, []any{newID, current.ID}},
+		{`UPDATE podcasts SET library_id = ? WHERE library_id = ?`, []any{newID, current.ID}},
 		{`UPDATE podcast_episodes SET library_id = ? WHERE library_id = ?`, []any{newID, current.ID}},
 	} {
 		if _, err := tx.ExecContext(ctx, statement.query, statement.args...); err != nil {
@@ -205,8 +206,24 @@ func upsertConfiguredLibrary(ctx context.Context, db *sql.DB, item Library) erro
 		  path = excluded.path,
 		  updated_at = CURRENT_TIMESTAMP`,
 		item.ID, item.Name, item.Kind, nullableString(item.MediaType), item.Path, item.Description)
-	if err != nil {
+	if err == nil {
+		return nil
+	}
+	if !strings.Contains(strings.ToLower(err.Error()), "unique") {
 		return fmt.Errorf("upsert configured library: %w", err)
+	}
+	// A library already exists at this path under a different id (e.g. it
+	// was created via the API before the env-var sync, or migration 016
+	// renamed kind from `shelf` so the env-derived hash no longer matches
+	// the stored id). Preserve the existing id and update the kind/name to
+	// the configured values so scans dispatch correctly.
+	_, err = db.ExecContext(ctx, `
+		UPDATE libraries
+		SET name = ?, kind = ?, media_type = ?, description = ?, updated_at = CURRENT_TIMESTAMP
+		WHERE path = ?`,
+		item.Name, item.Kind, nullableString(item.MediaType), item.Description, item.Path)
+	if err != nil {
+		return fmt.Errorf("update configured library by path: %w", err)
 	}
 	return nil
 }
@@ -219,7 +236,7 @@ func listScanJobs(ctx context.Context, db *sql.DB, limit, offset int) (ScanJobPa
 
 	rows, err := db.QueryContext(ctx, `
 		SELECT id, status, scope, library_id, trigger_source, started_at, finished_at, error,
-		       files_seen, files_pruned, items_pruned
+		       files_seen, files_total, files_pruned, items_pruned
 		FROM scan_jobs
 		ORDER BY started_at DESC
 		LIMIT ? OFFSET ?`, limit, offset)
@@ -238,7 +255,7 @@ func listScanJobs(ctx context.Context, db *sql.DB, limit, offset int) (ScanJobPa
 func getScanJob(ctx context.Context, db *sql.DB, id string) (ScanJob, error) {
 	row := db.QueryRowContext(ctx, `
 		SELECT id, status, scope, library_id, trigger_source, started_at, finished_at, error,
-		       files_seen, files_pruned, items_pruned
+		       files_seen, files_total, files_pruned, items_pruned
 		FROM scan_jobs
 		WHERE id = ?`, id)
 	item, err := scanJobRow(row)
@@ -255,12 +272,12 @@ func insertScanJob(ctx context.Context, db *sql.DB, job ScanJob) error {
 	_, err := db.ExecContext(ctx, `
 		INSERT INTO scan_jobs (
 		  id, status, scope, library_id, trigger_source, started_at, finished_at, error,
-		  files_seen, files_pruned, items_pruned
+		  files_seen, files_total, files_pruned, items_pruned
 		)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		job.ID, job.Status, job.Scope, nullableString(job.LibraryID), job.TriggerSource,
 		job.StartedAt.UTC().Format(time.RFC3339), timeString(job.FinishedAt), job.Error,
-		job.FilesSeen, job.FilesPruned, job.ItemsPruned)
+		job.FilesSeen, job.FilesTotal, job.FilesPruned, job.ItemsPruned)
 	if err != nil {
 		return fmt.Errorf("insert scan job: %w", err)
 	}
@@ -270,9 +287,9 @@ func insertScanJob(ctx context.Context, db *sql.DB, job ScanJob) error {
 func updateScanJob(ctx context.Context, db *sql.DB, job ScanJob) error {
 	_, err := db.ExecContext(ctx, `
 		UPDATE scan_jobs
-		SET status = ?, finished_at = ?, error = ?, files_seen = ?, files_pruned = ?, items_pruned = ?
+		SET status = ?, finished_at = ?, error = ?, files_seen = ?, files_total = ?, files_pruned = ?, items_pruned = ?
 		WHERE id = ?`,
-		job.Status, timeString(job.FinishedAt), job.Error, job.FilesSeen, job.FilesPruned, job.ItemsPruned, job.ID)
+		job.Status, timeString(job.FinishedAt), job.Error, job.FilesSeen, job.FilesTotal, job.FilesPruned, job.ItemsPruned, job.ID)
 	if err != nil {
 		return fmt.Errorf("update scan job: %w", err)
 	}
@@ -331,7 +348,7 @@ func scanJobRow(scanner interface {
 	var finishedAt sql.NullString
 	if err := scanner.Scan(
 		&item.ID, &item.Status, &item.Scope, &libraryID, &item.TriggerSource, &startedAt, &finishedAt,
-		&item.Error, &item.FilesSeen, &item.FilesPruned, &item.ItemsPruned,
+		&item.Error, &item.FilesSeen, &item.FilesTotal, &item.FilesPruned, &item.ItemsPruned,
 	); err != nil {
 		return ScanJob{}, err
 	}

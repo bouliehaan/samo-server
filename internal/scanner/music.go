@@ -2,6 +2,7 @@ package scanner
 
 import (
 	"context"
+	"log"
 	"path/filepath"
 	"strings"
 
@@ -12,7 +13,11 @@ import (
 func (s *Scanner) scanMusicFile(ctx context.Context, library Library, root string, path string) error {
 	probe, err := s.probe(ctx, path)
 	if err != nil {
-		return err
+		// One unreadable file (corrupt, unsupported codec, ffprobe
+		// hiccup) used to abort the entire scan. Log + skip so the
+		// other 9,999 files still get indexed.
+		log.Printf("scanner: skipping %q (probe failed: %v)", path, err)
+		return nil
 	}
 
 	relPath, _ := filepath.Rel(root, path)

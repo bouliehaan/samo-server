@@ -36,13 +36,6 @@ func (s *MetadataApplyService) GetOverride(ctx context.Context, targetKind, targ
 	if err != nil {
 		return MetadataOverrideView{}, err
 	}
-	mediaType := catalog.ShelfMediaTypeBook
-	if kind == ApplyTargetShelfItem {
-		mediaType, err = s.loadShelfMediaType(ctx, targetID)
-		if err != nil {
-			return MetadataOverrideView{}, err
-		}
-	}
 	fields := map[string]any{}
 	for key, raw := range record.Fields {
 		var value any
@@ -55,7 +48,7 @@ func (s *MetadataApplyService) GetOverride(ctx context.Context, targetKind, targ
 		TargetKind:    string(kind),
 		TargetID:      targetID,
 		Fields:        fields,
-		AllowedFields: AllowedFieldsForTarget(kind, mediaType),
+		AllowedFields: AllowedFieldsForTarget(kind),
 		UpdatedAt:     record.UpdatedAt,
 	}, nil
 }
@@ -87,30 +80,25 @@ func (s *MetadataApplyService) ClearOverrideFields(ctx context.Context, targetKi
 	if targetID == "" {
 		return ErrApplyNotFound
 	}
-	mediaType := catalog.ShelfMediaTypeBook
-	if kind == ApplyTargetShelfItem {
-		mediaType, err = s.loadShelfMediaType(ctx, targetID)
-		if err != nil {
-			return err
-		}
-	}
-	fields, err = validateClearFields(kind, mediaType, fields)
+	fields, err = validateClearFields(kind, fields)
 	if err != nil {
 		return err
 	}
 	return catalog.ClearMetadataOverrideFields(ctx, s.db, string(kind), targetID, fields)
 }
 
-func AllowedFieldsForTarget(kind ApplyTargetKind, mediaType catalog.ShelfMediaType) []string {
-	return allowedFieldsForTarget(kind, mediaType)
+// AllowedFieldsForTarget is the exported field-list accessor for the API
+// layer; callers should pass the parsed ApplyTargetKind.
+func AllowedFieldsForTarget(kind ApplyTargetKind) []string {
+	return allowedFieldsForTarget(kind)
 }
 
-func validateClearFields(kind ApplyTargetKind, mediaType catalog.ShelfMediaType, fields []string) ([]string, error) {
+func validateClearFields(kind ApplyTargetKind, fields []string) ([]string, error) {
 	fields = normalizeApplyFields(fields)
 	if len(fields) == 0 {
 		return nil, ErrEmptyApplyFields
 	}
-	allowed := allowedFieldsForTarget(kind, mediaType)
+	allowed := allowedFieldsForTarget(kind)
 	allowedSet := map[string]struct{}{}
 	for _, field := range allowed {
 		allowedSet[field] = struct{}{}

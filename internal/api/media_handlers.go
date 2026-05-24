@@ -44,7 +44,7 @@ func (s *Server) streamMusicTrack(w http.ResponseWriter, r *http.Request) {
 	s.streamCatalogAudioFiles(w, r, track.AudioFiles, track.Playback, track.DiscNumber)
 }
 
-func (s *Server) streamShelfEpisode(w http.ResponseWriter, r *http.Request) {
+func (s *Server) streamPodcastEpisode(w http.ResponseWriter, r *http.Request) {
 	episode, err := s.catalog.PodcastEpisode(r.PathValue("id"))
 	if err != nil {
 		writeCatalogError(w, err)
@@ -57,8 +57,8 @@ func (s *Server) streamShelfEpisode(w http.ResponseWriter, r *http.Request) {
 	s.streamCatalogAudioFiles(w, r, episode.AudioFiles, episode.Progress, 0)
 }
 
-func (s *Server) streamShelfItem(w http.ResponseWriter, r *http.Request) {
-	item, err := s.catalog.ShelfItem(r.PathValue("id"))
+func (s *Server) streamAudiobook(w http.ResponseWriter, r *http.Request) {
+	item, err := s.catalog.Audiobook(r.PathValue("id"))
 	if err != nil {
 		writeCatalogError(w, err)
 		return
@@ -163,8 +163,21 @@ func (s *Server) serveMusicAlbumCover(w http.ResponseWriter, r *http.Request) {
 	s.serveCatalogImage(w, r, album.Images)
 }
 
-func (s *Server) serveShelfItemCover(w http.ResponseWriter, r *http.Request) {
-	item, err := s.catalog.ShelfItem(r.PathValue("id"))
+func (s *Server) serveAudiobookCover(w http.ResponseWriter, r *http.Request) {
+	item, err := s.catalog.Audiobook(r.PathValue("id"))
+	if err != nil {
+		writeCatalogError(w, err)
+		return
+	}
+	var images []catalog.Image
+	if item.Cover != nil {
+		images = []catalog.Image{*item.Cover}
+	}
+	s.serveCatalogImage(w, r, images)
+}
+
+func (s *Server) servePodcastCover(w http.ResponseWriter, r *http.Request) {
+	item, err := s.catalog.Podcast(r.PathValue("id"))
 	if err != nil {
 		writeCatalogError(w, err)
 		return
@@ -177,20 +190,36 @@ func (s *Server) serveShelfItemCover(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) serveCatalogImage(w http.ResponseWriter, r *http.Request, images []catalog.Image) {
-	path := firstImagePath(images)
-	if path == "" {
-		writeError(w, http.StatusNotFound, "cover not found")
+	if path := firstImagePath(images); path != "" {
+		if err := s.filesService().ServeLocalPath(r.Context(), path, w, r); err != nil {
+			writeFilesError(w, err)
+		}
 		return
 	}
-	if err := s.filesService().ServeLocalPath(r.Context(), path, w, r); err != nil {
-		writeFilesError(w, err)
+	// No local file — fall back to a remote URL if the metadata layer
+	// supplied one (e.g. cover from a metadata-apply that hasn't been
+	// downloaded yet, or an RSS feed image). Redirect rather than proxy
+	// so the bytes don't round-trip through Samo.
+	if url := firstImageURL(images); url != "" {
+		http.Redirect(w, r, url, http.StatusTemporaryRedirect)
+		return
 	}
+	writeError(w, http.StatusNotFound, "cover not found")
 }
 
 func firstImagePath(images []catalog.Image) string {
 	for _, image := range images {
 		if path := strings.TrimSpace(image.Path); path != "" {
 			return path
+		}
+	}
+	return ""
+}
+
+func firstImageURL(images []catalog.Image) string {
+	for _, image := range images {
+		if url := strings.TrimSpace(image.URL); url != "" {
+			return url
 		}
 	}
 	return ""

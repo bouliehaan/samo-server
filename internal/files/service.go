@@ -33,17 +33,18 @@ func (s *Service) GetMediaFile(ctx context.Context, id string) (MediaFile, error
 
 	var (
 		item        MediaFile
-		itemID      sql.NullString
+		audiobookID sql.NullString
+		podcastID   sql.NullString
 		trackID     sql.NullString
 		episodeID   sql.NullString
 		modifiedRaw sql.NullString
 	)
 	err := s.db.QueryRowContext(ctx, `
-		SELECT id, library_id, item_id, track_id, episode_id, path, relative_path, file_name,
+		SELECT id, library_id, audiobook_id, podcast_id, track_id, episode_id, path, relative_path, file_name,
 		       mime_type, container, size_bytes, duration_seconds, modified_at
 		FROM media_files
 		WHERE id = ?`, id).Scan(
-		&item.ID, &item.LibraryID, &itemID, &trackID, &episodeID, &item.Path, &item.RelativePath,
+		&item.ID, &item.LibraryID, &audiobookID, &podcastID, &trackID, &episodeID, &item.Path, &item.RelativePath,
 		&item.FileName, &item.MimeType, &item.Container, &item.SizeBytes, &item.DurationSeconds, &modifiedRaw,
 	)
 	if err == sql.ErrNoRows {
@@ -52,7 +53,8 @@ func (s *Service) GetMediaFile(ctx context.Context, id string) (MediaFile, error
 	if err != nil {
 		return MediaFile{}, fmt.Errorf("load media file: %w", err)
 	}
-	item.ItemID = itemID.String
+	item.AudiobookID = audiobookID.String
+	item.PodcastID = podcastID.String
 	item.TrackID = trackID.String
 	item.EpisodeID = episodeID.String
 	item.ModifiedAt = parseTimePtr(modifiedRaw)

@@ -35,13 +35,13 @@ Public routes (no user token): `GET /health`, `POST /api/v1/auth/login`, radio/i
 - `GET /api/v1/catalog/overview`
 - `GET /api/v1/catalog/manifest`
 
-`overview` returns counts for music and shelf content. `manifest` returns namespaces, route lists, and the metadata groups clients can expect.
+`overview` returns counts for each of the four first-class domains: music, audiobooks, podcasts, and radio. `manifest` returns namespaces, route lists, and the metadata groups clients can expect.
 
 ## Libraries
 
 Filesystem libraries are stored in SQLite. Env-configured paths from `SAMO_MUSIC_DIRS`, `SAMO_AUDIOBOOK_DIRS`, and `SAMO_PODCAST_DIRS` are synced into the database on startup.
 
-All `/api/v1/libraries` and `/api/v1/scan` routes are admin-only. General catalog clients should use the `/api/v1/music/*` and `/api/v1/shelf/*` read routes instead.
+All `/api/v1/libraries` and `/api/v1/scan` routes are admin-only. General catalog clients should use the per-domain read routes under `/api/v1/music/*`, `/api/v1/audiobooks/*`, and `/api/v1/podcasts/*` instead.
 
 Routes:
 
@@ -60,18 +60,21 @@ Routes:
 ```json
 {
   "name": "Audiobooks",
-  "kind": "shelf",
-  "mediaType": "book",
+  "kind": "audiobook",
   "path": "/media/audiobooks"
 }
 ```
 
 Supported `kind` values:
 
-- `music`
-- `shelf` with `mediaType` of `book` or `podcast`
+- `music` — music tracks/albums/artists
+- `audiobook` — audiobook items, contributors, series, chapters
+- `podcast` — podcast shows and episodes
+- `mixed` — root containing a mix of the above; the scanner classifies each subfolder into the right domain table
 
-Scan routes run synchronously and return a scan job record with prune counts. A scan removes database rows for files, shelf items, and local podcast episodes that disappeared from disk since the previous scan.
+Older clients that still send `kind="shelf"` plus `mediaType="book"` or `mediaType="podcast"` are translated to the explicit kinds at create time. New code should not emit those values.
+
+Scan routes run asynchronously and return a scan job record. A scan removes database rows for files, audiobooks, podcasts, and local podcast episodes that disappeared from disk since the previous scan.
 
 `PATCH /api/v1/libraries/{id}` may include a new `path`. Relocating a library creates a new deterministic library ID and moves child rows to it.
 
@@ -90,11 +93,12 @@ Playback is stored per user in `user_playback`, not on shared catalog rows. `GET
 Supported `kind` values:
 
 - `music-artist`, `music-album`, `music-track`, `music-playlist`
-- `shelf-item`, `shelf-episode`
+- `audiobook`
+- `podcast`, `podcast-episode`
 
 `PATCH` accepts partial fields plus optional `incrementPlayCount`, `incrementSkipCount`, `touchLastPlayedAt`, and `touchLastPositionAt`. Ratings must be 0–5.
 
-When Last.fm is configured (`SAMO_LASTFM_API_KEY` + `SAMO_LASTFM_SHARED_SECRET`) and an account is linked, music track playback patches automatically drive Last.fm now playing and scrobble submissions using standard listen thresholds (50% or 4 minutes, with a minimum listen time).
+When Last.fm is configured (via Settings or `SAMO_LASTFM_API_KEY` + `SAMO_LASTFM_SHARED_SECRET`) and an account is linked, music track playback patches automatically drive Last.fm now playing and scrobble submissions using standard listen thresholds (50% or 4 minutes, with a minimum listen time). Last.fm links are per Samo user, so different users can scrobble to different Last.fm accounts.
 
 Example:
 
@@ -129,9 +133,10 @@ Routes:
 - `GET /api/v1/media/files/{id}/stream`
 - `GET /api/v1/music/tracks/{id}/stream`
 - `GET /api/v1/music/albums/{id}/cover`
-- `GET /api/v1/shelf/items/{id}/stream`
-- `GET /api/v1/shelf/items/{id}/cover`
-- `GET /api/v1/shelf/episodes/{id}/stream`
+- `GET /api/v1/audiobooks/{id}/stream`
+- `GET /api/v1/audiobooks/{id}/cover`
+- `GET /api/v1/podcasts/shows/{id}/cover`
+- `GET /api/v1/podcasts/episodes/{id}/stream`
 
 Stream routes support HTTP Range requests.
 
@@ -146,7 +151,7 @@ Podcast cache env vars (defaults shown):
 | `SAMO_PODCAST_CACHE_MAX_AGE` | `720h` | Evict entries not accessed within this window |
 | `SAMO_PODCAST_CACHE_MAX_FILE_BYTES` | `524288000` | Max size per downloaded episode (500 MiB) |
 
-Query parameters for track, shelf item, and episode shortcuts:
+Query parameters for track, audiobook, and podcast episode shortcuts:
 
 | Parameter | Purpose |
 |-----------|---------|
@@ -166,7 +171,7 @@ Response headers on stream shortcuts:
 - `X-Samo-Stream-Offset-Seconds` — resume offset inside that file
 - `X-Samo-Stream-Global-Seconds` — requested global position when applicable
 
-Cover routes serve the first local image path on the album or shelf item (sidecar file or extracted embedded art).
+Cover routes serve the first local image path on the album, audiobook, or podcast show (sidecar file or extracted embedded art).
 
 ### Extracted covers
 
@@ -213,9 +218,11 @@ GET /api/v1/metadata/overrides/music-artist/artist-1
 Clear specific override fields:
 
 ```json
-PATCH /api/v1/metadata/overrides/shelf-item/item-1
+PATCH /api/v1/metadata/overrides/audiobook/book-1
 { "fields": ["title", "description"] }
 ```
+
+Supported `targetKind` values: `music-artist`, `music-album`, `music-track`, `music-playlist`, `audiobook`, `podcast`, `podcast-episode`, `podcast-feed`.
 
 Search examples:
 
@@ -247,7 +254,9 @@ Search returns candidate metadata only. It does not write catalog changes.
 - `GET /api/v1/music/genres`
 - `GET /api/v1/music/playlists`
 - `GET /api/v1/music/playlists/{id}`
+- `GET /api/v1/music/playlists/{id}/tracks`
 - `POST /api/v1/music/playlists`
+- `POST /api/v1/music/playlists/import`
 - `PATCH /api/v1/music/playlists/{id}`
 - `DELETE /api/v1/music/playlists/{id}`
 - `GET /api/v1/music/browse/favorites`
@@ -255,6 +264,24 @@ Search returns candidate metadata only. It does not write catalog changes.
 - `GET /api/v1/music/browse/recently-played`
 - `GET /api/v1/music/browse/recently-added`
 - `GET /api/v1/music/search?q=`
+
+Playlist import accepts local playlist metadata and rebuilds a server playlist
+from matching catalog tracks. It does not download remote media. Supported
+`sourceType` values are `auto`, `csv`, `m3u`, `plain`, `json`, and `youtube`.
+Admins may pass `url` for server-side metadata fetches; anyone may paste
+`content`.
+
+Playlists can be private or public. Private playlists are visible only to
+their owner. Public playlists are readable by other authenticated users, but
+only the owner can edit, delete, or change visibility.
+
+```json
+{
+  "name": "Imported Mix",
+  "sourceType": "m3u",
+  "content": "#EXTM3U\n#EXTINF:263,New Order - Ceremony\n/music/New Order/Ceremony.flac\n"
+}
+```
 
 Music search supports optional filters on the same route: `genre`, `year`, `favorite`, `starred`, `recentlyPlayed`, `recentlyAdded`, `completed`, `minRating`, and `sort` (`relevance`, `title`, `added`, `played`). Playback-aware filters use the authenticated user's overlay.
 
@@ -271,54 +298,74 @@ Music metadata is intentionally richer than a simple file browser:
 - track artists, album linkage, disc/track totals, release data, lyrics, BPM, key, comments, audio technical metadata, images, external IDs, playback state
 - audio file container, MIME type, codec/profile, bitrate, bit depth, sample rate, channels, duration, size, checksum, embedded tags
 
-## Shelf
+## Audiobooks
 
-The shelf namespace is Samo's Audiobookshelf-shaped side: audiobooks, podcasts, authors, series, library items, files, chapters, and listening progress.
+Audiobooks are a first-class domain — they have their own table (`audiobooks`), their own DTO (`AudiobookItem`), and their own URL namespace. They do **not** share an item model with podcasts.
 
-- `GET /api/v1/shelf/libraries`
-- `GET /api/v1/shelf/libraries/{id}`
-- `GET /api/v1/shelf/items`
-- `GET /api/v1/shelf/items/{id}`
-- `GET /api/v1/shelf/audiobooks`
-- `GET /api/v1/shelf/authors`
-- `GET /api/v1/shelf/authors/{id}` — optional `?include=items` returns author + paginated audiobooks
-- `GET /api/v1/shelf/authors/{id}/items` — paginated audiobooks for an author
-- `GET /api/v1/shelf/series`
-- `GET /api/v1/shelf/series/{id}` — optional `?include=items` returns series + paginated audiobooks
-- `GET /api/v1/shelf/series/{id}/items` — paginated audiobooks in series order
-- `GET/POST /api/v1/shelf/items/{id}/bookmarks` — per-user bookmarks (audiobooks only)
-- `PATCH/DELETE /api/v1/shelf/bookmarks/{id}`
-- `GET/POST /api/v1/shelf/collections` — user-owned audiobook lists
-- `GET/PATCH/DELETE /api/v1/shelf/collections/{id}`
-- `GET /api/v1/shelf/items/{id}/sessions` — listening sessions for one item (`limit`, default 50, max 500)
-- `GET /api/v1/shelf/listening-sessions` — recent sessions for the authenticated user
-- `GET /api/v1/shelf/podcasts`
-- `GET /api/v1/shelf/podcast-feeds`
-- `POST /api/v1/shelf/podcast-feeds`
-- `GET /api/v1/shelf/podcast-feeds/{id}`
-- `PATCH /api/v1/shelf/podcast-feeds/{id}`
-- `POST /api/v1/shelf/podcast-feeds/poll`
-- `POST /api/v1/shelf/podcast-feeds/{id}/refresh`
-- `DELETE /api/v1/shelf/podcast-feeds/{id}`
-- `GET /api/v1/shelf/episodes`
-- `GET /api/v1/shelf/episodes/{id}`
-- `GET /api/v1/shelf/search?q=`
+- `GET /api/v1/audiobooks`
+- `GET /api/v1/audiobooks/{id}`
+- `GET /api/v1/audiobooks/search?q=`
+- `GET /api/v1/contributors` — authors, narrators, etc.
+- `GET /api/v1/contributors/{id}` — optional `?include=audiobooks` returns contributor + paginated audiobooks
+- `GET /api/v1/contributors/{id}/audiobooks`
+- `GET /api/v1/series`
+- `GET /api/v1/series/{id}` — optional `?include=audiobooks` returns series + paginated audiobooks
+- `GET /api/v1/series/{id}/audiobooks` — paginated audiobooks in series order
+- `GET /api/v1/audiobooks/{id}/bookmarks` — bookmarks for one book
+- `POST /api/v1/audiobooks/{id}/bookmarks` — create a bookmark
+- `GET /api/v1/bookmarks` — every bookmark the current user has saved across all audiobooks
+- `PATCH /api/v1/bookmarks/{id}`
+- `DELETE /api/v1/bookmarks/{id}`
+- `GET /api/v1/collections` — user-owned audiobook lists
+- `POST /api/v1/collections`
+- `GET /api/v1/collections/{id}`
+- `PATCH /api/v1/collections/{id}`
+- `DELETE /api/v1/collections/{id}`
+- `GET /api/v1/audiobooks/{id}/sessions` — listening sessions for one audiobook (`limit`, default 50, max 500)
+- `GET /api/v1/listening-sessions` — recent sessions for the authenticated user
 
-Shelf search supports optional filters: `genre`, `libraryId`, `mediaType` (`book` or `podcast`), `favorite`, `starred`, `recentlyPlayed`, `recentlyAdded`, `completed`, `minRating`, and `sort` (`relevance`, `title`, `added`, `played`).
+Audiobook search supports optional filters: `genre`, `libraryId`, `favorite`, `starred`, `recentlyPlayed`, `recentlyAdded`, `completed`, `minRating`, and `sort` (`relevance`, `title`, `added`, `played`).
 
-List routes support `limit` and `offset`.
+Bookmark create accepts `title`, `note`, `positionSeconds`, and optional `chapterId`. Collection create/update accepts `name`, `description`, and ordered `audiobookIds`. Playback `PUT`/`PATCH` on `audiobook` appends a listening session when progress or play count changes.
 
-Bookmark create accepts `title`, `note`, and `positionSeconds`. Collection create/update accepts `name`, `description`, and ordered `itemIds` (audiobook shelf items only). Playback `PUT`/`PATCH` on `shelf-item` appends a listening session when progress or play count changes.
+Audiobook metadata includes:
 
-Shelf metadata includes:
-
-- library item identity, library ID, media type, filesystem path, inode, size, missing/invalid flags, cover, tags, genres, duration, progress, audio files, chapters
+- item identity, library ID, filesystem path, inode, size, missing/invalid flags, cover, tags, genres, duration, progress, audio files, chapters
 - book title, subtitle, sort title, authors, narrators, series sequence, publisher, published date/year, description, language, ISBNs, explicit/abridged flags, external IDs
-- author and series summaries with item counts, duration, images, and external IDs
-- podcast feed URL, site URL, owner, language, explicit flag, categories, episode count, external IDs
-- podcast episode title, subtitle, description, published date, season/episode numbers, enclosure metadata, chapters, audio files, progress, external IDs
+- contributor and series summaries with audiobook counts, duration, images, and external IDs
 
-Podcast feeds are remote source records. `POST /api/v1/shelf/podcast-feeds` accepts:
+Bookmarks, collections, and listening sessions are audiobook-only. Podcasts use show subscriptions (RSS) and per-episode progress instead — there is no shared "longform" parent model.
+
+## Podcasts
+
+Podcasts are a first-class domain — separate from audiobooks. A podcast is a show, and each show has many episodes.
+
+- `GET /api/v1/podcasts` — list shows
+- `GET /api/v1/podcasts/shows/{id}` — get one show
+- `GET /api/v1/podcasts/shows/{id}/episodes` — paginated episodes for one show
+- `GET /api/v1/podcasts/shows/{id}/cover`
+- `GET /api/v1/podcasts/episodes` — list episodes across all shows
+- `GET /api/v1/podcasts/episodes/{id}`
+- `GET /api/v1/podcasts/episodes/{id}/stream`
+- `GET /api/v1/podcasts/search?q=`
+- `GET /api/v1/podcasts/feeds` — list RSS subscriptions
+- `POST /api/v1/podcasts/feeds` — subscribe to a feed
+- `GET /api/v1/podcasts/feeds/{id}`
+- `PATCH /api/v1/podcasts/feeds/{id}`
+- `POST /api/v1/podcasts/feeds/poll` — run one poll cycle for all due feeds
+- `POST /api/v1/podcasts/feeds/{id}/refresh` — refresh one feed immediately
+- `DELETE /api/v1/podcasts/feeds/{id}`
+
+Shows and episodes are split into separate `/shows/` and `/episodes/` URL prefixes so the routes have unambiguous shapes.
+
+Podcast search supports optional filters: `genre`, `libraryId`, `favorite`, `starred`, `recentlyPlayed`, `recentlyAdded`, `completed`, `minRating`, and `sort` (`relevance`, `title`, `added`, `played`).
+
+Podcast metadata includes:
+
+- show title, author, description, feed URL, site URL, language, explicit flag, categories, owner name/email, episode count, external IDs
+- episode title, subtitle, description, published date, season/episode numbers, enclosure metadata, chapters, audio files, progress, external IDs
+
+Podcast feeds are remote source records. `POST /api/v1/podcasts/feeds` accepts:
 
 ```json
 {
@@ -327,15 +374,15 @@ Podcast feeds are remote source records. `POST /api/v1/shelf/podcast-feeds` acce
 }
 ```
 
-Samo fetches the RSS feed, stores the feed source, creates or updates a shelf podcast item, and creates or updates remote podcast episodes with enclosure metadata. Local podcast files still come from the scanner and use the same shelf podcast/episode response models.
+Samo fetches the RSS feed, stores the feed source, creates or updates a podcast show, and creates or updates remote episodes with enclosure metadata. Local podcast files come from the scanner and write into the same `podcasts` / `podcast_episodes` tables, so clients see one consistent shape regardless of source.
 
 Podcast feed source mutations (`POST`, `PATCH`, manual poll/refresh, and `DELETE`) are admin-only. Feed and episode reads are available to authenticated users.
 
 Feed responses include a `poll` object: `pollEnabled`, `pollIntervalSeconds` (900–604800), `nextPollAt`, `lastPollStartedAt`, `lastPollFinishedAt`, and `consecutiveErrors`.
 
-`PATCH /api/v1/shelf/podcast-feeds/{id}` accepts optional `title`, `pollEnabled`, and `pollIntervalSeconds` without re-fetching RSS.
+`PATCH /api/v1/podcasts/feeds/{id}` accepts optional `title`, `pollEnabled`, and `pollIntervalSeconds` without re-fetching RSS.
 
-`POST /api/v1/shelf/podcast-feeds/poll` runs one poll cycle for all due feeds and returns `{ checked, updated, failed, skipped, results[] }`.
+`POST /api/v1/podcasts/feeds/poll` runs one poll cycle for all due feeds and returns `{ checked, updated, failed, skipped, results[] }`.
 
 When `SAMO_PODCAST_POLL=true` (default), the server also polls due feeds on a background ticker (`SAMO_PODCAST_POLL_TICK`, default `1m`).
 

@@ -3,6 +3,7 @@ package api
 import (
 	"context"
 	"net/http"
+	"strings"
 
 	"github.com/bouliehaan/samo-server/internal/users"
 )
@@ -39,15 +40,22 @@ func (s *Server) authenticateRequest(r *http.Request) (users.Principal, bool) {
 		}
 		return users.Principal{}, false
 	}
-	token := tokenFromRequest(r)
-	if token == "" {
-		return users.Principal{}, false
+	if token := tokenFromRequest(r); token != "" {
+		principal, err := s.users.AuthenticateToken(r.Context(), token)
+		if err == nil {
+			return principal, true
+		}
 	}
-	principal, err := s.users.AuthenticateToken(r.Context(), token)
-	if err != nil {
-		return users.Principal{}, false
+	// Stream tokens are short-lived credentials clients pass via query string
+	// for routes that can't add custom headers (HTML5 <audio src>, <img src>).
+	// They auth the same user the bearer that minted them belongs to.
+	if streamToken := strings.TrimSpace(r.URL.Query().Get("stream_token")); streamToken != "" {
+		principal, err := s.users.AuthenticateStreamToken(r.Context(), streamToken)
+		if err == nil {
+			return principal, true
+		}
 	}
-	return principal, true
+	return users.Principal{}, false
 }
 
 func (s *Server) currentUser(r *http.Request) (users.Principal, bool) {

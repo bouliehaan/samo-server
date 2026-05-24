@@ -20,7 +20,7 @@ The server currently has these major pieces:
 - library management and scan orchestration in `internal/libraries`
 - embedded cover extraction and cache in `internal/covers`
 - playback state persistence in `internal/playback`
-- per-user shelf bookmarks, collections, and listening sessions in `internal/shelfuser`
+- per-user audiobook bookmarks, collections, and listening sessions in `internal/bookmarks`
 - local media file access and streaming in `internal/files`
 - remote source ingestion in `internal/sources`
 - Samo-native HTTP API handlers in `internal/api`
@@ -29,7 +29,47 @@ The server currently has these major pieces:
 - 24/7 radio station module in `internal/radio`
 - shared media taxonomy in `internal/media`
 
-There is no GUI yet. The current UI surface is only a small root status page. The important product surface is the API.
+There is a minimal browser UI at `/app` (vanilla JS, no build step). The important product surface is the API.
+
+## Domain Architecture
+
+Samo has **four independent first-class domains**. There is no umbrella "shelf" or "longform" parent — audiobooks and podcasts are structurally different and share **only** infrastructure tables.
+
+| Domain | Catalog DTO | DB tables | URL namespace | Playback target kinds |
+|--------|-------------|-----------|---------------|-----------------------|
+| Music | `MusicArtist`, `MusicAlbum`, `MusicTrack`, `MusicPlaylist` | `music_artists`, `music_albums`, `music_tracks`, `music_playlists`, `music_album_artists`, `music_track_artists` | `/api/v1/music/*` | `music-artist`, `music-album`, `music-track`, `music-playlist` |
+| Audiobook | `AudiobookItem`, `Contributor`, `Series`, `BookMetadata` | `audiobooks`, `contributors`, `series`, `audiobook_contributors`, `audiobook_series`, `audiobook_chapters`, `bookmarks`, `collections`, `collection_audiobooks`, `listening_sessions` | `/api/v1/audiobooks/*`, `/api/v1/contributors/*`, `/api/v1/series/*`, `/api/v1/bookmarks/*`, `/api/v1/collections/*`, `/api/v1/listening-sessions` | `audiobook` |
+| Podcast | `PodcastItem`, `PodcastEpisode`, `PodcastMetadata`, `PodcastFeed` | `podcasts`, `podcast_episodes`, `podcast_feeds`, `episode_chapters`, `podcast_episode_cache` | `/api/v1/podcasts/*` (split into `/shows/{id}` and `/episodes/{id}`) | `podcast`, `podcast-episode` |
+| Radio | `StationRecord`, `StationItem`, `ProgramSlot` | `radio_stations`, `radio_station_items`, `internet_radio_stations` | `/api/v1/radio/*`, `/api/v1/internet-radio/*`, `/radio/{id}/*`, `/internet-radio/{id}/*` | n/a (one-shot stream) |
+
+### Shared infrastructure (NOT shared models)
+
+These tables/types are used across domains, but they are infrastructure — not parent entities.
+
+- `media_files` — one row per audio file on disk. Exactly **one** of `audiobook_id`, `podcast_id`, `track_id`, `episode_id` is non-null. Lets cover extraction, file streaming, and Range serving work without forcing the four domains to share an item table.
+- `AudioFile`, `AudioChapter`, `PlaybackState`, `Image`, `ExternalIDs` — value types embedded in catalog DTOs. Not entities.
+- `extracted_covers` — embedded artwork cache.
+- `genres` — keyed by `(name, kind)` so domains' genre vocabularies don't collide.
+- `metadata_overrides` — write-time guard layer, discriminated by `target_kind` (`music-artist`, `music-album`, `music-track`, `music-playlist`, `audiobook`, `podcast`, `podcast-episode`, `podcast-feed`).
+- `user_playback` — per-user playback state, discriminated by `target_kind` (same vocabulary as `metadata_overrides`).
+- `scanner/longform_common.go` — shared file probing (`ffprobe`), folder grouping, disc/track ordering. Pure utility; produces transient `groupedAudio` structs, not catalog rows.
+- `search/audiobook.go` `longformItemMatchesQuery` / `longformLess` — shared playback-state filter and sort tiebreak. Operate on `(PlaybackState, []string genres, *time.Time, string text)` tuples — they take no entity types.
+
+### Library kinds
+
+Libraries are typed by `kind`: `music`, `audiobook`, `podcast`, or `mixed`. The legacy `shelf` kind and `media_type` discriminator are gone (migration 016).
+
+- `music` libraries scan into `music_*` tables.
+- `audiobook` libraries scan each book folder into `audiobooks`.
+- `podcast` libraries scan each show folder into `podcasts` plus per-file rows in `podcast_episodes`.
+- `mixed` libraries are **containers**, not parents. The scanner classifies each subfolder via heuristics (sidecars, `.m4b`, single-large-file, episode-naming patterns) and routes it into the appropriate domain table. A mixed library produces audiobook rows, podcast rows, and music tracks — never a "mixed-item" row.
+- For backwards compatibility with old API clients, `POST /api/v1/libraries` with `kind="shelf"` plus `mediaType="book"` or `"podcast"` is translated to `audiobook` / `podcast` at create time. New code should not emit those payloads.
+
+### Why the split
+
+Audiobook metadata (authors, narrators, series, chapters, bookmarks, collections, listening sessions) is structurally different from podcast metadata (feed URL, episodes, enclosures, polling state, episode cache). Bundling them under one `shelf_items` table with a `media_type` discriminator leaked one domain's concerns into the other and broke FK invariants. Migration 016 split them into independent top-level tables with the right FK chains, and reserves the right to add per-domain columns/relations without affecting the other.
+
+> **Historical note:** Samo previously bundled audiobooks and podcasts behind a generic "shelf" abstraction (`shelf_items`, `shelf_authors`, `shelf_series`, `shelf_chapters`, `shelf_bookmarks`, `shelf_collections`, `shelf_listening_sessions`). Migration `016_split_audiobooks_podcasts.sql` retired that shape — see the migration body for the exact data move. Some sections of this document below still reference "shelf" — they are accurate descriptions of historical work, not the current schema or API surface.
 
 ## Foundation Work Log
 
@@ -135,8 +175,10 @@ Record completed foundation-layer work here so later features do not need to reo
 
 - `path`: explicit absolute path (the legacy JSON shape).
 - `music-track`: catalog music track ID; resolver picks the first linked `media_file`.
-- `shelf-item`: catalog shelf item ID (audiobook or single-file).
-- `shelf-episode`: catalog podcast episode ID; remote-only episodes are skipped until cached locally.
+- `audiobook`: catalog audiobook ID (audiobook or single-file).
+- `podcast-episode`: catalog podcast episode ID; remote-only episodes are skipped until cached locally.
+
+(Migration 016 renamed `shelf-item` → `audiobook` and `shelf-episode` → `podcast-episode`. The radio resolver dispatches on these post-016 values.)
 
 **Tests**
 
@@ -241,8 +283,8 @@ Record completed foundation-layer work here so later features do not need to reo
 
 **`internal/playback`**
 
-- Owns all writes to `playback_json` (music artists/albums/tracks/playlists) and `progress_json` (shelf items, podcast episodes).
-- Target kinds: `music-artist`, `music-album`, `music-track`, `music-playlist`, `shelf-item`, `shelf-episode`.
+- Owns all writes to `playback_json` (music artists/albums/tracks/playlists) and `progress_json` (audiobooks, podcasts, podcast episodes).
+- Target kinds: `music-artist`, `music-album`, `music-track`, `music-playlist`, `audiobook`, `podcast`, `podcast-episode`. (Previously `shelf-item` / `shelf-episode`; migration 016 split these into the per-domain kinds above.)
 - `GET` returns normalized state; `PUT` replaces; `PATCH` merges partial updates with optional play/skip increments and timestamp touches.
 - Validates entity existence, rating range (0–5), and non-negative counters before writing.
 
@@ -267,7 +309,7 @@ Record completed foundation-layer work here so later features do not need to reo
 - `GET|PUT|PATCH /api/v1/playback/{kind}/{id}`
 - `GET /api/v1/media/files/{id}`, `GET /api/v1/media/files/{id}/stream`
 - `GET /api/v1/music/tracks/{id}/stream`, `GET /api/v1/music/albums/{id}/cover`
-- `GET /api/v1/shelf/items/{id}/stream`, `GET /api/v1/shelf/items/{id}/cover`, `GET /api/v1/shelf/episodes/{id}/stream`
+- `GET /api/v1/audiobooks/{id}/stream`, `GET /api/v1/audiobooks/{id}/cover`, `GET /api/v1/podcasts/shows/{id}/cover`, `GET /api/v1/podcasts/episodes/{id}/stream` (post-016; previously `/api/v1/shelf/items/...` and `/api/v1/shelf/episodes/...`)
 - Playback and scan routes refresh the in-memory catalog after successful writes.
 
 ### 2026-05-22 — Embedded cover extraction and multi-file streaming
@@ -320,8 +362,8 @@ Record completed foundation-layer work here so later features do not need to reo
 
 **HTTP API**
 
-- `PATCH /api/v1/shelf/podcast-feeds/{id}` — update title, `pollEnabled`, `pollIntervalSeconds` (900s–7d).
-- `POST /api/v1/shelf/podcast-feeds/poll` — run one poll cycle immediately (admin-style trigger).
+- `PATCH /api/v1/podcasts/feeds/{id}` — update title, `pollEnabled`, `pollIntervalSeconds` (900s–7d). (post-016; previously `/api/v1/shelf/podcast-feeds/{id}`)
+- `POST /api/v1/podcasts/feeds/poll` — run one poll cycle immediately (admin-style trigger).
 
 **Config**
 
@@ -465,7 +507,7 @@ Record completed foundation-layer work here so later features do not need to reo
 
 **HTTP API**
 
-- `GET /api/v1/shelf/episodes/{id}/stream` uses local files when present, otherwise cache, otherwise enclosure proxy.
+- `GET /api/v1/podcasts/episodes/{id}/stream` uses local files when present, otherwise cache, otherwise enclosure proxy. (post-016; previously `/api/v1/shelf/episodes/{id}/stream`)
 
 **Tests**
 
@@ -512,8 +554,8 @@ Record completed foundation-layer work here so later features do not need to reo
 
 - `MetadataApplyService` writes user-selected fields from `SearchResult` candidates into `metadata_overrides` patches (projected at catalog load time).
 - `POST /api/v1/metadata/apply/preview` returns `before`, merged `after`, `allowedFields`, `appliedFields`, and `skippedFields` without writing.
-- `POST /api/v1/metadata/apply` requires a non-empty `fields` list (confirmation gate), merges `externalIds`, updates contributors/series relations for shelf items, and reloads the in-memory catalog.
-- Targets: `shelf-item`, `shelf-episode`, `music-artist`, `music-album`, `music-track`, `podcast-feed`.
+- `POST /api/v1/metadata/apply` requires a non-empty `fields` list (confirmation gate), merges `externalIds`, updates contributors/series relations for audiobooks, and reloads the in-memory catalog.
+- Targets: `audiobook`, `podcast`, `podcast-episode`, `music-artist`, `music-album`, `music-track`, `podcast-feed`. (post-016; previously `shelf-item` / `shelf-episode`)
 - Apply routes are admin-only because they mutate shared catalog metadata. Search/provider routes are authenticated user routes and do not write.
 - Podcast feed apply writes both the `podcast_feeds` source row and the corresponding `shelf_items.podcast_json` projection in one transaction, so clients reading `/api/v1/shelf/podcasts` see applied metadata immediately after catalog reload.
 
@@ -828,9 +870,9 @@ Current responsibilities:
 - store user-added internet radio station URLs
 - expose source read/write methods for API handlers
 
-Podcast feeds are unique because a podcast can come from local files through `internal/scanner` or from RSS through `internal/sources`. Both paths write into the same shelf podcast and episode tables so clients can use one podcast API shape.
+Podcast feeds are unique because a podcast can come from local files through `internal/scanner` or from RSS through `internal/sources`. Both paths write into the same `podcasts` / `podcast_episodes` tables so clients can use one podcast API shape.
 
-Internet radio stations are simpler source records: Samo stores the stream URL and descriptive metadata, then exposes public playlist/redirect links. They do not create shelf items and they do not participate in the 24/7 scheduler yet.
+Internet radio stations are simpler source records: Samo stores the stream URL and descriptive metadata, then exposes public playlist/redirect links. They do not create catalog items and they do not participate in the 24/7 scheduler yet.
 
 `internal/sources` may write SQL because it owns these source ingestion workflows. It should not handle HTTP and should not become a general catalog query service.
 
@@ -847,7 +889,8 @@ Current namespaces:
 - `/api/v1/catalog/*`
 - `/api/v1/metadata/*`
 - `/api/v1/music/*`
-- `/api/v1/shelf/*`
+- `/api/v1/audiobooks/*`, `/api/v1/contributors/*`, `/api/v1/series/*`, `/api/v1/bookmarks/*`, `/api/v1/collections/*`, `/api/v1/listening-sessions`
+- `/api/v1/podcasts/*` (split into `/shows/{id}/*` and `/episodes/{id}/*`)
 - `/api/v1/radio/*`
 - `/api/v1/internet-radio/*`
 - public `/radio/{id}/playlist.m3u`
@@ -894,15 +937,21 @@ Current music surface:
 - playlists
 - search
 
-Current shelf surface:
+Current audiobook surface:
 
-- libraries
-- items
 - audiobooks
-- authors
+- contributors (authors, narrators)
 - series
-- podcasts
+- bookmarks
+- collections
+- listening sessions
+- search
+
+Current podcast surface:
+
+- shows
 - episodes
+- RSS feeds (subscribe, poll, refresh, delete)
 - search
 
 Current radio surface:
@@ -1009,7 +1058,36 @@ These are expected first-pass limits, not accidental bugs:
 - native API uses per-user bearer tokens; legacy `SAMO_API_TOKEN` maps to bootstrap user `user-server`
 - Subsonic adapter maps Samo music IDs directly; per-library album filtering in `getAlbumList2` is not wired yet
 
-### 2026-05-22 — Subsonic / OpenSubsonic compatibility
+### 2026-05-22 — Subsonic / OpenSubsonic compatibility expansion
+
+**Packages:** `internal/subsonic`, `internal/api`, `internal/playback`
+
+**`internal/subsonic`**
+
+- Per-user starred albums, artists, and tracks via `getStarred` / `getStarred2`.
+- `star`, `unstar`, and `setRating` write through `internal/playback` for the authenticated Subsonic user.
+- `getAlbumList2` supports `starred` and `frequent` (recently played) list types using the same browse overlay as the Samo-native API.
+- `getRandomSongs` returns a shuffled track sample.
+- Starred items and ratings appear on song/album child payloads when present.
+
+**HTTP**
+
+- `GET /rest/getStarred`, `GET /rest/getStarred2`
+- `GET /rest/star?id=`, `GET /rest/unstar?id=`, `GET /rest/setRating?id=&rating=`
+- `GET /rest/getRandomSongs`
+- `GET /rest/getAlbumList2?type=starred|frequent|...`
+
+**Tests**
+
+- Starred listing, star/unstar persistence, and starred album list type (`internal/subsonic`).
+
+**Intentional limits**
+
+- JSON only (`f=json`); XML not implemented.
+- `musicFolderId` filtering not applied because albums are not library-scoped in the catalog read model yet.
+- Audiobookshelf compatibility remains a future adapter layer.
+
+### 2026-05-22 — Subsonic / OpenSubsonic compatibility (initial)
 
 **Packages:** `internal/subsonic`, `internal/catalog`, `internal/api`
 
@@ -1133,10 +1211,11 @@ These are expected first-pass limits, not accidental bugs:
 
 Useful next steps:
 
-1. Extend Subsonic coverage (starred, XML, per-library indexes).
-2. Add Audiobookshelf compatibility routes.
-3. Make radio stations optionally source from catalog queries/playlists.
-4. ListenBrainz support or shared-household scrobble policies.
+1. Admin/settings/ops APIs (server status, config visibility, safer self-hosted operations).
+2. Radio programming UI/API foundations after server concepts are stable.
+3. Audiobookshelf compatibility adapter when a dedicated ABS client is in scope.
+4. Subsonic XML and per-library album indexes if a legacy client requires them.
+5. ListenBrainz support or shared-household scrobble policies.
 
 ## Testing Expectations
 
@@ -1162,6 +1241,6 @@ Current tests cover:
 - tag alias resolution, multi-file tag merge, cue/metadata.json/nfo sidecars, and iTunes explicit mapping
 - disc-aware stream file selection and resume offsets for multi-file shelf items
 - metadata apply preview/apply with field-level confirmation, external ID merge, and override persistence
-- shelf bookmarks, collections, listening sessions, and author/series item lists
+- Subsonic starred/rating/random-song routes and per-user playback overlay
 
 Keep tests focused on contracts and package boundaries. Scanner tests should prefer parser/grouping tests and small generated media fixtures when practical.

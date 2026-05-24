@@ -51,9 +51,14 @@ func (s *Service) UpdatePodcastFeed(ctx context.Context, id string, input Update
 		}
 	}
 
-	nextPollAt := time.Now().UTC()
-	if !pollEnabled {
-		nextPollAt = time.Time{}
+	var nextPollAt any
+	switch {
+	case !pollEnabled:
+		nextPollAt = nil
+	case input.PollEnabled != nil || input.PollIntervalSeconds != nil:
+		nextPollAt = timeStringOrNull(time.Now().UTC())
+	default:
+		nextPollAt = timeString(current.Poll.NextPollAt)
 	}
 
 	_, err = s.db.ExecContext(ctx, `
@@ -67,7 +72,7 @@ func (s *Service) UpdatePodcastFeed(ctx context.Context, id string, input Update
 		title,
 		boolInt(pollEnabled),
 		interval,
-		timeStringOrNull(nextPollAt),
+		nextPollAt,
 		id,
 	)
 	if err != nil {

@@ -2,29 +2,14 @@ package catalog
 
 import "time"
 
-type ShelfMediaType string
-
-const (
-	ShelfMediaTypeBook    ShelfMediaType = "book"
-	ShelfMediaTypePodcast ShelfMediaType = "podcast"
-)
-
-type ShelfLibrary struct {
-	ID          string         `json:"id"`
-	Name        string         `json:"name"`
-	MediaType   ShelfMediaType `json:"mediaType"`
-	Path        string         `json:"path,omitempty"`
-	Description string         `json:"description,omitempty"`
-	ItemCount   int            `json:"itemCount"`
-	CreatedAt   *time.Time     `json:"createdAt,omitempty"`
-	UpdatedAt   *time.Time     `json:"updatedAt,omitempty"`
-}
-
-type ShelfItem struct {
+// PodcastItem is one podcast show (NOT one episode). One podcast row can
+// hold many PodcastEpisode rows.
+//
+// This replaces the old ShelfItem-with-MediaType=podcast. PodcastItem has
+// no contributors / series — podcasts are author-as-string (PodcastMetadata.Author).
+type PodcastItem struct {
 	ID              string           `json:"id"`
 	LibraryID       string           `json:"libraryId,omitempty"`
-	MediaType       ShelfMediaType   `json:"mediaType"`
-	MediaKind       string           `json:"mediaKind,omitempty"`
 	Path            string           `json:"path,omitempty"`
 	FolderID        string           `json:"folderId,omitempty"`
 	Inode           string           `json:"inode,omitempty"`
@@ -36,59 +21,15 @@ type ShelfItem struct {
 	Genres          []string         `json:"genres,omitempty"`
 	DurationSeconds int              `json:"durationSeconds"`
 	Progress        PlaybackState    `json:"progress"`
-	Book            *BookMetadata    `json:"book,omitempty"`
 	Podcast         *PodcastMetadata `json:"podcast,omitempty"`
 	AudioFiles      []AudioFile      `json:"audioFiles,omitempty"`
-	Chapters        []AudioChapter   `json:"chapters,omitempty"`
+	Episodes        []PodcastEpisode `json:"episodes,omitempty"`
 	AddedAt         *time.Time       `json:"addedAt,omitempty"`
 	UpdatedAt       *time.Time       `json:"updatedAt,omitempty"`
 	LastScanAt      *time.Time       `json:"lastScanAt,omitempty"`
 }
 
-type BookMetadata struct {
-	Title           string        `json:"title"`
-	Subtitle        string        `json:"subtitle,omitempty"`
-	SortTitle       string        `json:"sortTitle,omitempty"`
-	Authors         []Contributor `json:"authors,omitempty"`
-	Narrators       []Contributor `json:"narrators,omitempty"`
-	Series          []SeriesRef   `json:"series,omitempty"`
-	Publisher       string        `json:"publisher,omitempty"`
-	PublishedDate   string        `json:"publishedDate,omitempty"`
-	PublishedYear   string        `json:"publishedYear,omitempty"`
-	Description     string        `json:"description,omitempty"`
-	Language        string        `json:"language,omitempty"`
-	Genres          []string      `json:"genres,omitempty"`
-	Tags            []string      `json:"tags,omitempty"`
-	ISBNs           []string      `json:"isbns,omitempty"`
-	Explicit        bool          `json:"explicit,omitempty"`
-	Abridged        bool          `json:"abridged,omitempty"`
-	DurationSeconds int           `json:"durationSeconds"`
-	ExternalIDs     ExternalIDs   `json:"externalIds,omitempty"`
-}
-
-type ShelfAuthor struct {
-	ID              string      `json:"id"`
-	Name            string      `json:"name"`
-	SortName        string      `json:"sortName,omitempty"`
-	Description     string      `json:"description,omitempty"`
-	Images          []Image     `json:"images,omitempty"`
-	ExternalIDs     ExternalIDs `json:"externalIds,omitempty"`
-	ItemCount       int         `json:"itemCount"`
-	SeriesCount     int         `json:"seriesCount"`
-	DurationSeconds int         `json:"durationSeconds"`
-}
-
-type ShelfSeries struct {
-	ID              string        `json:"id"`
-	Name            string        `json:"name"`
-	Description     string        `json:"description,omitempty"`
-	Authors         []Contributor `json:"authors,omitempty"`
-	ItemIDs         []string      `json:"itemIds,omitempty"`
-	ItemCount       int           `json:"itemCount"`
-	DurationSeconds int           `json:"durationSeconds"`
-	ExternalIDs     ExternalIDs   `json:"externalIds,omitempty"`
-}
-
+// PodcastMetadata is the show-level metadata embedded in a PodcastItem.
 type PodcastMetadata struct {
 	Title        string      `json:"title"`
 	Author       string      `json:"author,omitempty"`
@@ -104,6 +45,8 @@ type PodcastMetadata struct {
 	ExternalIDs  ExternalIDs `json:"externalIds,omitempty"`
 }
 
+// PodcastEpisode is one episode of a podcast show. Backed by the
+// `podcast_episodes` table.
 type PodcastEpisode struct {
 	ID              string         `json:"id"`
 	LibraryID       string         `json:"libraryId,omitempty"`
@@ -128,10 +71,10 @@ type PodcastEpisode struct {
 	UpdatedAt       *time.Time     `json:"updatedAt,omitempty"`
 }
 
-type ShelfSearchResults struct {
-	Items    []ShelfItem      `json:"items"`
-	Authors  []ShelfAuthor    `json:"authors"`
-	Series   []ShelfSeries    `json:"series"`
+// PodcastSearchResults is the response shape for
+// GET /api/v1/podcasts/search.
+type PodcastSearchResults struct {
+	Podcasts []PodcastItem    `json:"podcasts"`
 	Episodes []PodcastEpisode `json:"episodes"`
 	Total    int              `json:"total"`
 	Limit    int              `json:"limit"`

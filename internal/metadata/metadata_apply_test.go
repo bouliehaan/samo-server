@@ -10,7 +10,7 @@ import (
 	"github.com/bouliehaan/samo-server/migrations"
 )
 
-func TestMetadataApplyPreviewMergesBookTitle(t *testing.T) {
+func TestMetadataApplyPreviewMergesAudiobookTitle(t *testing.T) {
 	ctx := context.Background()
 	db, err := storage.Open(ctx, t.TempDir()+"/samo.db")
 	if err != nil {
@@ -23,19 +23,19 @@ func TestMetadataApplyPreviewMergesBookTitle(t *testing.T) {
 
 	itemID := "item-1"
 	if _, err := db.ExecContext(ctx, `
-		INSERT INTO libraries (id, name, kind, media_type, path)
-		VALUES ('lib-1', 'Books', 'shelf', 'book', '/books')`); err != nil {
+		INSERT INTO libraries (id, name, kind, path)
+		VALUES ('lib-1', 'Books', 'audiobook', '/books')`); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := db.ExecContext(ctx, `
-		INSERT INTO shelf_items (id, library_id, media_type, media_kind, path, book_json)
-		VALUES (?, 'lib-1', 'book', 'audiobook', '/books/old', '{"title":"Old Title"}')`, itemID); err != nil {
+		INSERT INTO audiobooks (id, library_id, path, book_json)
+		VALUES (?, 'lib-1', '/books/old', '{"title":"Old Title"}')`, itemID); err != nil {
 		t.Fatal(err)
 	}
 
 	service := NewMetadataApplyService(db)
 	preview, err := service.Preview(ctx, MetadataApplyRequest{
-		TargetKind: string(ApplyTargetShelfItem),
+		TargetKind: string(ApplyTargetAudiobook),
 		TargetID:   itemID,
 		Fields:     []string{"title", "description"},
 		Candidate: SearchResult{
@@ -50,7 +50,7 @@ func TestMetadataApplyPreviewMergesBookTitle(t *testing.T) {
 	if len(preview.AppliedFields) != 2 {
 		t.Fatalf("applied = %#v", preview.AppliedFields)
 	}
-	after := preview.After.(catalog.ShelfItem)
+	after := preview.After.(catalog.AudiobookItem)
 	if after.Book == nil || after.Book.Title != "Signal Manual" {
 		t.Fatalf("after book = %#v", after.Book)
 	}
@@ -134,14 +134,14 @@ func TestMetadataApplyPodcastFeedUpdatesCatalogProjection(t *testing.T) {
 	}
 
 	if _, err := db.ExecContext(ctx, `
-		INSERT INTO libraries (id, name, kind, media_type, path)
-		VALUES ('remote-podcast', 'Podcast Feeds', 'shelf', 'podcast', 'samo://podcasts/rss')`); err != nil {
+		INSERT INTO libraries (id, name, kind, path)
+		VALUES ('remote-podcast', 'Podcast Feeds', 'podcast', 'samo://podcasts/rss')`); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := db.ExecContext(ctx, `
-		INSERT INTO shelf_items (id, library_id, media_type, media_kind, path, cover_json, genres_json, podcast_json)
+		INSERT INTO podcasts (id, library_id, path, cover_json, genres_json, podcast_json)
 		VALUES (
-		  'podcast-1', 'remote-podcast', 'podcast', 'podcast', 'https://feeds.example.com/old.xml',
+		  'podcast-1', 'remote-podcast', 'https://feeds.example.com/old.xml',
 		  '{"url":"https://img.example.com/old.jpg"}',
 		  '["old"]',
 		  '{"title":"Old Show","feedUrl":"https://feeds.example.com/old.xml","categories":["old"],"externalIds":{"feedGuid":"feed-1"}}'
@@ -203,7 +203,7 @@ func TestMetadataApplyPodcastFeedUpdatesCatalogProjection(t *testing.T) {
 		t.Fatal(err)
 	}
 	if _, err := db.ExecContext(ctx, `
-		UPDATE shelf_items
+		UPDATE podcasts
 		SET podcast_json = '{"title":"RSS Title","feedUrl":"https://feeds.example.com/old.xml","categories":["rss"],"externalIds":{"feedGuid":"feed-1"}}',
 		    genres_json = '["rss"]'
 		WHERE id = 'podcast-1'`); err != nil {
@@ -214,10 +214,10 @@ func TestMetadataApplyPodcastFeedUpdatesCatalogProjection(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(seed.ShelfItems) != 1 || seed.ShelfItems[0].Podcast == nil {
-		t.Fatalf("seed items = %#v", seed.ShelfItems)
+	if len(seed.Podcasts) != 1 || seed.Podcasts[0].Podcast == nil {
+		t.Fatalf("seed podcasts = %#v", seed.Podcasts)
 	}
-	item := seed.ShelfItems[0]
+	item := seed.Podcasts[0]
 	if item.Podcast.Title != "New Show" || item.Podcast.SiteURL != "https://show.example.com" {
 		t.Fatalf("podcast projection = %#v", item.Podcast)
 	}

@@ -1,4 +1,4 @@
-package shelfuser
+package bookmarks
 
 import (
 	"context"
@@ -8,17 +8,17 @@ import (
 )
 
 type CreateCollectionInput struct {
-	Name        string   `json:"name"`
-	Description string   `json:"description,omitempty"`
-	Public      bool     `json:"public"`
-	ItemIDs     []string `json:"itemIds,omitempty"`
+	Name         string   `json:"name"`
+	Description  string   `json:"description,omitempty"`
+	Public       bool     `json:"public"`
+	AudiobookIDs []string `json:"audiobookIds,omitempty"`
 }
 
 type UpdateCollectionInput struct {
-	Name        *string  `json:"name,omitempty"`
-	Description *string  `json:"description,omitempty"`
-	Public      *bool    `json:"public,omitempty"`
-	ItemIDs     []string `json:"itemIds,omitempty"`
+	Name         *string  `json:"name,omitempty"`
+	Description  *string  `json:"description,omitempty"`
+	Public       *bool    `json:"public,omitempty"`
+	AudiobookIDs []string `json:"audiobookIds,omitempty"`
 }
 
 func (s *Service) ListCollections(ctx context.Context, userID string) ([]Collection, error) {
@@ -31,7 +31,7 @@ func (s *Service) ListCollections(ctx context.Context, userID string) ([]Collect
 	}
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT id, user_id, name, description, public, created_at, updated_at
-		FROM shelf_collections
+		FROM collections
 		WHERE user_id = ?
 		ORDER BY name ASC`, userID)
 	if err != nil {
@@ -44,11 +44,11 @@ func (s *Service) ListCollections(ctx context.Context, userID string) ([]Collect
 		if err != nil {
 			return nil, err
 		}
-		item.ItemIDs, err = s.loadCollectionItemIDs(ctx, item.ID)
+		item.AudiobookIDs, err = s.loadCollectionAudiobookIDs(ctx, item.ID)
 		if err != nil {
 			return nil, err
 		}
-		item.ItemCount = len(item.ItemIDs)
+		item.AudiobookCount = len(item.AudiobookIDs)
 		items = append(items, item)
 	}
 	return items, rows.Err()
@@ -67,7 +67,7 @@ func (s *Service) CreateCollection(ctx context.Context, userID string, input Cre
 	if userID == "" || name == "" {
 		return Collection{}, ErrInvalidInput
 	}
-	itemIDs, err := s.validateCollectionItems(ctx, input.ItemIDs)
+	audiobookIDs, err := s.validateCollectionAudiobooks(ctx, input.AudiobookIDs)
 	if err != nil {
 		return Collection{}, err
 	}
@@ -79,12 +79,12 @@ func (s *Service) CreateCollection(ctx context.Context, userID string, input Cre
 	}
 	defer tx.Rollback()
 	if _, err := tx.ExecContext(ctx, `
-		INSERT INTO shelf_collections (id, user_id, name, description, public, created_at, updated_at)
+		INSERT INTO collections (id, user_id, name, description, public, created_at, updated_at)
 		VALUES (?, ?, ?, ?, ?, ?, ?)`,
 		id, userID, name, strings.TrimSpace(input.Description), boolInt(input.Public), now, now); err != nil {
 		return Collection{}, fmt.Errorf("create collection: %w", err)
 	}
-	if err := replaceCollectionItems(ctx, tx, id, itemIDs); err != nil {
+	if err := replaceCollectionAudiobooks(ctx, tx, id, audiobookIDs); err != nil {
 		return Collection{}, err
 	}
 	if err := tx.Commit(); err != nil {
@@ -116,9 +116,9 @@ func (s *Service) UpdateCollection(ctx context.Context, userID, id string, input
 	if input.Public != nil {
 		public = *input.Public
 	}
-	itemIDs := current.ItemIDs
-	if input.ItemIDs != nil {
-		itemIDs, err = s.validateCollectionItems(ctx, input.ItemIDs)
+	audiobookIDs := current.AudiobookIDs
+	if input.AudiobookIDs != nil {
+		audiobookIDs, err = s.validateCollectionAudiobooks(ctx, input.AudiobookIDs)
 		if err != nil {
 			return Collection{}, err
 		}
@@ -129,14 +129,14 @@ func (s *Service) UpdateCollection(ctx context.Context, userID, id string, input
 	}
 	defer tx.Rollback()
 	if _, err := tx.ExecContext(ctx, `
-		UPDATE shelf_collections
+		UPDATE collections
 		SET name = ?, description = ?, public = ?, updated_at = ?
 		WHERE id = ? AND user_id = ?`,
 		name, description, boolInt(public), nowRFC3339(), id, userID); err != nil {
 		return Collection{}, fmt.Errorf("update collection: %w", err)
 	}
-	if input.ItemIDs != nil {
-		if err := replaceCollectionItems(ctx, tx, id, itemIDs); err != nil {
+	if input.AudiobookIDs != nil {
+		if err := replaceCollectionAudiobooks(ctx, tx, id, audiobookIDs); err != nil {
 			return Collection{}, err
 		}
 	}
@@ -154,40 +154,40 @@ func (s *Service) DeleteCollection(ctx context.Context, userID, id string) error
 	if current.UserID != userID {
 		return ErrForbidden
 	}
-	_, err = s.db.ExecContext(ctx, `DELETE FROM shelf_collections WHERE id = ?`, id)
+	_, err = s.db.ExecContext(ctx, `DELETE FROM collections WHERE id = ?`, id)
 	return err
 }
 
-func (s *Service) validateCollectionItems(ctx context.Context, itemIDs []string) ([]string, error) {
+func (s *Service) validateCollectionAudiobooks(ctx context.Context, audiobookIDs []string) ([]string, error) {
 	seen := map[string]struct{}{}
-	valid := make([]string, 0, len(itemIDs))
-	for _, itemID := range itemIDs {
-		itemID = strings.TrimSpace(itemID)
-		if itemID == "" {
+	valid := make([]string, 0, len(audiobookIDs))
+	for _, audiobookID := range audiobookIDs {
+		audiobookID = strings.TrimSpace(audiobookID)
+		if audiobookID == "" {
 			continue
 		}
-		if _, ok := seen[itemID]; ok {
+		if _, ok := seen[audiobookID]; ok {
 			continue
 		}
-		seen[itemID] = struct{}{}
-		if err := assertAudiobookItem(ctx, s.db, itemID); err != nil {
+		seen[audiobookID] = struct{}{}
+		if err := assertAudiobookExists(ctx, s.db, audiobookID); err != nil {
 			return nil, err
 		}
-		valid = append(valid, itemID)
+		valid = append(valid, audiobookID)
 	}
 	return valid, nil
 }
 
-func replaceCollectionItems(ctx context.Context, tx *sql.Tx, collectionID string, itemIDs []string) error {
-	if _, err := tx.ExecContext(ctx, `DELETE FROM shelf_collection_items WHERE collection_id = ?`, collectionID); err != nil {
-		return fmt.Errorf("clear collection items: %w", err)
+func replaceCollectionAudiobooks(ctx context.Context, tx *sql.Tx, collectionID string, audiobookIDs []string) error {
+	if _, err := tx.ExecContext(ctx, `DELETE FROM collection_audiobooks WHERE collection_id = ?`, collectionID); err != nil {
+		return fmt.Errorf("clear collection audiobooks: %w", err)
 	}
-	for index, itemID := range itemIDs {
+	for index, audiobookID := range audiobookIDs {
 		if _, err := tx.ExecContext(ctx, `
-			INSERT INTO shelf_collection_items (collection_id, item_id, position, added_at)
+			INSERT INTO collection_audiobooks (collection_id, audiobook_id, position, added_at)
 			VALUES (?, ?, ?, ?)`,
-			collectionID, itemID, index, nowRFC3339()); err != nil {
-			return fmt.Errorf("insert collection item: %w", err)
+			collectionID, audiobookID, index, nowRFC3339()); err != nil {
+			return fmt.Errorf("insert collection audiobook: %w", err)
 		}
 	}
 	return nil
@@ -199,7 +199,7 @@ func (s *Service) loadCollection(ctx context.Context, userID, id string) (Collec
 	var createdAt, updatedAt sql.NullString
 	err := s.db.QueryRowContext(ctx, `
 		SELECT id, user_id, name, description, public, created_at, updated_at
-		FROM shelf_collections
+		FROM collections
 		WHERE id = ?`, id).
 		Scan(&item.ID, &item.UserID, &item.Name, &item.Description, &public, &createdAt, &updatedAt)
 	if err == sql.ErrNoRows {
@@ -214,22 +214,22 @@ func (s *Service) loadCollection(ctx context.Context, userID, id string) (Collec
 	item.Public = public != 0
 	item.CreatedAt = parseTimePtr(createdAt)
 	item.UpdatedAt = parseTimePtr(updatedAt)
-	item.ItemIDs, err = s.loadCollectionItemIDs(ctx, item.ID)
+	item.AudiobookIDs, err = s.loadCollectionAudiobookIDs(ctx, item.ID)
 	if err != nil {
 		return Collection{}, err
 	}
-	item.ItemCount = len(item.ItemIDs)
+	item.AudiobookCount = len(item.AudiobookIDs)
 	return item, nil
 }
 
-func (s *Service) loadCollectionItemIDs(ctx context.Context, collectionID string) ([]string, error) {
+func (s *Service) loadCollectionAudiobookIDs(ctx context.Context, collectionID string) ([]string, error) {
 	rows, err := s.db.QueryContext(ctx, `
-		SELECT item_id
-		FROM shelf_collection_items
+		SELECT audiobook_id
+		FROM collection_audiobooks
 		WHERE collection_id = ?
 		ORDER BY position ASC`, collectionID)
 	if err != nil {
-		return nil, fmt.Errorf("load collection items: %w", err)
+		return nil, fmt.Errorf("load collection audiobooks: %w", err)
 	}
 	defer rows.Close()
 	var ids []string

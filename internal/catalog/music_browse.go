@@ -53,10 +53,38 @@ func (s *Service) MusicBrowse(
 	view MusicBrowseView,
 	page PageRequest,
 ) MusicBrowseResults {
+	return s.musicBrowse(trackStates, albumStates, artistStates, playlistStates, view, page, "", false)
+}
+
+func (s *Service) MusicBrowseForUser(
+	trackStates map[string]PlaybackState,
+	albumStates map[string]PlaybackState,
+	artistStates map[string]PlaybackState,
+	playlistStates map[string]PlaybackState,
+	view MusicBrowseView,
+	page PageRequest,
+	userID string,
+) MusicBrowseResults {
+	return s.musicBrowse(trackStates, albumStates, artistStates, playlistStates, view, page, userID, true)
+}
+
+func (s *Service) musicBrowse(
+	trackStates map[string]PlaybackState,
+	albumStates map[string]PlaybackState,
+	artistStates map[string]PlaybackState,
+	playlistStates map[string]PlaybackState,
+	view MusicBrowseView,
+	page PageRequest,
+	playlistUserID string,
+	filterPrivatePlaylists bool,
+) MusicBrowseResults {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
 	snapshot := overlayMusicBrowsePlayback(s.musicArtists, s.musicAlbums, s.musicTracks, s.musicPlaylists, trackStates, albumStates, artistStates, playlistStates)
+	if filterPrivatePlaylists {
+		snapshot.playlists = visibleMusicBrowsePlaylists(snapshot.playlists, playlistUserID)
+	}
 	var matches musicBrowseSnapshot
 	switch view {
 	case MusicBrowseFavorites:
@@ -86,6 +114,16 @@ func (s *Service) MusicBrowse(
 		Limit:     page.Limit,
 		Offset:    page.Offset,
 	}
+}
+
+func visibleMusicBrowsePlaylists(items []MusicPlaylist, userID string) []MusicPlaylist {
+	out := make([]MusicPlaylist, 0, len(items))
+	for _, item := range items {
+		if PlaylistVisibleToUser(item, userID) {
+			out = append(out, item)
+		}
+	}
+	return out
 }
 
 func overlayMusicBrowsePlayback(

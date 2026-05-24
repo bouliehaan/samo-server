@@ -131,7 +131,7 @@ func candidateHasValue(candidate SearchResult, field string) bool {
 	}
 }
 
-func firstContributorName(contributors []catalog.Contributor) string {
+func firstContributorName(contributors []catalog.ContributorRef) string {
 	if len(contributors) == 0 {
 		return ""
 	}

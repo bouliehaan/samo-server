@@ -46,17 +46,22 @@ Search results are candidates only until a client explicitly applies them.
 
 Apply targets:
 
-- `shelf-item` (audiobook `book` metadata or local `podcast` metadata)
-- `shelf-episode`
+- `audiobook` (audiobook `book` metadata)
+- `podcast` (podcast show metadata)
+- `podcast-episode` (one episode of a podcast)
 - `music-artist`, `music-album`, `music-track`
 - `podcast-feed` (remote RSS source rows)
+
+Audiobooks and podcasts are independent domains — there is no shared
+`shelf-item` target. Migration 016 split the legacy `shelf-item` /
+`shelf-episode` apply kinds into the explicit ones above.
 
 Request body:
 
 ```json
 {
-  "targetKind": "shelf-item",
-  "targetId": "item_abc123",
+  "targetKind": "audiobook",
+  "targetId": "audiobook_abc123",
   "fields": ["title", "description", "authors", "externalIds"],
   "candidate": {
     "provider": "openlibrary",

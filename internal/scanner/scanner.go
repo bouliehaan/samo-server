@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -80,7 +81,14 @@ func (s *Scanner) scanLibrary(ctx context.Context, library Library) error {
 	if library.Name == "" {
 		library.Name = filepath.Base(root)
 	}
-	library.ID = LibraryID(library.Kind, library.MediaType, root)
+	// Only compute a fresh ID when the caller didn't provide one. Recomputing
+	// would diverge from the row already stored in the DB whenever the kind,
+	// media_type, or path normalization differs from what produced the
+	// original ID — which silently broke item_count refresh because
+	// media_files/audiobooks/podcasts kept referencing the original row.
+	if library.ID == "" {
+		library.ID = LibraryID(library.Kind, library.MediaType, root)
+	}
 
 	if err := s.upsertLibrary(ctx, library); err != nil {
 		return err
@@ -91,25 +99,49 @@ func (s *Scanner) scanLibrary(ctx context.Context, library Library) error {
 		return err
 	}
 
-	switch {
-	case library.Kind == "music":
+	// Library kinds are now first-class enum values, not (kind, mediaType)
+	// tuples. The "shelf" umbrella is gone — audiobook libraries and podcast
+	// libraries each have their own kind and their own scanner entry point.
+	// Normalize before dispatch so a stray "Podcast" / "PODCAST" / " podcast"
+	// (from a hand-rolled API call or an old DB row) still routes correctly
+	// instead of falling into the default "unsupported" branch.
+	kind := strings.ToLower(strings.TrimSpace(library.Kind))
+	log.Printf("scanner: scanning library %q kind=%q path=%q with %d audio files", library.Name, kind, library.Path, len(files))
+	switch kind {
+	case "music":
 		for _, path := range files {
 			if err := s.scanMusicFile(ctx, library, root, path); err != nil {
 				return err
 			}
 		}
-	case library.Kind == "shelf" && library.MediaType == "book":
+	case "audiobook":
 		return s.scanAudiobookLibrary(ctx, library, root, files)
-	case library.Kind == "shelf" && library.MediaType == "podcast":
+	case "podcast":
 		return s.scanPodcastLibrary(ctx, library, root, files)
-	case library.Kind == "mixed":
+	case "mixed":
 		return s.scanMixedLibrary(ctx, library, root, files)
 	default:
-		return fmt.Errorf("unsupported library kind %q media type %q", library.Kind, library.MediaType)
+		return fmt.Errorf("unsupported library kind %q", library.Kind)
 	}
 
 	_, err = s.db.ExecContext(ctx, `UPDATE libraries SET last_scan_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP WHERE id = ?`, library.ID)
 	return err
+}
+
+// CountAudioFiles walks a library root and counts the audio files the
+// scanner will eventually visit. Used by the libraries service to seed
+// scan_jobs.files_total so the dashboard can render real progress
+// ("1200 of 1500") instead of an ever-climbing files_seen counter.
+//
+// Walks the same tree audioFiles() walks, with the same extension filter
+// and dotfile-folder skipping, so the count matches what the scan will
+// actually probe.
+func CountAudioFiles(root string) (int, error) {
+	files, err := audioFiles(root)
+	if err != nil {
+		return 0, err
+	}
+	return len(files), nil
 }
 
 func audioFiles(root string) ([]string, error) {
@@ -181,6 +213,11 @@ func jsonText(value any) string {
 }
 
 func (s *Scanner) upsertLibrary(ctx context.Context, library Library) error {
+	// ON CONFLICT(id) handles same-row reupsert; ON CONFLICT(path) handles the
+	// case where the row exists with a different id (e.g. created via API
+	// then re-synced via env vars, or migrated by 016 from a shelf-prefixed
+	// hash). The path-conflict branch preserves the existing id so data
+	// linked to it stays connected.
 	_, err := s.db.ExecContext(ctx, `
 		INSERT INTO libraries (id, name, kind, media_type, path, updated_at)
 		VALUES (?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
@@ -191,8 +228,21 @@ func (s *Scanner) upsertLibrary(ctx context.Context, library Library) error {
 		  path = excluded.path,
 		  updated_at = CURRENT_TIMESTAMP`,
 		library.ID, library.Name, library.Kind, library.MediaType, library.Path)
-	if err != nil {
+	if err == nil {
+		return nil
+	}
+	if !strings.Contains(strings.ToLower(err.Error()), "unique") {
 		return fmt.Errorf("upsert library %q: %w", library.Path, err)
+	}
+	// Path UNIQUE collision — preserve the existing row's id but update
+	// kind/name to whatever the caller intends.
+	_, err = s.db.ExecContext(ctx, `
+		UPDATE libraries
+		SET name = ?, kind = ?, media_type = ?, updated_at = CURRENT_TIMESTAMP
+		WHERE path = ?`,
+		library.Name, library.Kind, library.MediaType, library.Path)
+	if err != nil {
+		return fmt.Errorf("update library by path %q: %w", library.Path, err)
 	}
 	return nil
 }

@@ -77,3 +77,79 @@ func TestPlaylistUpdateRejectsOtherOwner(t *testing.T) {
 		t.Fatalf("err = %v, want forbidden", err)
 	}
 }
+
+func TestPlaylistImportCSVMatchesLocalTracks(t *testing.T) {
+	ctx := context.Background()
+	db, err := storage.Open(ctx, t.TempDir()+"/samo.db")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	if err := storage.ApplyMigrations(ctx, db, migrations.Files); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.ExecContext(ctx, `
+		INSERT INTO music_tracks (id, title, display_artist, album_title, duration_seconds)
+		VALUES
+		  ('track-1', 'One More Time', 'Daft Punk', 'Discovery', 320),
+		  ('track-2', 'Harder Better Faster Stronger', 'Daft Punk', 'Discovery', 224)`); err != nil {
+		t.Fatal(err)
+	}
+
+	service := New(db)
+	result, err := service.Import(ctx, "user-1", ImportInput{
+		Name:       "Robots",
+		SourceType: "csv",
+		Content:    "title,artist,album,duration\nOne More Time,Daft Punk,Discovery,5:20\nMissing Song,Daft Punk,Discovery,3:00",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Playlist == nil || result.Playlist.TrackCount != 1 {
+		t.Fatalf("playlist = %#v", result.Playlist)
+	}
+	if result.MatchedCount != 1 || result.UnmatchedCount != 1 {
+		t.Fatalf("result = %#v", result)
+	}
+	if result.TrackIDs[0] != "track-1" {
+		t.Fatalf("track ids = %#v", result.TrackIDs)
+	}
+}
+
+func TestPlaylistImportM3UMatchesByPath(t *testing.T) {
+	ctx := context.Background()
+	db, err := storage.Open(ctx, t.TempDir()+"/samo.db")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	if err := storage.ApplyMigrations(ctx, db, migrations.Files); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.ExecContext(ctx, `
+		INSERT INTO libraries (id, name, kind, path)
+		VALUES ('lib-1', 'Music', 'music', '/music');
+		INSERT INTO music_tracks (id, title, display_artist, duration_seconds)
+		VALUES ('track-1', 'Windowlicker', 'Aphex Twin', 364);
+		INSERT INTO media_files (id, library_id, track_id, path, relative_path, file_name, duration_seconds)
+		VALUES ('file-1', 'lib-1', 'track-1', '/music/Aphex Twin/Windowlicker.flac', 'Aphex Twin/Windowlicker.flac', 'Windowlicker.flac', 364);`); err != nil {
+		t.Fatal(err)
+	}
+
+	service := New(db)
+	result, err := service.Import(ctx, "user-1", ImportInput{
+		Name:       "M3U",
+		SourceType: "m3u",
+		Content:    "#EXTM3U\n#EXTINF:364,Aphex Twin - Windowlicker\n/music/Aphex Twin/Windowlicker.flac\n",
+		DryRun:     true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Playlist != nil {
+		t.Fatalf("dry run playlist = %#v", result.Playlist)
+	}
+	if result.MatchedCount != 1 || len(result.TrackIDs) != 1 || result.TrackIDs[0] != "track-1" {
+		t.Fatalf("result = %#v", result)
+	}
+}

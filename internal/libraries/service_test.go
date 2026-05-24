@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/bouliehaan/samo-server/internal/config"
 	"github.com/bouliehaan/samo-server/internal/scanner"
@@ -43,16 +44,15 @@ func TestLibraryCRUDAndScanJob(t *testing.T) {
 		t.Fatal(err)
 	}
 	created, err := service.Create(ctx, CreateLibraryInput{
-		Name:      "Books",
-		Kind:      KindShelf,
-		MediaType: MediaTypeBook,
-		Path:      booksDir,
+		Name: "Books",
+		Kind: KindAudiobook,
+		Path: booksDir,
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if created.Kind != KindShelf {
-		t.Fatalf("kind = %q, want shelf", created.Kind)
+	if created.Kind != KindAudiobook {
+		t.Fatalf("kind = %q, want audiobook", created.Kind)
 	}
 
 	page, err := service.List(ctx, 50, 0)
@@ -67,11 +67,14 @@ func TestLibraryCRUDAndScanJob(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if result.Job.Status != ScanStatusCompleted {
-		t.Fatalf("status = %q, want completed", result.Job.Status)
+	// Scans are async — the call returns a "running" job; wait for the
+	// goroutine to finish so we can verify the final state.
+	final := waitForScanJob(t, ctx, service, result.Job.ID)
+	if final.Status != ScanStatusCompleted {
+		t.Fatalf("status = %q, want completed (error=%q)", final.Status, final.Error)
 	}
-	if result.Job.LibraryID != created.ID {
-		t.Fatalf("library id = %q, want %q", result.Job.LibraryID, created.ID)
+	if final.LibraryID != created.ID {
+		t.Fatalf("library id = %q, want %q", final.LibraryID, created.ID)
 	}
 
 	jobs, err := service.ListScanJobs(ctx, 10, 0)
@@ -80,5 +83,25 @@ func TestLibraryCRUDAndScanJob(t *testing.T) {
 	}
 	if jobs.Total == 0 {
 		t.Fatal("expected scan jobs to be recorded")
+	}
+}
+
+// waitForScanJob polls a scan job until it leaves the running state,
+// matching how the dashboard observes async scans in production.
+func waitForScanJob(t *testing.T, ctx context.Context, service *Service, jobID string) ScanJob {
+	t.Helper()
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		job, err := service.GetScanJob(ctx, jobID)
+		if err != nil {
+			t.Fatalf("get scan job %q: %v", jobID, err)
+		}
+		if job.Status != ScanStatusRunning && job.Status != ScanStatusPending {
+			return job
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("scan job %q stuck in %q after 10s", jobID, job.Status)
+		}
+		time.Sleep(20 * time.Millisecond)
 	}
 }

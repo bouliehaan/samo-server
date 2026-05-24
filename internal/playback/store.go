@@ -12,12 +12,13 @@ import (
 )
 
 var targetTables = map[TargetKind]string{
-	TargetMusicArtist:   "music_artists",
-	TargetMusicAlbum:    "music_albums",
-	TargetMusicTrack:    "music_tracks",
-	TargetMusicPlaylist: "music_playlists",
-	TargetShelfItem:     "shelf_items",
-	TargetShelfEpisode:  "podcast_episodes",
+	TargetMusicArtist:    "music_artists",
+	TargetMusicAlbum:     "music_albums",
+	TargetMusicTrack:     "music_tracks",
+	TargetMusicPlaylist:  "music_playlists",
+	TargetAudiobook:      "audiobooks",
+	TargetPodcast:        "podcasts",
+	TargetPodcastEpisode: "podcast_episodes",
 }
 
 func tableFor(kind TargetKind) (string, error) {

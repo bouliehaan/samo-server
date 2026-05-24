@@ -34,12 +34,12 @@ func withQuery(baseURL string, values url.Values) string {
 	return baseURL + "?" + values.Encode()
 }
 
-func contributors(names []string, role string) []catalog.Contributor {
-	items := make([]catalog.Contributor, 0, len(names))
+func contributors(names []string, role string) []catalog.ContributorRef {
+	items := make([]catalog.ContributorRef, 0, len(names))
 	for _, name := range names {
 		name = strings.TrimSpace(name)
 		if name != "" {
-			items = append(items, catalog.Contributor{Name: name, Role: role})
+			items = append(items, catalog.ContributorRef{Name: name, Role: role})
 		}
 	}
 	return items

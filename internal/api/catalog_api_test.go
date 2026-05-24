@@ -77,35 +77,28 @@ func TestMusicHandlersExposeRichTrackMetadata(t *testing.T) {
 	}
 }
 
-func TestShelfHandlersExposeRichAudiobookMetadata(t *testing.T) {
+func TestAudiobookHandlersExposeRichAudiobookMetadata(t *testing.T) {
 	handler := catalogTestServer(t, catalog.Seed{
-		ShelfLibraries: []catalog.ShelfLibrary{{
-			ID:        "library-1",
-			Name:      "Audiobooks",
-			MediaType: catalog.ShelfMediaTypeBook,
-			ItemCount: 1,
+		Contributors: []catalog.Contributor{{
+			ID:             "author-1",
+			Name:           "Ada Archive",
+			AudiobookCount: 1,
 		}},
-		ShelfAuthors: []catalog.ShelfAuthor{{
-			ID:        "author-1",
-			Name:      "Ada Archive",
-			ItemCount: 1,
+		Series: []catalog.Series{{
+			ID:             "series-1",
+			Name:           "Signals",
+			AudiobookIDs:   []string{"book-1"},
+			AudiobookCount: 1,
 		}},
-		ShelfSeries: []catalog.ShelfSeries{{
-			ID:        "series-1",
-			Name:      "Signals",
-			ItemIDs:   []string{"book-1"},
-			ItemCount: 1,
-		}},
-		ShelfItems: []catalog.ShelfItem{{
+		Audiobooks: []catalog.AudiobookItem{{
 			ID:              "book-1",
 			LibraryID:       "library-1",
-			MediaType:       catalog.ShelfMediaTypeBook,
 			Path:            "/audiobooks/Ada Archive/Signal Manual",
 			DurationSeconds: 7200,
 			Book: &catalog.BookMetadata{
 				Title:           "Signal Manual",
-				Authors:         []catalog.Contributor{{ID: "author-1", Name: "Ada Archive", Role: "author"}},
-				Narrators:       []catalog.Contributor{{Name: "Nora Noise", Role: "narrator"}},
+				Authors:         []catalog.ContributorRef{{ID: "author-1", Name: "Ada Archive", Role: "author"}},
+				Narrators:       []catalog.ContributorRef{{Name: "Nora Noise", Role: "narrator"}},
 				Series:          []catalog.SeriesRef{{ID: "series-1", Name: "Signals", Sequence: 1}},
 				Publisher:       "Samo Press",
 				PublishedYear:   "2026",
@@ -125,14 +118,14 @@ func TestShelfHandlersExposeRichAudiobookMetadata(t *testing.T) {
 		}},
 	})
 
-	req := httptest.NewRequest(http.MethodGet, "/api/v1/shelf/items/book-1", nil)
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/audiobooks/book-1", nil)
 	rec := httptest.NewRecorder()
 	handler.ServeHTTP(rec, req)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, want %d", rec.Code, http.StatusOK)
 	}
 
-	var item catalog.ShelfItem
+	var item catalog.AudiobookItem
 	if err := json.NewDecoder(rec.Body).Decode(&item); err != nil {
 		t.Fatal(err)
 	}

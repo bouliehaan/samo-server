@@ -31,19 +31,19 @@ func LoadSeedFromDB(ctx context.Context, db *sql.DB) (Seed, error) {
 	if err != nil {
 		return Seed{}, err
 	}
-	libraries, err := loadShelfLibraries(ctx, db)
+	audiobooks, err := loadAudiobooks(ctx, db)
 	if err != nil {
 		return Seed{}, err
 	}
-	items, err := loadShelfItems(ctx, db)
+	podcasts, err := loadPodcasts(ctx, db)
 	if err != nil {
 		return Seed{}, err
 	}
-	authors, err := loadShelfAuthors(ctx, db)
+	contributors, err := loadContributors(ctx, db)
 	if err != nil {
 		return Seed{}, err
 	}
-	series, err := loadShelfSeries(ctx, db)
+	series, err := loadSeries(ctx, db)
 	if err != nil {
 		return Seed{}, err
 	}
@@ -58,10 +58,10 @@ func LoadSeedFromDB(ctx context.Context, db *sql.DB) (Seed, error) {
 		MusicTracks:     tracks,
 		MusicPlaylists:  playlists,
 		Genres:          genres,
-		ShelfLibraries:  libraries,
-		ShelfItems:      items,
-		ShelfAuthors:    authors,
-		ShelfSeries:     series,
+		Audiobooks:      audiobooks,
+		Podcasts:        podcasts,
+		Contributors:    contributors,
+		Series:          series,
 		PodcastEpisodes: episodes,
 	}
 
@@ -268,58 +268,37 @@ func loadGenres(ctx context.Context, db *sql.DB) ([]GenreSummary, error) {
 	return items, rows.Err()
 }
 
-func loadShelfLibraries(ctx context.Context, db *sql.DB) ([]ShelfLibrary, error) {
-	rows, err := db.QueryContext(ctx, `SELECT id, name, media_type, path, description, item_count, created_at, updated_at FROM libraries WHERE kind = 'shelf'`)
-	if err != nil {
-		return nil, fmt.Errorf("load shelf libraries: %w", err)
-	}
-	defer rows.Close()
-
-	var items []ShelfLibrary
-	for rows.Next() {
-		var item ShelfLibrary
-		var createdAt, updatedAt sql.NullString
-		if err := rows.Scan(&item.ID, &item.Name, &item.MediaType, &item.Path, &item.Description, &item.ItemCount, &createdAt, &updatedAt); err != nil {
-			return nil, fmt.Errorf("scan shelf library: %w", err)
-		}
-		item.CreatedAt = parseTimePtr(createdAt)
-		item.UpdatedAt = parseTimePtr(updatedAt)
-		items = append(items, item)
-	}
-	return items, rows.Err()
-}
-
-func loadShelfItems(ctx context.Context, db *sql.DB) ([]ShelfItem, error) {
-	files, err := loadAudioFiles(ctx, db, "item_id")
+func loadAudiobooks(ctx context.Context, db *sql.DB) ([]AudiobookItem, error) {
+	files, err := loadAudioFiles(ctx, db, "audiobook_id")
 	if err != nil {
 		return nil, err
 	}
-	chapters, err := loadChapters(ctx, db, false)
+	chapters, err := loadAudiobookChapters(ctx, db)
 	if err != nil {
 		return nil, err
 	}
 
 	rows, err := db.QueryContext(ctx, `
-		SELECT id, library_id, media_type, media_kind, path, folder_id, inode, size_bytes, missing, invalid,
-		       cover_json, tags_json, genres_json, duration_seconds, progress_json, book_json, podcast_json,
+		SELECT id, library_id, path, folder_id, inode, size_bytes, missing, invalid,
+		       cover_json, tags_json, genres_json, duration_seconds, progress_json, book_json,
 		       added_at, updated_at, last_scan_at
-		FROM shelf_items`)
+		FROM audiobooks`)
 	if err != nil {
-		return nil, fmt.Errorf("load shelf items: %w", err)
+		return nil, fmt.Errorf("load audiobooks: %w", err)
 	}
 	defer rows.Close()
 
-	var items []ShelfItem
+	var items []AudiobookItem
 	for rows.Next() {
-		var item ShelfItem
+		var item AudiobookItem
 		var missing, invalid int
 		var coverJSON, tagsJSON, genresJSON, progressJSON string
-		var bookJSON, podcastJSON sql.NullString
+		var bookJSON sql.NullString
 		var addedAt, updatedAt, lastScanAt sql.NullString
-		if err := rows.Scan(&item.ID, &item.LibraryID, &item.MediaType, &item.MediaKind, &item.Path, &item.FolderID,
+		if err := rows.Scan(&item.ID, &item.LibraryID, &item.Path, &item.FolderID,
 			&item.Inode, &item.SizeBytes, &missing, &invalid, &coverJSON, &tagsJSON, &genresJSON,
-			&item.DurationSeconds, &progressJSON, &bookJSON, &podcastJSON, &addedAt, &updatedAt, &lastScanAt); err != nil {
-			return nil, fmt.Errorf("scan shelf item: %w", err)
+			&item.DurationSeconds, &progressJSON, &bookJSON, &addedAt, &updatedAt, &lastScanAt); err != nil {
+			return nil, fmt.Errorf("scan audiobook: %w", err)
 		}
 		item.Missing = missing != 0
 		item.Invalid = invalid != 0
@@ -336,11 +315,6 @@ func loadShelfItems(ctx context.Context, db *sql.DB) ([]ShelfItem, error) {
 			decodeJSON(bookJSON.String, &book)
 			item.Book = &book
 		}
-		if podcastJSON.Valid && podcastJSON.String != "" {
-			var podcast PodcastMetadata
-			decodeJSON(podcastJSON.String, &podcast)
-			item.Podcast = &podcast
-		}
 		item.AudioFiles = files[item.ID]
 		item.Chapters = chapters[item.ID]
 		item.AddedAt = parseTimePtr(addedAt)
@@ -351,19 +325,71 @@ func loadShelfItems(ctx context.Context, db *sql.DB) ([]ShelfItem, error) {
 	return items, rows.Err()
 }
 
-func loadShelfAuthors(ctx context.Context, db *sql.DB) ([]ShelfAuthor, error) {
-	rows, err := db.QueryContext(ctx, `SELECT id, name, sort_name, description, images_json, external_ids_json, item_count, series_count, duration_seconds FROM shelf_authors`)
+func loadPodcasts(ctx context.Context, db *sql.DB) ([]PodcastItem, error) {
+	files, err := loadAudioFiles(ctx, db, "podcast_id")
 	if err != nil {
-		return nil, fmt.Errorf("load shelf authors: %w", err)
+		return nil, err
+	}
+
+	rows, err := db.QueryContext(ctx, `
+		SELECT id, library_id, path, folder_id, inode, size_bytes, missing, invalid,
+		       cover_json, tags_json, genres_json, duration_seconds, progress_json, podcast_json,
+		       added_at, updated_at, last_scan_at
+		FROM podcasts`)
+	if err != nil {
+		return nil, fmt.Errorf("load podcasts: %w", err)
 	}
 	defer rows.Close()
 
-	var items []ShelfAuthor
+	var items []PodcastItem
 	for rows.Next() {
-		var item ShelfAuthor
+		var item PodcastItem
+		var missing, invalid int
+		var coverJSON, tagsJSON, genresJSON, progressJSON string
+		var podcastJSON sql.NullString
+		var addedAt, updatedAt, lastScanAt sql.NullString
+		if err := rows.Scan(&item.ID, &item.LibraryID, &item.Path, &item.FolderID,
+			&item.Inode, &item.SizeBytes, &missing, &invalid, &coverJSON, &tagsJSON, &genresJSON,
+			&item.DurationSeconds, &progressJSON, &podcastJSON, &addedAt, &updatedAt, &lastScanAt); err != nil {
+			return nil, fmt.Errorf("scan podcast: %w", err)
+		}
+		item.Missing = missing != 0
+		item.Invalid = invalid != 0
+		var cover Image
+		decodeJSON(coverJSON, &cover)
+		if cover.ID != "" || cover.URL != "" || cover.Path != "" {
+			item.Cover = &cover
+		}
+		decodeJSON(tagsJSON, &item.Tags)
+		decodeJSON(genresJSON, &item.Genres)
+		decodeJSON(progressJSON, &item.Progress)
+		if podcastJSON.Valid && podcastJSON.String != "" {
+			var podcast PodcastMetadata
+			decodeJSON(podcastJSON.String, &podcast)
+			item.Podcast = &podcast
+		}
+		item.AudioFiles = files[item.ID]
+		item.AddedAt = parseTimePtr(addedAt)
+		item.UpdatedAt = parseTimePtr(updatedAt)
+		item.LastScanAt = parseTimePtr(lastScanAt)
+		items = append(items, item)
+	}
+	return items, rows.Err()
+}
+
+func loadContributors(ctx context.Context, db *sql.DB) ([]Contributor, error) {
+	rows, err := db.QueryContext(ctx, `SELECT id, name, sort_name, description, images_json, external_ids_json, item_count, series_count, duration_seconds FROM contributors`)
+	if err != nil {
+		return nil, fmt.Errorf("load contributors: %w", err)
+	}
+	defer rows.Close()
+
+	var items []Contributor
+	for rows.Next() {
+		var item Contributor
 		var imagesJSON, externalJSON string
-		if err := rows.Scan(&item.ID, &item.Name, &item.SortName, &item.Description, &imagesJSON, &externalJSON, &item.ItemCount, &item.SeriesCount, &item.DurationSeconds); err != nil {
-			return nil, fmt.Errorf("scan shelf author: %w", err)
+		if err := rows.Scan(&item.ID, &item.Name, &item.SortName, &item.Description, &imagesJSON, &externalJSON, &item.AudiobookCount, &item.SeriesCount, &item.DurationSeconds); err != nil {
+			return nil, fmt.Errorf("scan contributor: %w", err)
 		}
 		decodeJSON(imagesJSON, &item.Images)
 		decodeJSON(externalJSON, &item.ExternalIDs)
@@ -372,22 +398,22 @@ func loadShelfAuthors(ctx context.Context, db *sql.DB) ([]ShelfAuthor, error) {
 	return items, rows.Err()
 }
 
-func loadShelfSeries(ctx context.Context, db *sql.DB) ([]ShelfSeries, error) {
-	rows, err := db.QueryContext(ctx, `SELECT id, name, description, authors_json, item_ids_json, item_count, duration_seconds, external_ids_json FROM shelf_series`)
+func loadSeries(ctx context.Context, db *sql.DB) ([]Series, error) {
+	rows, err := db.QueryContext(ctx, `SELECT id, name, description, authors_json, item_ids_json, item_count, duration_seconds, external_ids_json FROM series`)
 	if err != nil {
-		return nil, fmt.Errorf("load shelf series: %w", err)
+		return nil, fmt.Errorf("load series: %w", err)
 	}
 	defer rows.Close()
 
-	var items []ShelfSeries
+	var items []Series
 	for rows.Next() {
-		var item ShelfSeries
-		var authorsJSON, itemIDsJSON, externalJSON string
-		if err := rows.Scan(&item.ID, &item.Name, &item.Description, &authorsJSON, &itemIDsJSON, &item.ItemCount, &item.DurationSeconds, &externalJSON); err != nil {
-			return nil, fmt.Errorf("scan shelf series: %w", err)
+		var item Series
+		var authorsJSON, audiobookIDsJSON, externalJSON string
+		if err := rows.Scan(&item.ID, &item.Name, &item.Description, &authorsJSON, &audiobookIDsJSON, &item.AudiobookCount, &item.DurationSeconds, &externalJSON); err != nil {
+			return nil, fmt.Errorf("scan series: %w", err)
 		}
 		decodeJSON(authorsJSON, &item.Authors)
-		decodeJSON(itemIDsJSON, &item.ItemIDs)
+		decodeJSON(audiobookIDsJSON, &item.AudiobookIDs)
 		decodeJSON(externalJSON, &item.ExternalIDs)
 		items = append(items, item)
 	}
@@ -399,7 +425,7 @@ func loadPodcastEpisodes(ctx context.Context, db *sql.DB) ([]PodcastEpisode, err
 	if err != nil {
 		return nil, err
 	}
-	chapters, err := loadChapters(ctx, db, true)
+	chapters, err := loadEpisodeChapters(ctx, db)
 	if err != nil {
 		return nil, err
 	}
@@ -530,24 +556,33 @@ func loadAudioFiles(ctx context.Context, db *sql.DB, ownerColumn string) (map[st
 	return files, rows.Err()
 }
 
-func loadChapters(ctx context.Context, db *sql.DB, episode bool) (map[string][]AudioChapter, error) {
-	ownerColumn := "item_id"
-	where := "episode_id IS NULL"
-	if episode {
-		ownerColumn = "episode_id"
-		where = "episode_id IS NOT NULL"
-	}
-
-	rows, err := db.QueryContext(ctx, fmt.Sprintf(`
-		SELECT %s, id, chapter_index, title, start_seconds, end_seconds
-		FROM shelf_chapters
-		WHERE %s
-		ORDER BY chapter_index`, ownerColumn, where))
+func loadAudiobookChapters(ctx context.Context, db *sql.DB) (map[string][]AudioChapter, error) {
+	rows, err := db.QueryContext(ctx, `
+		SELECT audiobook_id, id, chapter_index, title, start_seconds, end_seconds
+		FROM audiobook_chapters
+		ORDER BY chapter_index`)
 	if err != nil {
-		return nil, fmt.Errorf("load chapters: %w", err)
+		return nil, fmt.Errorf("load audiobook chapters: %w", err)
 	}
 	defer rows.Close()
 
+	return scanChapterRows(rows)
+}
+
+func loadEpisodeChapters(ctx context.Context, db *sql.DB) (map[string][]AudioChapter, error) {
+	rows, err := db.QueryContext(ctx, `
+		SELECT episode_id, id, chapter_index, title, start_seconds, end_seconds
+		FROM episode_chapters
+		ORDER BY chapter_index`)
+	if err != nil {
+		return nil, fmt.Errorf("load episode chapters: %w", err)
+	}
+	defer rows.Close()
+
+	return scanChapterRows(rows)
+}
+
+func scanChapterRows(rows *sql.Rows) (map[string][]AudioChapter, error) {
 	chapters := map[string][]AudioChapter{}
 	for rows.Next() {
 		var ownerID string

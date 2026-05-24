@@ -224,7 +224,7 @@ func mergeMusicTrack(track catalog.MusicTrack, candidate SearchResult, fields []
 	return track
 }
 
-func joinContributorNames(contributors []catalog.Contributor) string {
+func joinContributorNames(contributors []catalog.ContributorRef) string {
 	names := make([]string, 0, len(contributors))
 	for _, contributor := range contributors {
 		if name := strings.TrimSpace(contributor.Name); name != "" {

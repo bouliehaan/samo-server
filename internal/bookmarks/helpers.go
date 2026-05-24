@@ -1,4 +1,4 @@
-package shelfuser
+package bookmarks
 
 import (
 	"context"
@@ -9,8 +9,6 @@ import (
 	"fmt"
 	"strings"
 	"time"
-
-	"github.com/bouliehaan/samo-server/internal/catalog"
 )
 
 func stableID(prefix string, parts ...string) string {
@@ -44,6 +42,10 @@ func boolInt(value bool) int {
 	return 0
 }
 
+// jsonText is unused by bookmarks today but kept to match the helpers
+// surface used by tests that import the package.
+var _ = jsonText
+
 func jsonText(value any) string {
 	raw, err := json.Marshal(value)
 	if err != nil {
@@ -52,17 +54,18 @@ func jsonText(value any) string {
 	return string(raw)
 }
 
-func assertAudiobookItem(ctx context.Context, db *sql.DB, itemID string) error {
-	var mediaType string
-	err := db.QueryRowContext(ctx, `SELECT media_type FROM shelf_items WHERE id = ?`, itemID).Scan(&mediaType)
+// assertAudiobookExists is the bookmarks-package equivalent of the old
+// assertAudiobookItem(media_type=book) check. Since the `audiobooks`
+// table is by definition audiobook-only, the existence check is the
+// only assertion we need.
+func assertAudiobookExists(ctx context.Context, db *sql.DB, audiobookID string) error {
+	var exists int
+	err := db.QueryRowContext(ctx, `SELECT 1 FROM audiobooks WHERE id = ?`, audiobookID).Scan(&exists)
 	if err == sql.ErrNoRows {
-		return ErrNotFound
+		return ErrNotAudiobook
 	}
 	if err != nil {
-		return fmt.Errorf("load shelf item: %w", err)
-	}
-	if catalog.ShelfMediaType(mediaType) != catalog.ShelfMediaTypeBook {
-		return ErrNotAudiobook
+		return fmt.Errorf("verify audiobook: %w", err)
 	}
 	return nil
 }

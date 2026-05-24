@@ -10,6 +10,7 @@ import (
 	"log"
 	"net/http"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/bouliehaan/samo-server/internal/catalog"
@@ -25,9 +26,11 @@ const (
 )
 
 type Service struct {
-	db     *sql.DB
-	client *Client
-	logger func(format string, args ...any)
+	db         *sql.DB
+	httpClient *http.Client
+	mu         sync.RWMutex
+	client     *Client
+	logger     func(format string, args ...any)
 }
 
 type ServiceOptions struct {
@@ -44,14 +47,135 @@ func NewService(options ServiceOptions) *Service {
 		logger = log.Printf
 	}
 	return &Service{
-		db:     options.DB,
-		client: NewClient(options.APIKey, options.SharedSecret, options.HTTPClient),
-		logger: logger,
+		db:         options.DB,
+		httpClient: options.HTTPClient,
+		client:     NewClient(options.APIKey, options.SharedSecret, options.HTTPClient),
+		logger:     logger,
 	}
 }
 
 func (s *Service) Enabled() bool {
-	return s != nil && s.client != nil && s.client.Enabled() && s.db != nil
+	_, ok := s.activeClient()
+	return ok
+}
+
+func (s *Service) Configure(apiKey, sharedSecret string) {
+	if s == nil {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.client = NewClient(apiKey, sharedSecret, s.httpClient)
+}
+
+func (s *Service) LoadConfig(ctx context.Context) error {
+	if s == nil || s.db == nil {
+		return nil
+	}
+	record, ok, err := loadAppConfig(ctx, s.db)
+	if err != nil {
+		return err
+	}
+	if !ok {
+		return nil
+	}
+	if !record.Enabled {
+		s.Configure("", "")
+		return nil
+	}
+	s.Configure(record.APIKey, record.SharedSecret)
+	return nil
+}
+
+func (s *Service) Config(ctx context.Context) (AppConfig, error) {
+	if s == nil || s.db == nil {
+		return AppConfig{}, ErrDisabled
+	}
+	if record, ok, err := loadAppConfig(ctx, s.db); err != nil {
+		return AppConfig{}, err
+	} else if ok {
+		updatedAt := record.UpdatedAt
+		return AppConfig{
+			Enabled:         record.Enabled && strings.TrimSpace(record.APIKey) != "" && strings.TrimSpace(record.SharedSecret) != "",
+			APIKey:          record.APIKey,
+			HasSharedSecret: strings.TrimSpace(record.SharedSecret) != "",
+			Source:          "ui",
+			UpdatedAt:       &updatedAt,
+		}, nil
+	}
+	apiKey, sharedSecret := s.currentCredentials()
+	return AppConfig{
+		Enabled:         strings.TrimSpace(apiKey) != "" && strings.TrimSpace(sharedSecret) != "",
+		APIKey:          apiKey,
+		HasSharedSecret: strings.TrimSpace(sharedSecret) != "",
+		Source:          "environment",
+	}, nil
+}
+
+func (s *Service) SaveConfig(ctx context.Context, input AppConfigInput) (AppConfig, error) {
+	if s == nil || s.db == nil {
+		return AppConfig{}, ErrDisabled
+	}
+	apiKey := strings.TrimSpace(input.APIKey)
+	sharedSecret := strings.TrimSpace(input.SharedSecret)
+	if record, ok, err := loadAppConfig(ctx, s.db); err != nil {
+		return AppConfig{}, err
+	} else if ok {
+		if apiKey == "" {
+			apiKey = record.APIKey
+		}
+		if sharedSecret == "" {
+			sharedSecret = record.SharedSecret
+		}
+	}
+	currentAPIKey, currentSharedSecret := s.currentCredentials()
+	if apiKey == "" {
+		apiKey = currentAPIKey
+	}
+	if sharedSecret == "" {
+		sharedSecret = currentSharedSecret
+	}
+	if apiKey == "" || sharedSecret == "" {
+		return AppConfig{}, ErrInvalidConfig
+	}
+	if _, err := saveAppConfig(ctx, s.db, true, apiKey, sharedSecret); err != nil {
+		return AppConfig{}, err
+	}
+	s.Configure(apiKey, sharedSecret)
+	return s.Config(ctx)
+}
+
+func (s *Service) ClearConfig(ctx context.Context) (AppConfig, error) {
+	if s == nil || s.db == nil {
+		return AppConfig{}, ErrDisabled
+	}
+	if _, err := saveAppConfig(ctx, s.db, false, "", ""); err != nil {
+		return AppConfig{}, err
+	}
+	s.Configure("", "")
+	return s.Config(ctx)
+}
+
+func (s *Service) activeClient() (*Client, bool) {
+	if s == nil || s.db == nil {
+		return nil, false
+	}
+	s.mu.RLock()
+	client := s.client
+	s.mu.RUnlock()
+	return client, client != nil && client.Enabled()
+}
+
+func (s *Service) currentCredentials() (apiKey, sharedSecret string) {
+	if s == nil {
+		return "", ""
+	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	if s.client == nil {
+		return "", ""
+	}
+	return s.client.apiKey, s.client.sharedSecret
 }
 
 func (s *Service) Status(ctx context.Context, userID string) (Status, error) {
@@ -74,24 +198,26 @@ func (s *Service) Status(ctx context.Context, userID string) (Status, error) {
 }
 
 func (s *Service) BeginAuth(ctx context.Context) (AuthBeginResponse, error) {
-	if !s.Enabled() {
+	client, ok := s.activeClient()
+	if !ok {
 		return AuthBeginResponse{}, ErrDisabled
 	}
-	token, err := s.client.GetToken(ctx)
+	token, err := client.GetToken(ctx)
 	if err != nil {
 		return AuthBeginResponse{}, err
 	}
 	return AuthBeginResponse{
-		AuthURL: s.client.AuthURL(token),
+		AuthURL: client.AuthURL(token),
 		Token:   token,
 	}, nil
 }
 
 func (s *Service) CompleteAuth(ctx context.Context, userID, token string) (AuthCompleteResponse, error) {
-	if !s.Enabled() {
+	client, ok := s.activeClient()
+	if !ok {
 		return AuthCompleteResponse{}, ErrDisabled
 	}
-	username, sessionKey, err := s.client.GetSession(ctx, token)
+	username, sessionKey, err := client.GetSession(ctx, token)
 	if err != nil {
 		return AuthCompleteResponse{}, err
 	}
@@ -208,6 +334,10 @@ func (s *Service) HandleScrobbleEvent(ctx context.Context, userID string, track 
 }
 
 func (s *Service) SubmitManualScrobble(ctx context.Context, userID string, track catalog.MusicTrack, playedAt time.Time, playedSeconds int) error {
+	return s.SubmitScrobble(ctx, userID, track, playedAt, playedSeconds, "manual")
+}
+
+func (s *Service) SubmitScrobble(ctx context.Context, userID string, track catalog.MusicTrack, playedAt time.Time, playedSeconds int, source string) error {
 	if !s.Enabled() {
 		return ErrDisabled
 	}
@@ -220,15 +350,11 @@ func (s *Service) SubmitManualScrobble(ctx context.Context, userID string, track
 	}
 	submission.Timestamp = playedAt.UTC()
 	submission.PlayedSeconds = playedSeconds
-	_, err = s.submitScrobble(ctx, userID, submission, "manual")
+	_, err = s.submitScrobble(ctx, userID, submission, normalizeSubmissionSource(source, "manual"))
 	return err
 }
 
-func (s *Service) SubmitSubsonicScrobble(ctx context.Context, userID string, track catalog.MusicTrack, playedAt time.Time) error {
-	return s.SubmitManualScrobble(ctx, userID, track, playedAt, 0)
-}
-
-func (s *Service) SubmitSubsonicNowPlaying(ctx context.Context, userID string, track catalog.MusicTrack) error {
+func (s *Service) SubmitNowPlaying(ctx context.Context, userID string, track catalog.MusicTrack, source string) error {
 	if !s.Enabled() {
 		return ErrDisabled
 	}
@@ -240,8 +366,16 @@ func (s *Service) SubmitSubsonicNowPlaying(ctx context.Context, userID string, t
 		return err
 	}
 	submission.Timestamp = time.Now().UTC()
-	_, err = s.submitNowPlaying(ctx, userID, submission, "subsonic")
+	_, err = s.submitNowPlaying(ctx, userID, submission, normalizeSubmissionSource(source, "external"))
 	return err
+}
+
+func normalizeSubmissionSource(source, fallback string) string {
+	source = strings.TrimSpace(source)
+	if source == "" {
+		return fallback
+	}
+	return source
 }
 
 func (s *Service) ProcessPlayback(ctx context.Context, input PlaybackInput) {
@@ -416,26 +550,34 @@ func (s *Service) FlushQueue(ctx context.Context, userID string, limit int) (int
 }
 
 func (s *Service) dispatchQueued(ctx context.Context, sessionKey, kind string, submission TrackSubmission) error {
+	client, ok := s.activeClient()
+	if !ok {
+		return ErrDisabled
+	}
 	switch kind {
 	case queueKindNowPlaying:
-		return s.client.UpdateNowPlaying(ctx, sessionKey, submission)
+		return client.UpdateNowPlaying(ctx, sessionKey, submission)
 	case queueKindScrobble:
-		return s.client.Scrobble(ctx, sessionKey, submission)
+		return client.Scrobble(ctx, sessionKey, submission)
 	case queueKindLove:
-		return s.client.LoveTrack(ctx, sessionKey, submission)
+		return client.LoveTrack(ctx, sessionKey, submission)
 	case queueKindUnlove:
-		return s.client.UnloveTrack(ctx, sessionKey, submission)
+		return client.UnloveTrack(ctx, sessionKey, submission)
 	default:
 		return fmt.Errorf("unknown queue kind %q", kind)
 	}
 }
 
 func (s *Service) submitNowPlaying(ctx context.Context, userID string, submission TrackSubmission, source string) (bool, error) {
+	client, ok := s.activeClient()
+	if !ok {
+		return false, ErrDisabled
+	}
 	session, err := loadSession(ctx, s.db, userID)
 	if err != nil {
 		return false, err
 	}
-	if err := s.client.UpdateNowPlaying(ctx, session.SessionKey, submission); err != nil {
+	if err := client.UpdateNowPlaying(ctx, session.SessionKey, submission); err != nil {
 		if s.invalidateSessionOnAuthError(ctx, userID, err) {
 			return false, err
 		}
@@ -451,11 +593,15 @@ func (s *Service) submitNowPlaying(ctx context.Context, userID string, submissio
 }
 
 func (s *Service) submitScrobble(ctx context.Context, userID string, submission TrackSubmission, source string) (bool, error) {
+	client, ok := s.activeClient()
+	if !ok {
+		return false, ErrDisabled
+	}
 	session, err := loadSession(ctx, s.db, userID)
 	if err != nil {
 		return false, err
 	}
-	if err := s.client.Scrobble(ctx, session.SessionKey, submission); err != nil {
+	if err := client.Scrobble(ctx, session.SessionKey, submission); err != nil {
 		if s.invalidateSessionOnAuthError(ctx, userID, err) {
 			return false, err
 		}
@@ -471,6 +617,10 @@ func (s *Service) submitScrobble(ctx context.Context, userID string, submission 
 }
 
 func (s *Service) submitLove(ctx context.Context, userID string, submission TrackSubmission, loved bool) error {
+	client, ok := s.activeClient()
+	if !ok {
+		return ErrDisabled
+	}
 	session, err := loadSession(ctx, s.db, userID)
 	if err != nil {
 		return err
@@ -478,10 +628,10 @@ func (s *Service) submitLove(ctx context.Context, userID string, submission Trac
 	kind := queueKindLove
 	var submitErr error
 	if loved {
-		submitErr = s.client.LoveTrack(ctx, session.SessionKey, submission)
+		submitErr = client.LoveTrack(ctx, session.SessionKey, submission)
 	} else {
 		kind = queueKindUnlove
-		submitErr = s.client.UnloveTrack(ctx, session.SessionKey, submission)
+		submitErr = client.UnloveTrack(ctx, session.SessionKey, submission)
 	}
 	if submitErr != nil {
 		if s.invalidateSessionOnAuthError(ctx, userID, submitErr) {

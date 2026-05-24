@@ -16,7 +16,7 @@ import (
 	"github.com/bouliehaan/samo-server/migrations"
 )
 
-func TestCreatePodcastFeedRefreshesShelfCatalog(t *testing.T) {
+func TestCreatePodcastFeedRefreshesCatalog(t *testing.T) {
 	ctx := context.Background()
 	db, err := storage.Open(ctx, t.TempDir()+"/samo.db")
 	if err != nil {
@@ -45,20 +45,20 @@ func TestCreatePodcastFeedRefreshesShelfCatalog(t *testing.T) {
 	catalogService := catalog.NewService(catalog.Seed{})
 	handler := sourcesTestServer(t, db, catalogService)
 	body := strings.NewReader(`{"url":"` + feedServer.URL + `/feed.xml"}`)
-	req := httptest.NewRequest(http.MethodPost, "/api/v1/shelf/podcast-feeds", body)
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/podcasts/feeds", body)
 	rec := httptest.NewRecorder()
 	handler.ServeHTTP(rec, req)
 	if rec.Code != http.StatusCreated {
 		t.Fatalf("status = %d, want %d, body = %s", rec.Code, http.StatusCreated, rec.Body.String())
 	}
 
-	req = httptest.NewRequest(http.MethodGet, "/api/v1/shelf/podcasts", nil)
+	req = httptest.NewRequest(http.MethodGet, "/api/v1/podcasts", nil)
 	rec = httptest.NewRecorder()
 	handler.ServeHTTP(rec, req)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, want %d", rec.Code, http.StatusOK)
 	}
-	var page catalog.Page[catalog.ShelfItem]
+	var page catalog.Page[catalog.PodcastItem]
 	if err := json.NewDecoder(rec.Body).Decode(&page); err != nil {
 		t.Fatal(err)
 	}
@@ -107,6 +107,55 @@ func TestInternetRadioStationHandlersExposePublicLinks(t *testing.T) {
 	}
 	if body := rec.Body.String(); !strings.Contains(body, "https://radio.example.com/live.mp3") {
 		t.Fatalf("playlist = %q, want stream URL", body)
+	}
+}
+
+func TestInternetRadioStreamResolvesPlaylistURL(t *testing.T) {
+	ctx := context.Background()
+	db, err := storage.Open(ctx, t.TempDir()+"/samo.db")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	if err := storage.ApplyMigrations(ctx, db, migrations.Files); err != nil {
+		t.Fatal(err)
+	}
+
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/station.pls":
+			_, _ = w.Write([]byte("[playlist]\nFile1=/live.mp3\n"))
+		case "/live.mp3":
+			w.Header().Set("Content-Type", "audio/mpeg")
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer upstream.Close()
+
+	handler := sourcesTestServer(t, db, catalog.NewService(catalog.Seed{}))
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/internet-radio/stations", strings.NewReader(`{
+		"name": "Playlist FM",
+		"streamUrl": "`+upstream.URL+`/station.pls"
+	}`))
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("status = %d, want %d, body = %s", rec.Code, http.StatusCreated, rec.Body.String())
+	}
+	var station internetRadioStationResponse
+	if err := json.NewDecoder(rec.Body).Decode(&station); err != nil {
+		t.Fatal(err)
+	}
+
+	req = httptest.NewRequest(http.MethodGet, "/internet-radio/"+station.ID+"/stream", nil)
+	rec = httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusTemporaryRedirect {
+		t.Fatalf("status = %d, want redirect", rec.Code)
+	}
+	if location := rec.Header().Get("Location"); location != upstream.URL+"/live.mp3" {
+		t.Fatalf("location = %q, want resolved stream", location)
 	}
 }
 

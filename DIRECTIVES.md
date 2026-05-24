@@ -10,6 +10,19 @@ Build durable server foundations, not demos.
 
 Do not optimize for making a route appear to work if the implementation weakens the long-term server. Samo clients will rely on this server for bit-perfect music playback, audiobook progress, podcast ingestion, metadata, search, history, and eventually radio programming. Treat server contracts as product contracts.
 
+## Domain Model (mandatory vocabulary)
+
+Samo has four product domains. They are independent and stay independent.
+
+- **Music** — artists, albums, tracks, playlists. Tables: `music_artists`, `music_albums`, `music_tracks`, `music_playlists`. URL prefix: `/api/v1/music`. Apply target kinds: `music-artist`, `music-album`, `music-track`.
+- **Audiobooks** — audiobooks, contributors (authors/narrators), series, chapters, bookmarks, collections, listening sessions. Tables: `audiobooks`, `contributors`, `series`, `audiobook_*` join tables, `bookmarks`, `collections`, `listening_sessions`. URL prefix: `/api/v1/audiobooks`, `/api/v1/contributors`, `/api/v1/series`, `/api/v1/bookmarks`, `/api/v1/collections`. Apply target kind: `audiobook`.
+- **Podcasts** — shows and episodes. Tables: `podcasts`, `podcast_episodes`, `podcast_feeds`. URL prefix: `/api/v1/podcasts`. Apply target kinds: `podcast`, `podcast-episode`, `podcast-feed`.
+- **Radio** — programmed stations + internet radio sources. Tables: `radio_stations`, `radio_station_items`, `internet_radio_stations`. URL prefix: `/api/v1/radio`, `/api/v1/internet-radio`.
+
+Do not reintroduce a generic "shelf" umbrella for audiobooks + podcasts. The split is intentional — audiobook metadata (authors, narrators, series, chapters, bookmarks) is structurally different from podcast metadata (feed URL, episodes, enclosures, polling state). Sharing one model leaks one domain's concerns into the other and broke FK invariants the previous time we tried it.
+
+Libraries are typed by `kind`: `music`, `audiobook`, `podcast`, or `mixed`. The legacy `shelf` kind and `media_type` discriminator are gone. The library service translates older `kind=shelf` + `media_type=book`/`podcast` payloads into the explicit kinds for backwards compatibility with old clients, but new code should not emit them.
+
 ## Non-Negotiables
 
 - Do not create god packages, god services, or god handlers.
@@ -54,7 +67,7 @@ The server already has:
 - RSS podcast feed ingestion and background polling.
 - Internet radio source records.
 - Optional metadata search providers and explicit metadata apply.
-- Subsonic/OpenSubsonic compatibility basics.
+- Subsonic/OpenSubsonic compatibility for Navidrome-style music clients.
 - Initial 24/7 radio module.
 
 See `ARCHITECTURE.md` for the detailed work log and package responsibilities.
@@ -191,7 +204,7 @@ Subsonic/OpenSubsonic support is important for Navidrome replacement, but it is 
 
 Do not let Subsonic constraints dictate the internal catalog model. Map Samo metadata down to Subsonic responses, not the other way around.
 
-Audiobookshelf compatibility should also be an adapter or carefully mapped API layer. Do not flatten Samo shelf models just to imitate one Audiobookshelf response shape.
+Audiobookshelf compatibility should also be an adapter or carefully mapped API layer. Do not collapse Samo's per-domain models (audiobooks, podcasts, contributors, series) into one Audiobookshelf response shape.
 
 ## Search And Browse
 
@@ -210,7 +223,18 @@ Do not bolt advanced search into handlers. Give it an owning package or a catalo
 
 ## Needed Major Work
 
-The next serious modules, in recommended order:
+Foundation items **1–7** are complete. Remaining major modules:
+
+8. Admin/settings/ops APIs.
+9. Radio programming UI/API foundations after server concepts are stable.
+
+**Deferred compatibility (not blocking Samo-native server):**
+
+- Subsonic XML responses (`f=xml`) — JSON remains the supported format.
+- `musicFolderId` album filtering — requires library-scoped album indexing in the catalog read model.
+- Audiobookshelf HTTP adapter — map Samo's `/api/v1/audiobooks` and `/api/v1/podcasts` routes when a dedicated ABS client is needed; do not collapse them back into one "shelf" shape.
+
+Historical foundation order (completed):
 
 1. Metadata source/override/projection layer.
 2. Bit-perfect direct playback hardening.
@@ -219,8 +243,6 @@ The next serious modules, in recommended order:
 5. Search/filter/index upgrade.
 6. Audiobook bookmarks, collections, listening sessions, and richer series/author management.
 7. Subsonic/OpenSubsonic compatibility expansion.
-8. Admin/settings/ops APIs.
-9. Radio programming UI/API foundations after server concepts are stable.
 
 Do not skip item 1 if adding more metadata write paths. Do not skip item 2 if touching streaming.
 

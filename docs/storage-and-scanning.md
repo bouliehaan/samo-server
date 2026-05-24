@@ -2,6 +2,27 @@
 
 Samo uses SQLite as the catalog database. The server applies embedded migrations on startup, then optionally scans configured library folders before serving the API.
 
+## Domain Tables
+
+Music, audiobooks, podcasts, and radio are four **independent** first-class domains. Each has its own top-level tables — there is **no** shared "shelf" / longform parent. The split is intentional: audiobook metadata (authors, narrators, series, chapters, bookmarks) is structurally different from podcast metadata (feed URL, episodes, enclosures, polling state), and squashing them under one model leaked one domain's concerns into the other.
+
+| Domain | Top-level table | Related tables |
+|--------|-----------------|----------------|
+| Music | `music_tracks`, `music_albums`, `music_artists`, `music_playlists` | `music_album_artists`, `music_track_artists` |
+| Audiobook | `audiobooks` | `contributors`, `series`, `audiobook_contributors`, `audiobook_series`, `audiobook_chapters`, `bookmarks`, `collections`, `collection_audiobooks`, `listening_sessions` |
+| Podcast | `podcasts` | `podcast_episodes`, `podcast_feeds`, `episode_chapters`, `podcast_episode_cache` |
+| Radio | `radio_stations` | `radio_station_items`, `internet_radio_stations` |
+
+Shared infrastructure (NOT shared models):
+
+- `media_files` — one row per audio file on disk; exactly one of `audiobook_id`, `podcast_id`, `track_id`, or `episode_id` is non-null. Lets cover extraction, streaming, and Range serving live in one place without forcing the four domains into a shared item table.
+- `genres` — keyed by `(name, kind)` so music and audiobook genres do not collide.
+- `extracted_covers` — embedded artwork cache, shared by all domains.
+- `metadata_overrides` — write-time guard layer; `target_kind` discriminates between music, audiobook, podcast, podcast-episode, and podcast-feed.
+- `user_playback` — per-user playback state; `target_kind` matches the domain (`music-track`, `audiobook`, `podcast`, `podcast-episode`).
+
+Libraries are typed by `kind`: `music`, `audiobook`, `podcast`, or `mixed`. Mixed libraries are **containers** — the scanner classifies each subfolder and routes it into the appropriate domain table. Mixed is not a parent entity and does not produce a "mixed-item" row.
+
 ## Environment
 
 ```sh
@@ -90,10 +111,10 @@ Remote podcast feeds and internet radio stations are handled by `internal/source
 
 Podcast RSS feeds:
 
-- `POST /api/v1/shelf/podcast-feeds` fetches and parses a feed URL
-- Samo creates a remote "Podcast Feeds" shelf library automatically
-- the feed becomes a normal shelf podcast item
-- RSS items become podcast episodes with GUID, publish date, duration, season/episode, enclosure URL/type/size, categories, owner, and iTunes metadata when present
+- `POST /api/v1/podcasts/feeds` fetches and parses a feed URL
+- Samo creates a remote "Podcast Feeds" library (kind=`podcast`) automatically
+- the feed becomes a normal entry in the `podcasts` table — the same shape used for locally-scanned shows
+- RSS items become rows in `podcast_episodes` with GUID, publish date, duration, season/episode, enclosure URL/type/size, categories, owner, and iTunes metadata when present
 - the catalog projection is reloaded after a feed is added, refreshed, or deleted
 
 Internet radio stations:
@@ -101,7 +122,7 @@ Internet radio stations:
 - `POST /api/v1/internet-radio/stations` stores a station name, stream URL, and optional descriptive metadata
 - stations can be listed through the authenticated API
 - public M3U and redirect links are available for audio clients
-- stations do not create shelf items and are not part of the 24/7 scheduler yet
+- stations do not create catalog items and are not part of the 24/7 scheduler yet
 
 ## External Metadata Lookup
 

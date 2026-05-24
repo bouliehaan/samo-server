@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 
 	"github.com/bouliehaan/samo-server/internal/api"
+	"github.com/bouliehaan/samo-server/internal/bookmarks"
 	"github.com/bouliehaan/samo-server/internal/catalog"
 	"github.com/bouliehaan/samo-server/internal/config"
 	"github.com/bouliehaan/samo-server/internal/covers"
@@ -21,7 +22,6 @@ import (
 	"github.com/bouliehaan/samo-server/internal/radio"
 	"github.com/bouliehaan/samo-server/internal/scanner"
 	"github.com/bouliehaan/samo-server/internal/search"
-	"github.com/bouliehaan/samo-server/internal/shelfuser"
 	"github.com/bouliehaan/samo-server/internal/sources"
 	"github.com/bouliehaan/samo-server/internal/storage"
 	"github.com/bouliehaan/samo-server/internal/toolchain"
@@ -68,12 +68,26 @@ func main() {
 		FFprobePath: tools.FFprobe,
 	})
 	libraryService := libraries.New(db, scan)
+	libraryService.SetBackgroundContext(ctx)
 	if err := libraryService.SyncConfigured(ctx, cfg.Libraries); err != nil {
 		log.Fatal(err)
 	}
 
+	// Always refresh aggregate counts at startup. Scans normally do this at
+	// the tail of every run, but rows can drift between scans — migrations
+	// that move data, schema-rewriting refactors, and crashed scans all
+	// leave libraries.item_count / music_artists.album_count at stale
+	// values. Recomputing here means the catalog reload below sees current
+	// counts even before the next scan.
+	if err := scan.RefreshStats(ctx); err != nil {
+		log.Printf("startup stat refresh failed: %v", err)
+	}
+
 	if cfg.ScanOnStart {
 		log.Printf("scanning configured libraries on startup")
+		// Startup scan is async too — we don't block server boot on it.
+		// The goroutine runs against the lifecycle ctx and reloads the
+		// catalog on completion via the OnScanComplete hook below.
 		if _, err := libraryService.ScanAll(ctx, libraries.TriggerStartup); err != nil {
 			log.Fatal(err)
 		}
@@ -106,7 +120,7 @@ func main() {
 	podcastStreamService := podcaststream.New()
 	searchService := search.New()
 	searchService.Rebuild(catalogSeed)
-	shelfUserService := shelfuser.New(db)
+	bookmarksService := bookmarks.New(db)
 	podcastCacheService, err := podcastcache.New(db, podcastcache.Options{
 		CacheDir:     filepath.Join(cfg.DataDir, "podcast-cache"),
 		Enabled:      cfg.PodcastCache,
@@ -170,6 +184,9 @@ func main() {
 		SharedSecret: cfg.LastFMSharedSecret,
 		Logger:       log.Printf,
 	})
+	if err := lastfmService.LoadConfig(ctx); err != nil {
+		log.Printf("last.fm config load failed: %v", err)
+	}
 	reloadCatalog := func(ctx context.Context) error {
 		seed, err := catalog.LoadSeedFromDB(ctx, db)
 		if err != nil {
@@ -179,6 +196,14 @@ func main() {
 		searchService.Rebuild(seed)
 		return nil
 	}
+	// Refresh catalog projection whenever an async scan finishes (success
+	// or failure — failed scans still touch the DB before bailing). Failures
+	// log the underlying reload error but don't block the next scan.
+	libraryService.OnScanComplete(func(ctx context.Context, job libraries.ScanJob) {
+		if err := reloadCatalog(ctx); err != nil {
+			log.Printf("catalog reload after scan %s failed: %v", job.ID, err)
+		}
+	})
 	handler := api.NewServer(api.ServerOptions{
 		APIToken:      cfg.APIToken,
 		Catalog:       catalogService,
@@ -192,7 +217,7 @@ func main() {
 		PodcastStream: podcastStreamService,
 		PodcastCache:  podcastCacheService,
 		Search:        searchService,
-		ShelfUser:     shelfUserService,
+		Bookmarks:     bookmarksService,
 		Radio:         radioService,
 		Sources:       sourceService,
 		LastFM:        lastfmService,

@@ -47,10 +47,13 @@ type StationSummary struct {
 // without breaking existing rows because resolution is done at hydration
 // time.
 const (
-	ItemSourcePath         = "path"
-	ItemSourceMusicTrack   = "music-track"
-	ItemSourceShelfItem    = "shelf-item"
-	ItemSourceShelfEpisode = "shelf-episode"
+	ItemSourcePath = "path"
+	// Item source kinds for radio_station_items.source_kind. These match
+	// the playback target kinds in internal/playback so a single string
+	// vocabulary is used across the codebase.
+	ItemSourceMusicTrack     = "music-track"
+	ItemSourceAudiobook      = "audiobook"
+	ItemSourcePodcastEpisode = "podcast-episode"
 
 	StationSourceDatabase = "database"
 	StationSourceFile     = "file"

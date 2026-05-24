@@ -37,7 +37,7 @@ See [docs/radio.md](docs/radio.md) for the config format and current stream beha
 
 Samo exposes a native `/api/v1` surface for music, audiobooks, podcasts, radio, and catalog overview data. See [docs/api.md](docs/api.md) for the first route map and metadata contracts.
 
-Podcast RSS feeds are added through `/api/v1/shelf/podcast-feeds`. Internet radio streams are added through `/api/v1/internet-radio/stations` and get public M3U/redirect links for audio clients.
+Music, audiobooks, podcasts, and radio are independent first-class domains. Each has its own URL namespace (`/api/v1/music`, `/api/v1/audiobooks`, `/api/v1/podcasts`, `/api/v1/radio`) and its own DTOs — there is no shared "shelf" / longform parent. Podcast RSS feeds are added through `/api/v1/podcasts/feeds`. Internet radio streams are added through `/api/v1/internet-radio/stations` and get public M3U/redirect links for audio clients.
 
 External metadata lookup is disabled by default and can be enabled later with `SAMO_METADATA_PROVIDERS`. See [docs/metadata.md](docs/metadata.md) for provider names and search routes.
 

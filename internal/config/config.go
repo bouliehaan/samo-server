@@ -14,6 +14,8 @@ const (
 	defaultDataDir = "data"
 )
 
+var defaultMetadataProviders = []string{"openlibrary", "googlebooks", "itunes", "musicbrainz"}
+
 // Config contains process-level server settings. Feature-specific settings live
 // in their own packages so modules can grow independently.
 type Config struct {
@@ -71,7 +73,7 @@ func LoadEnv() (Config, error) {
 		BootstrapUsername:      strings.TrimSpace(os.Getenv("SAMO_BOOTSTRAP_USERNAME")),
 		BootstrapPassword:      strings.TrimSpace(os.Getenv("SAMO_BOOTSTRAP_PASSWORD")),
 		Libraries:              loadLibraries(),
-		MetadataProviders:      envCSV("SAMO_METADATA_PROVIDERS"),
+		MetadataProviders:      envCSVOrDefault("SAMO_METADATA_PROVIDERS", defaultMetadataProviders),
 		MetadataUserAgent:      envOrDefault("SAMO_METADATA_USER_AGENT", "SamoServer/0.1 (https://github.com/bouliehaan/samo-server)"),
 		ScanOnStart:            envBool("SAMO_SCAN_ON_START", true),
 		WatchLibraries:         envBool("SAMO_WATCH_LIBRARIES", true),
@@ -183,11 +185,18 @@ func envCSV(key string) []string {
 	return values
 }
 
+func envCSVOrDefault(key string, fallback []string) []string {
+	if strings.TrimSpace(os.Getenv(key)) != "" {
+		return envCSV(key)
+	}
+	return append([]string(nil), fallback...)
+}
+
 func loadLibraries() []Library {
 	var libraries []Library
 	libraries = appendLibraries(libraries, "music", "", "SAMO_MUSIC_DIRS")
-	libraries = appendLibraries(libraries, "shelf", "book", "SAMO_AUDIOBOOK_DIRS")
-	libraries = appendLibraries(libraries, "shelf", "podcast", "SAMO_PODCAST_DIRS")
+	libraries = appendLibraries(libraries, "audiobook", "", "SAMO_AUDIOBOOK_DIRS")
+	libraries = appendLibraries(libraries, "podcast", "", "SAMO_PODCAST_DIRS")
 	return libraries
 }
 

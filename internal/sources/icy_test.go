@@ -6,7 +6,9 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/bouliehaan/samo-server/internal/storage"
 	"github.com/bouliehaan/samo-server/migrations"
@@ -167,6 +169,59 @@ func TestProbeInternetRadioStationPersistsMetadata(t *testing.T) {
 	}
 }
 
+func TestProbeInternetRadioStationClearsStaleNowPlaying(t *testing.T) {
+	ctx := context.Background()
+	db, err := storage.Open(ctx, t.TempDir()+"/samo.db")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	if err := storage.ApplyMigrations(ctx, db, migrations.Files); err != nil {
+		t.Fatal(err)
+	}
+
+	firstBody := buildIcyBody(t, 4096, "StreamTitle='Four Tet - Parallel 4';")
+	var requests atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("icy-name", "Fresh Radio")
+		w.Header().Set("Content-Type", "audio/mpeg")
+		if requests.Add(1) == 1 {
+			w.Header().Set("icy-metaint", "4096")
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write(firstBody)
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("audiodata"))
+	}))
+	defer server.Close()
+
+	service := New(db)
+	station, err := service.AddInternetRadioStation(ctx, AddInternetRadioStationInput{
+		Name:      "Fresh Radio",
+		StreamURL: server.URL + "/stream",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	withTrack, err := service.ProbeInternetRadioStation(ctx, station.ID)
+	if err != nil {
+		t.Fatalf("first ProbeInternetRadioStation returned error: %v", err)
+	}
+	if withTrack.NowPlaying == nil || withTrack.NowPlaying.Raw != "Four Tet - Parallel 4" {
+		t.Fatalf("first now playing = %#v, want Four Tet - Parallel 4", withTrack.NowPlaying)
+	}
+
+	withoutTrack, err := service.ProbeInternetRadioStation(ctx, station.ID)
+	if err != nil {
+		t.Fatalf("second ProbeInternetRadioStation returned error: %v", err)
+	}
+	if withoutTrack.NowPlaying != nil {
+		t.Fatalf("NowPlaying = %#v, want cleared after metadata-free probe", withoutTrack.NowPlaying)
+	}
+}
+
 func TestProbeInternetRadioStationRecordsFailure(t *testing.T) {
 	ctx := context.Background()
 	db, err := storage.Open(ctx, t.TempDir()+"/samo.db")
@@ -246,6 +301,45 @@ func TestUpdateInternetRadioStationRejectsBadInterval(t *testing.T) {
 	}
 	if updated.Probe.NextProbeAt != nil {
 		t.Fatalf("NextProbeAt = %v, want nil when probe disabled", updated.Probe.NextProbeAt)
+	}
+}
+
+func TestUpdateInternetRadioStationPreservesNextProbeForMetadataOnlyEdit(t *testing.T) {
+	ctx := context.Background()
+	db, err := storage.Open(ctx, t.TempDir()+"/samo.db")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	if err := storage.ApplyMigrations(ctx, db, migrations.Files); err != nil {
+		t.Fatal(err)
+	}
+
+	service := New(db)
+	station, err := service.AddInternetRadioStation(ctx, AddInternetRadioStationInput{
+		Name:      "Artwork FM",
+		StreamURL: "https://example.com/stream",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	next := "2026-05-22T13:00:00Z"
+	if _, err := db.ExecContext(ctx, `UPDATE internet_radio_stations SET next_probe_at = ? WHERE id = ?`, next, station.ID); err != nil {
+		t.Fatal(err)
+	}
+
+	image := "https://example.com/thumb.jpg"
+	updated, err := service.UpdateInternetRadioStation(ctx, station.ID, UpdateInternetRadioStationInput{
+		ImageURL: &image,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if updated.Probe.NextProbeAt == nil || updated.Probe.NextProbeAt.Format(time.RFC3339) != next {
+		t.Fatalf("next probe = %v, want preserved %s", updated.Probe.NextProbeAt, next)
+	}
+	if updated.ImageURL != image {
+		t.Fatalf("image url = %q, want %q", updated.ImageURL, image)
 	}
 }
 

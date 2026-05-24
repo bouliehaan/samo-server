@@ -94,7 +94,7 @@ func (s *Service) guardPodcastEpisodesSave(
 		episodeID := podcastEpisodeID(podcastID, parsedEpisode)
 		externalIDs := catalog.ExternalIDs{
 			FeedGUID: parsedEpisode.GUID,
-			URLs:     cleanStringSlice([]string{parsedEpisode.Link, parsedEpisode.EnclosureURL}),
+			URLs:     cleanStringSlice(append([]string{parsedEpisode.Link, parsedEpisode.EnclosureURL}, parsedEpisode.ExternalURLs...)),
 		}
 		episode := catalog.PodcastEpisode{
 			ID:              episodeID,

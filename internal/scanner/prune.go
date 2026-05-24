@@ -15,27 +15,40 @@ type ScanStats struct {
 }
 
 type scanAccumulator struct {
-	filePaths  map[string]struct{}
-	itemIDs    map[string]struct{}
-	episodeIDs map[string]struct{}
+	filePaths    map[string]struct{}
+	audiobookIDs map[string]struct{}
+	podcastIDs   map[string]struct{}
+	episodeIDs   map[string]struct{}
+	onFile       func(total int)
 }
 
 func newScanAccumulator() *scanAccumulator {
 	return &scanAccumulator{
-		filePaths:  map[string]struct{}{},
-		itemIDs:    map[string]struct{}{},
-		episodeIDs: map[string]struct{}{},
+		filePaths:    map[string]struct{}{},
+		audiobookIDs: map[string]struct{}{},
+		podcastIDs:   map[string]struct{}{},
+		episodeIDs:   map[string]struct{}{},
 	}
 }
 
 func (a *scanAccumulator) seeFile(path string) {
 	a.filePaths[strings.TrimSpace(path)] = struct{}{}
+	if a.onFile != nil {
+		a.onFile(len(a.filePaths))
+	}
 }
 
-func (a *scanAccumulator) seeItem(id string) {
+func (a *scanAccumulator) seeAudiobook(id string) {
 	id = strings.TrimSpace(id)
 	if id != "" {
-		a.itemIDs[id] = struct{}{}
+		a.audiobookIDs[id] = struct{}{}
+	}
+}
+
+func (a *scanAccumulator) seePodcast(id string) {
+	id = strings.TrimSpace(id)
+	if id != "" {
+		a.podcastIDs[id] = struct{}{}
 	}
 }
 
@@ -46,7 +59,24 @@ func (a *scanAccumulator) seeEpisode(id string) {
 	}
 }
 
+// ScanOptions threads per-scan behavior through ScanWithProgress without
+// breaking the existing ScanWithStats signature used in tests.
+type ScanOptions struct {
+	// OnFileSeen fires after every file is recorded. `total` is the
+	// running file count across all libraries scanned so far in this
+	// invocation. Callers typically throttle the callback before doing
+	// anything expensive (DB writes, log lines).
+	OnFileSeen func(total int)
+}
+
 func (s *Scanner) ScanWithStats(ctx context.Context, libraries []Library) (ScanStats, error) {
+	return s.ScanWithProgress(ctx, libraries, ScanOptions{})
+}
+
+// ScanWithProgress is the progress-aware sibling of ScanWithStats. The
+// libraries package wires its OnFileSeen callback to update the
+// scan_jobs.files_seen column so the dashboard can poll live progress.
+func (s *Scanner) ScanWithProgress(ctx context.Context, libraries []Library, opts ScanOptions) (ScanStats, error) {
 	idx, err := catalog.LoadOverrideIndex(ctx, s.db)
 	if err != nil {
 		return ScanStats{}, err
@@ -57,29 +87,44 @@ func (s *Scanner) ScanWithStats(ctx context.Context, libraries []Library) (ScanS
 	defer func() { s.overrideIndex = nil }()
 
 	stats := ScanStats{}
+	// A scan failure used to skip refreshStats entirely, leaving every
+	// library at item_count=0 forever — even libraries that scanned
+	// fine before the failing one threw. The dashboard would then claim
+	// "0 items" across the board regardless of how many tracks landed
+	// in the catalog. Track the first error but always run post-scan
+	// bookkeeping so partial progress is reflected.
+	var firstErr error
 	for _, library := range libraries {
-		libraryStats, err := s.scanLibraryWithStats(ctx, library)
+		// The callback's `total` should be cumulative across libraries
+		// so the dashboard's counter only ever climbs.
+		baseline := stats.FilesSeen
+		var cb func(int)
+		if opts.OnFileSeen != nil {
+			cb = func(perLibrary int) { opts.OnFileSeen(baseline + perLibrary) }
+		}
+		libraryStats, err := s.scanLibraryWithStats(ctx, library, cb)
 		stats.FilesSeen += libraryStats.FilesSeen
 		stats.FilesPruned += libraryStats.FilesPruned
 		stats.ItemsPruned += libraryStats.ItemsPruned
-		if err != nil {
-			return stats, err
+		if err != nil && firstErr == nil {
+			firstErr = err
 		}
 	}
-	if err := s.refreshStats(ctx); err != nil {
-		return stats, err
+	if err := s.refreshStats(ctx); err != nil && firstErr == nil {
+		firstErr = err
 	}
-	if err := s.pruneOrphanMusic(ctx); err != nil {
-		return stats, err
+	if err := s.pruneOrphanMusic(ctx); err != nil && firstErr == nil {
+		firstErr = err
 	}
-	if err := catalog.PruneStaleMetadataOverrides(ctx, s.db); err != nil {
-		return stats, err
+	if err := catalog.PruneStaleMetadataOverrides(ctx, s.db); err != nil && firstErr == nil {
+		firstErr = err
 	}
-	return stats, nil
+	return stats, firstErr
 }
 
-func (s *Scanner) scanLibraryWithStats(ctx context.Context, library Library) (ScanStats, error) {
+func (s *Scanner) scanLibraryWithStats(ctx context.Context, library Library, onFileSeen func(int)) (ScanStats, error) {
 	accumulator := newScanAccumulator()
+	accumulator.onFile = onFileSeen
 	s.activeScan = accumulator
 	defer func() { s.activeScan = nil }()
 
@@ -101,20 +146,40 @@ func (s *Scanner) pruneLibrary(ctx context.Context, library Library, accumulator
 
 	stats := ScanStats{}
 
-	if library.Kind == "shelf" {
-		itemPruned, err := s.pruneShelfItems(ctx, library.ID, accumulator.itemIDs)
+	switch library.Kind {
+	case "audiobook":
+		pruned, err := s.pruneAudiobooks(ctx, library.ID, accumulator.audiobookIDs)
 		if err != nil {
 			return stats, err
 		}
-		stats.ItemsPruned += itemPruned
-
-		if library.MediaType == "podcast" {
-			episodePruned, err := s.prunePodcastEpisodes(ctx, library.ID, accumulator.episodeIDs)
-			if err != nil {
-				return stats, err
-			}
-			stats.ItemsPruned += episodePruned
+		stats.ItemsPruned += pruned
+	case "podcast":
+		pruned, err := s.prunePodcasts(ctx, library.ID, accumulator.podcastIDs)
+		if err != nil {
+			return stats, err
 		}
+		stats.ItemsPruned += pruned
+		episodePruned, err := s.prunePodcastEpisodes(ctx, library.ID, accumulator.episodeIDs)
+		if err != nil {
+			return stats, err
+		}
+		stats.ItemsPruned += episodePruned
+	case "mixed":
+		pruned, err := s.pruneAudiobooks(ctx, library.ID, accumulator.audiobookIDs)
+		if err != nil {
+			return stats, err
+		}
+		stats.ItemsPruned += pruned
+		podPruned, err := s.prunePodcasts(ctx, library.ID, accumulator.podcastIDs)
+		if err != nil {
+			return stats, err
+		}
+		stats.ItemsPruned += podPruned
+		episodePruned, err := s.prunePodcastEpisodes(ctx, library.ID, accumulator.episodeIDs)
+		if err != nil {
+			return stats, err
+		}
+		stats.ItemsPruned += episodePruned
 	}
 
 	filePruned, err := s.pruneMediaFiles(ctx, library.ID, accumulator.filePaths)
@@ -154,10 +219,10 @@ func (s *Scanner) pruneMediaFiles(ctx context.Context, libraryID string, seenPat
 	return len(stale), nil
 }
 
-func (s *Scanner) pruneShelfItems(ctx context.Context, libraryID string, seenItems map[string]struct{}) (int, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT id FROM shelf_items WHERE library_id = ?`, libraryID)
+func (s *Scanner) pruneAudiobooks(ctx context.Context, libraryID string, seen map[string]struct{}) (int, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT id FROM audiobooks WHERE library_id = ?`, libraryID)
 	if err != nil {
-		return 0, fmt.Errorf("list shelf items for prune: %w", err)
+		return 0, fmt.Errorf("list audiobooks for prune: %w", err)
 	}
 	defer rows.Close()
 
@@ -165,9 +230,9 @@ func (s *Scanner) pruneShelfItems(ctx context.Context, libraryID string, seenIte
 	for rows.Next() {
 		var id string
 		if err := rows.Scan(&id); err != nil {
-			return 0, fmt.Errorf("scan shelf item id: %w", err)
+			return 0, fmt.Errorf("scan audiobook id: %w", err)
 		}
-		if _, ok := seenItems[id]; !ok {
+		if _, ok := seen[id]; !ok {
 			stale = append(stale, id)
 		}
 	}
@@ -176,8 +241,37 @@ func (s *Scanner) pruneShelfItems(ctx context.Context, libraryID string, seenIte
 	}
 
 	for _, id := range stale {
-		if _, err := s.db.ExecContext(ctx, `DELETE FROM shelf_items WHERE id = ?`, id); err != nil {
-			return 0, fmt.Errorf("delete stale shelf item %q: %w", id, err)
+		if _, err := s.db.ExecContext(ctx, `DELETE FROM audiobooks WHERE id = ?`, id); err != nil {
+			return 0, fmt.Errorf("delete stale audiobook %q: %w", id, err)
+		}
+	}
+	return len(stale), nil
+}
+
+func (s *Scanner) prunePodcasts(ctx context.Context, libraryID string, seen map[string]struct{}) (int, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT id FROM podcasts WHERE library_id = ?`, libraryID)
+	if err != nil {
+		return 0, fmt.Errorf("list podcasts for prune: %w", err)
+	}
+	defer rows.Close()
+
+	var stale []string
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return 0, fmt.Errorf("scan podcast id: %w", err)
+		}
+		if _, ok := seen[id]; !ok {
+			stale = append(stale, id)
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return 0, err
+	}
+
+	for _, id := range stale {
+		if _, err := s.db.ExecContext(ctx, `DELETE FROM podcasts WHERE id = ?`, id); err != nil {
+			return 0, fmt.Errorf("delete stale podcast %q: %w", id, err)
 		}
 	}
 	return len(stale), nil

@@ -2,11 +2,20 @@ package libraries
 
 import "time"
 
+// Library kinds. Music, audiobooks, podcasts, and radio are independent
+// product domains in Samo; mixed libraries are a convenience that auto-
+// classify content. The legacy `shelf` kind no longer exists — at migration
+// time `shelf`+`media_type=book` became `audiobook` and `shelf`+`media_type=podcast`
+// became `podcast`.
 const (
-	KindMusic = "music"
-	KindShelf = "shelf"
-	KindMixed = "mixed"
+	KindMusic     = "music"
+	KindAudiobook = "audiobook"
+	KindPodcast   = "podcast"
+	KindMixed     = "mixed"
 
+	// MediaType* are kept for backwards compatibility with create payloads
+	// from older clients. They are no longer persisted; the dispatcher
+	// translates them into the correct Kind.
 	MediaTypeBook    = "book"
 	MediaTypePodcast = "podcast"
 
@@ -60,6 +69,7 @@ type ScanJob struct {
 	FinishedAt    *time.Time `json:"finishedAt,omitempty"`
 	Error         string     `json:"error,omitempty"`
 	FilesSeen     int        `json:"filesSeen"`
+	FilesTotal    int        `json:"filesTotal"`
 	FilesPruned   int        `json:"filesPruned"`
 	ItemsPruned   int        `json:"itemsPruned"`
 }

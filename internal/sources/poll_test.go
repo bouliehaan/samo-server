@@ -81,6 +81,39 @@ func TestUpdatePodcastFeedPreservesPollScheduleOnRefresh(t *testing.T) {
 	}
 }
 
+func TestUpdatePodcastFeedPreservesNextPollForMetadataOnlyEdit(t *testing.T) {
+	ctx := context.Background()
+	db, err := storage.Open(ctx, t.TempDir()+"/samo.db")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	if err := storage.ApplyMigrations(ctx, db, migrations.Files); err != nil {
+		t.Fatal(err)
+	}
+
+	service := New(db)
+	feedURL := "https://example.com/feed.xml"
+	if err := service.savePodcastFeed(ctx, feedURL, parsedPodcastFeed{Title: "Test Show"}); err != nil {
+		t.Fatal(err)
+	}
+	feedID := podcastFeedID(feedURL)
+	next := "2026-05-22T13:00:00Z"
+	if _, err := db.ExecContext(ctx, `UPDATE podcast_feeds SET next_poll_at = ? WHERE id = ?`, next, feedID); err != nil {
+		t.Fatal(err)
+	}
+
+	updated, err := service.UpdatePodcastFeed(ctx, feedID, UpdatePodcastFeedInput{
+		Title: strPtr("Renamed Show"),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if updated.Poll.NextPollAt == nil || updated.Poll.NextPollAt.Format(time.RFC3339) != next {
+		t.Fatalf("next poll = %v, want preserved %s", updated.Poll.NextPollAt, next)
+	}
+}
+
 func TestListDuePodcastFeedsRespectsNextPollAt(t *testing.T) {
 	ctx := context.Background()
 	db, err := storage.Open(ctx, t.TempDir()+"/samo.db")

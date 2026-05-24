@@ -35,7 +35,9 @@ const loginHTML = `<!doctype html>
   <title>SAMO SERVER · SIGN IN</title>
   <style>` + samoBaseCSS + `</style>
   <style>
-    main {
+    main.login-main {
+      position: relative;
+      z-index: 1;
       min-height: 100vh;
       display: grid;
       grid-template-columns: 1fr 1fr;
@@ -43,41 +45,12 @@ const loginHTML = `<!doctype html>
       gap: 64px;
       padding: 56px;
       max-width: 1080px;
+      margin: 0 auto;
     }
     @media (max-width: 720px) {
-      main { grid-template-columns: 1fr; gap: 40px; padding: 32px 24px; }
+      main.login-main { grid-template-columns: 1fr; gap: 40px; padding: 32px 24px; }
     }
-    .wordmark-hero {
-      display: grid;
-      gap: 16px;
-    }
-    .wordmark-hero .word {
-      font-family: var(--sans);
-      font-size: clamp(3rem, 9vw, 6.5rem);
-      font-weight: 900;
-      line-height: 0.9;
-      letter-spacing: -0.045em;
-      color: var(--text);
-    }
-    .wordmark-hero .word.dim { color: var(--text-dim); }
-    .wordmark-hero .status {
-      margin-top: 14px;
-      display: inline-flex;
-      align-items: center;
-      gap: 8px;
-      font-family: var(--mono);
-      font-size: 0.72rem;
-      letter-spacing: 0.18em;
-      text-transform: uppercase;
-      color: var(--muted);
-    }
-    .wordmark-hero .status .dot {
-      width: 8px; height: 8px; background: var(--accent);
-      box-shadow: 0 0 12px var(--accent);
-      display: inline-block;
-      animation: pulse 1.8s ease-in-out infinite;
-    }
-    @keyframes pulse { 0%,100%{opacity:1} 50%{opacity:0.35} }
+    .login-hero { display: grid; gap: 16px; }
     .login-shell {
       display: grid;
       gap: 6px;
@@ -106,11 +79,10 @@ const loginHTML = `<!doctype html>
 </head>
 <body>
   <div class="grid-bg"></div>
-  <main>
-    <section class="wordmark-hero">
-      <div class="word">SAMO</div>
-      <div class="word dim">SERVER</div>
-      <div class="status"><span class="dot"></span><span>ONLINE · AWAITING SIGN IN</span></div>
+  <main class="login-main">
+    <section class="login-hero">
+      <div class="samo-wm hero"><span class="word">SAMO</span><span class="word dim">SERVER</span></div>
+      <div class="samo-status pulse"><span class="dot"></span><span>ONLINE · AWAITING SIGN IN</span></div>
     </section>
     <section class="card login-shell">
       <div class="card-head"><span class="caret">&gt;</span> SIGN IN</div>
@@ -133,10 +105,24 @@ const loginHTML = `<!doctype html>
   <script>
   (function () {
     const tokenKey = "samo-token";
+
+    // Resolve where to land after sign-in. The /app shell appends
+    // ?next=<encoded path+hash> when it bounces a logged-out user here, so
+    // deep links like /app#audiobooks survive the round-trip.
+    function nextDestination() {
+      try {
+        const params = new URLSearchParams(window.location.search);
+        const next = params.get("next");
+        if (next && next.startsWith("/")) return next;
+      } catch (err) { /* ignore */ }
+      return "/app";
+    }
+    const destination = nextDestination();
+
     if (localStorage.getItem(tokenKey)) {
       // Confirm the stored token still works; if it does, skip the form.
       fetch("/api/v1/users/me", { headers: { "Authorization": "Bearer " + localStorage.getItem(tokenKey) } })
-        .then((res) => { if (res.ok) window.location.href = "/"; })
+        .then((res) => { if (res.ok) window.location.href = destination; })
         .catch(() => {});
     }
 
@@ -169,7 +155,7 @@ const loginHTML = `<!doctype html>
         const body = await res.json().catch(() => ({}));
         if (!res.ok) throw new Error(body.error || "sign in failed");
         localStorage.setItem(tokenKey, body.token);
-        window.location.href = "/";
+        window.location.href = destination;
       } catch (err) {
         setError(err.message);
         button.disabled = false;

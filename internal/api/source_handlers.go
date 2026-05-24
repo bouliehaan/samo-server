@@ -1,9 +1,11 @@
 package api
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
 	"net/http"
 	"net/url"
 	"time"
@@ -167,6 +169,18 @@ func (s *Server) createInternetRadioStation(w http.ResponseWriter, r *http.Reque
 		writeSourceError(w, err)
 		return
 	}
+	// Fire a probe in the background so the first metadata (icy-name, codec,
+	// bitrate, current track) lands without the user clicking PROBE. We
+	// detach from the request context so the probe survives the response
+	// returning. The probe records its own success/failure into probe
+	// scheduling columns, so silent failure is acceptable here.
+	go func(id string) {
+		ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+		defer cancel()
+		if _, err := s.sourcesService().ProbeInternetRadioStation(ctx, id); err != nil {
+			log.Printf("initial probe for internet radio %s failed: %v", id, err)
+		}
+	}(station.ID)
 	writeJSON(w, http.StatusCreated, s.internetRadioResponse(r, station))
 }
 
@@ -246,7 +260,13 @@ func (s *Server) internetRadioStream(w http.ResponseWriter, r *http.Request) {
 		writeSourceError(w, err)
 		return
 	}
-	http.Redirect(w, r, station.StreamURL, http.StatusTemporaryRedirect)
+	streamURL := station.StreamURL
+	if resolved, err := sources.ResolveInternetRadioStreamURL(r.Context(), &http.Client{Timeout: 15 * time.Second}, station.StreamURL); err == nil && resolved != "" {
+		streamURL = resolved
+	} else if err != nil {
+		log.Printf("internet radio stream resolver failed for %s: %v", station.ID, err)
+	}
+	http.Redirect(w, r, streamURL, http.StatusTemporaryRedirect)
 }
 
 func (s *Server) internetRadioResponse(r *http.Request, station sources.InternetRadioStation) internetRadioStationResponse {

@@ -83,9 +83,14 @@ func (s *Service) UpdateInternetRadioStation(ctx context.Context, id string, inp
 			return InternetRadioStation{}, err
 		}
 	}
-	nextProbeAt := timeStringOrNull(time.Now().UTC())
-	if !probeEnabled {
+	var nextProbeAt any
+	switch {
+	case !probeEnabled:
 		nextProbeAt = nil
+	case input.ProbeEnabled != nil || input.ProbeIntervalSeconds != nil:
+		nextProbeAt = timeStringOrNull(time.Now().UTC())
+	default:
+		nextProbeAt = timeString(current.Probe.NextProbeAt)
 	}
 
 	_, err = s.db.ExecContext(ctx, `
@@ -244,11 +249,6 @@ func (s *Service) applyProbeResult(ctx context.Context, station InternetRadioSta
 	var nowPlayingAt any
 	if nowPlayingRaw != "" || nowPlayingTitle != "" || nowPlayingArtist != "" {
 		nowPlayingAt = time.Now().UTC().Format(time.RFC3339)
-	} else if station.NowPlaying != nil && station.NowPlaying.UpdatedAt != nil {
-		nowPlayingRaw = station.NowPlaying.Raw
-		nowPlayingArtist = station.NowPlaying.Artist
-		nowPlayingTitle = station.NowPlaying.Title
-		nowPlayingAt = station.NowPlaying.UpdatedAt.UTC().Format(time.RFC3339)
 	}
 
 	_, err := s.db.ExecContext(ctx, `

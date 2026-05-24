@@ -26,6 +26,58 @@ func (s *Server) getLastFMStatus(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, status)
 }
 
+func (s *Server) getLastFMConfig(w http.ResponseWriter, r *http.Request) {
+	if _, ok := s.requireAdmin(w, r); !ok {
+		return
+	}
+	service, ok := s.requireLastFMService(w)
+	if !ok {
+		return
+	}
+	config, err := service.Config(r.Context())
+	if err != nil {
+		writeLastFMError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, config)
+}
+
+func (s *Server) updateLastFMConfig(w http.ResponseWriter, r *http.Request) {
+	if _, ok := s.requireAdmin(w, r); !ok {
+		return
+	}
+	service, ok := s.requireLastFMService(w)
+	if !ok {
+		return
+	}
+	var input lastfm.AppConfigInput
+	if !readJSONBody(w, r, &input) {
+		return
+	}
+	config, err := service.SaveConfig(r.Context(), input)
+	if err != nil {
+		writeLastFMError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, config)
+}
+
+func (s *Server) clearLastFMConfig(w http.ResponseWriter, r *http.Request) {
+	if _, ok := s.requireAdmin(w, r); !ok {
+		return
+	}
+	service, ok := s.requireLastFMService(w)
+	if !ok {
+		return
+	}
+	config, err := service.ClearConfig(r.Context())
+	if err != nil {
+		writeLastFMError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, config)
+}
+
 func (s *Server) beginLastFMAuth(w http.ResponseWriter, r *http.Request) {
 	service, ok := s.requireLastFM(w)
 	if !ok {
@@ -147,9 +199,21 @@ func (s *Server) lastfmService() *lastfm.Service {
 }
 
 func (s *Server) requireLastFM(w http.ResponseWriter) (*lastfm.Service, bool) {
-	service := s.lastfmService()
-	if service == nil || !service.Enabled() {
+	service, ok := s.requireLastFMService(w)
+	if !ok {
+		return nil, false
+	}
+	if !service.Enabled() {
 		writeError(w, http.StatusServiceUnavailable, "last.fm integration is not configured")
+		return nil, false
+	}
+	return service, true
+}
+
+func (s *Server) requireLastFMService(w http.ResponseWriter) (*lastfm.Service, bool) {
+	service := s.lastfmService()
+	if service == nil {
+		writeError(w, http.StatusServiceUnavailable, "last.fm integration is not available")
 		return nil, false
 	}
 	return service, true
@@ -159,6 +223,8 @@ func writeLastFMError(w http.ResponseWriter, err error) {
 	switch {
 	case errors.Is(err, lastfm.ErrDisabled):
 		writeError(w, http.StatusServiceUnavailable, err.Error())
+	case errors.Is(err, lastfm.ErrInvalidConfig):
+		writeError(w, http.StatusBadRequest, err.Error())
 	case errors.Is(err, lastfm.ErrNotConnected):
 		writeError(w, http.StatusConflict, err.Error())
 	case errors.Is(err, lastfm.ErrInvalidToken):

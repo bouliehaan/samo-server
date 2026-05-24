@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"testing"
 
+	"github.com/bouliehaan/samo-server/internal/lastfm"
 	"github.com/bouliehaan/samo-server/internal/libraries"
 	"github.com/bouliehaan/samo-server/internal/metadata"
 	"github.com/bouliehaan/samo-server/internal/scanner"
@@ -36,6 +37,7 @@ func TestAdminOnlyRoutesRejectNormalUsers(t *testing.T) {
 		Libraries:     libraries.New(db, scanner.New(db)),
 		MetadataApply: metadata.NewMetadataApplyService(db),
 		Sources:       sources.New(db),
+		LastFM:        lastfm.NewService(lastfm.ServiceOptions{DB: db}),
 		Users:         userService,
 	})
 
@@ -47,7 +49,8 @@ func TestAdminOnlyRoutesRejectNormalUsers(t *testing.T) {
 	}{
 		{name: "list libraries", method: http.MethodGet, path: "/api/v1/libraries"},
 		{name: "create library", method: http.MethodPost, path: "/api/v1/libraries", body: `{}`},
-		{name: "create podcast feed", method: http.MethodPost, path: "/api/v1/shelf/podcast-feeds", body: `{}`},
+		{name: "create podcast feed", method: http.MethodPost, path: "/api/v1/podcasts/feeds", body: `{}`},
+		{name: "lastfm config", method: http.MethodGet, path: "/api/v1/lastfm/config"},
 		{name: "apply metadata", method: http.MethodPost, path: "/api/v1/metadata/apply", body: `{}`},
 	} {
 		t.Run(tc.name, func(t *testing.T) {

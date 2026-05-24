@@ -261,16 +261,13 @@ const setupHTML = `<!doctype html>
 </head>
 <body>
   <div class="grid-bg"></div>
-  <main>
+  <main class="page-main">
     <header class="samo-head">
-      <div class="wordmark">
-        <div class="word">SAMO</div>
-        <div class="word dim">SERVER</div>
-        <div class="status" id="hostStatus">
-          <span class="dot"></span><span class="status-text">SETUP · STEP 1 OF 3</span>
-        </div>
+      <div>
+        <div class="samo-wm head"><span class="word">SAMO</span><span class="word dim">SERVER</span></div>
+        <div class="samo-status pulse" id="hostStatus"><span class="dot"></span><span class="status-text">SETUP · STEP 1 OF 3</span></div>
       </div>
-      <div class="ledger">
+      <div class="samo-ledger">
         <div><span class="label">PROTOCOL</span><span class="value">SAMO-NATIVE V1</span></div>
         <div><span class="label">SESSION</span><span class="value" id="hostSession">SIGNED OUT</span></div>
       </div>
@@ -464,8 +461,8 @@ const setupHTML = `<!doctype html>
         row.className = "lib-row";
         const kind = item.kind === "mixed" ? "MIXED"
           : item.kind === "music" ? "MUSIC"
-          : item.kind === "shelf" && item.mediaType === "book" ? "AUDIOBOOKS"
-          : item.kind === "shelf" && item.mediaType === "podcast" ? "PODCASTS"
+          : item.kind === "audiobook" ? "AUDIOBOOKS"
+          : item.kind === "podcast" ? "PODCASTS"
           : item.kind.toUpperCase();
         row.innerHTML =
           "<div class=\"lib-main\">" +
@@ -519,8 +516,8 @@ const setupHTML = `<!doctype html>
                   <select id="libraryKind">
                     <option value="mixed">MIXED (AUTO-DETECT)</option>
                     <option value="music">MUSIC ONLY</option>
-                    <option value="shelf-book">AUDIOBOOKS</option>
-                    <option value="shelf-podcast">PODCASTS</option>
+                    <option value="audiobook">AUDIOBOOKS</option>
+                    <option value="podcast">PODCASTS</option>
                   </select>
                 </label>
                 <label class="field">
@@ -547,12 +544,9 @@ const setupHTML = `<!doctype html>
       document.getElementById("libraryAdd").addEventListener("click", async () => {
         const path = document.getElementById("libraryPath").value.trim();
         const name = document.getElementById("libraryName").value.trim();
-        const kindSelection = document.getElementById("libraryKind").value;
+        const kind = document.getElementById("libraryKind").value;
         setError("");
         if (!path) return setError("pick a folder first — browse above or paste a path");
-        let kind = kindSelection; let mediaType = "";
-        if (kindSelection === "shelf-book") { kind = "shelf"; mediaType = "book"; }
-        else if (kindSelection === "shelf-podcast") { kind = "shelf"; mediaType = "podcast"; }
         const button = document.getElementById("libraryAdd");
         button.disabled = true;
         const original = button.textContent;
@@ -560,15 +554,19 @@ const setupHTML = `<!doctype html>
         try {
           await withToken("/api/v1/setup/libraries", {
             method: "POST",
-            body: JSON.stringify({ path, name, kind, mediaType }),
+            body: JSON.stringify({ path, name, kind }),
           });
           // Reset the form for the next folder.
           document.getElementById("libraryPath").value = "";
           const nameField = document.getElementById("libraryName");
           nameField.value = "";
           delete nameField.dataset.touched;
+          // Only refresh the inline list — do NOT call fetchStatus()
+          // here. fetchStatus would see hasLibrary=true and auto-advance
+          // the wizard to the scan step, stealing the user's chance to
+          // attach more folders. The Continue button is the only thing
+          // that should advance state.
           await refreshLibraryList();
-          await fetchStatus();
         } catch (err) {
           setError(err.message);
         } finally {
@@ -604,19 +602,51 @@ const setupHTML = `<!doctype html>
         const original = button.textContent;
         button.textContent = "SCANNING…";
         const out = document.getElementById("scanOutput");
-        out.innerHTML = "<div class=\"scan-output\">// scanning libraries…</div>";
+        out.innerHTML = "<div class=\"scan-output\">// kicking off scan…</div>";
         setError("");
+        let jobID = "";
         try {
           const result = await withToken("/api/v1/setup/scan", { method: "POST" });
-          out.innerHTML = "<div class=\"scan-output success\">// scan complete\n" + escapeHTML(JSON.stringify(result, null, 2)) + "</div>";
-          await fetchStatus();
+          jobID = result && result.job && result.job.id;
+          if (!jobID) throw new Error("scan job not returned");
         } catch (err) {
           out.innerHTML = "";
           setError(err.message);
-        } finally {
           button.disabled = false;
           button.textContent = original;
+          return;
         }
+        // Poll the async job and update the progress line live.
+        const poll = async () => {
+          let job;
+          try {
+            // The wizard's admin token can hit the regular scan-job
+            // endpoint; no dedicated setup route needed.
+            job = await withToken("/api/v1/scan/jobs/" + encodeURIComponent(jobID), { method: "GET" });
+          } catch (err) {
+            out.innerHTML = "";
+            setError(err.message);
+            button.disabled = false;
+            button.textContent = original;
+            return;
+          }
+          if (job.status === "running" || job.status === "pending") {
+            out.innerHTML = "<div class=\"scan-output\">// indexing… " + (job.filesSeen || 0) + " files seen</div>";
+            setTimeout(poll, 1200);
+            return;
+          }
+          if (job.status === "completed") {
+            const parts = [(job.filesSeen || 0) + " files"];
+            if (job.itemsPruned) parts.push(job.itemsPruned + " items pruned");
+            out.innerHTML = "<div class=\"scan-output success\">// scan complete · " + parts.join(" · ") + "</div>";
+            await fetchStatus();
+          } else {
+            out.innerHTML = "<div class=\"scan-output\" style=\"color: var(--danger); border-color: var(--danger);\">// scan failed: " + escapeHTML(job.error || "unknown error") + "</div>";
+          }
+          button.disabled = false;
+          button.textContent = original;
+        };
+        setTimeout(poll, 600);
       });
       document.getElementById("finishLater").addEventListener("click", async () => {
         try {

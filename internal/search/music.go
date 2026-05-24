@@ -85,6 +85,9 @@ func filterMusicTracks(items []catalog.MusicTrack, query MusicQuery, overlay Pla
 func filterMusicPlaylists(items []catalog.MusicPlaylist, query MusicQuery, overlay PlaybackOverlay) []catalog.MusicPlaylist {
 	matches := make([]catalog.MusicPlaylist, 0)
 	for _, item := range items {
+		if query.FilterPlaylistsByUser && !catalog.PlaylistVisibleToUser(item, query.PlaylistUserID) {
+			continue
+		}
 		item.Playback = overlayPlaylists(overlay, item.ID, item.Playback)
 		if !musicEntityMatches(query, nil, 0, item.CreatedAt, item.Playback, playlistSearchText(item)) {
 			continue

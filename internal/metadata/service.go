@@ -80,7 +80,14 @@ func (s *Service) Search(ctx context.Context, request SearchRequest) (SearchResp
 	for _, provider := range providers {
 		results, err := provider.Search(ctx, request)
 		if err != nil {
-			return SearchResponse{}, fmt.Errorf("%s metadata search: %w", provider.Name(), err)
+			if request.Provider != "" {
+				return SearchResponse{}, fmt.Errorf("%s metadata search: %w", provider.Name(), err)
+			}
+			response.ProviderErrors = append(response.ProviderErrors, ProviderError{
+				Provider: provider.Name(),
+				Error:    err.Error(),
+			})
+			continue
 		}
 		response.Results = append(response.Results, results...)
 	}

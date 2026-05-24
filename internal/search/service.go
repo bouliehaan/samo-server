@@ -7,9 +7,10 @@ import (
 )
 
 type Service struct {
-	mu    sync.RWMutex
-	music musicIndex
-	shelf shelfIndex
+	mu         sync.RWMutex
+	music      musicIndex
+	audiobooks audiobookIndex
+	podcasts   podcastIndex
 }
 
 func New() *Service {
@@ -23,7 +24,8 @@ func (s *Service) Rebuild(seed catalog.Seed) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.music = buildMusicIndex(seed)
-	s.shelf = buildShelfIndex(seed)
+	s.audiobooks = buildAudiobookIndex(seed)
+	s.podcasts = buildPodcastIndex(seed)
 }
 
 func (s *Service) SearchMusic(query MusicQuery, overlay PlaybackOverlay) catalog.MusicSearchResults {
@@ -35,13 +37,22 @@ func (s *Service) SearchMusic(query MusicQuery, overlay PlaybackOverlay) catalog
 	return s.music.search(query, overlay)
 }
 
-func (s *Service) SearchShelf(query ShelfQuery, overlay PlaybackOverlay) catalog.ShelfSearchResults {
+func (s *Service) SearchAudiobooks(query AudiobookQuery, overlay PlaybackOverlay) catalog.AudiobookSearchResults {
 	if s == nil {
-		return catalog.ShelfSearchResults{}
+		return catalog.AudiobookSearchResults{}
 	}
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	return s.shelf.search(query, overlay)
+	return s.audiobooks.search(query, overlay)
+}
+
+func (s *Service) SearchPodcasts(query PodcastQuery, overlay PlaybackOverlay) catalog.PodcastSearchResults {
+	if s == nil {
+		return catalog.PodcastSearchResults{}
+	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.podcasts.search(query, overlay)
 }
 
 // SearchMusicText is a compatibility helper for text-only callers (Subsonic, legacy tests).
@@ -49,7 +60,12 @@ func (s *Service) SearchMusicText(text string, page catalog.PageRequest) catalog
 	return s.SearchMusic(MusicQuery{Text: text, Page: page, Sort: SortRelevance}, PlaybackOverlay{})
 }
 
-// SearchShelfText is a compatibility helper for text-only callers.
-func (s *Service) SearchShelfText(text string, page catalog.PageRequest) catalog.ShelfSearchResults {
-	return s.SearchShelf(ShelfQuery{Text: text, Page: page, Sort: SortRelevance}, PlaybackOverlay{})
+// SearchAudiobooksText is a compatibility helper for text-only callers.
+func (s *Service) SearchAudiobooksText(text string, page catalog.PageRequest) catalog.AudiobookSearchResults {
+	return s.SearchAudiobooks(AudiobookQuery{Text: text, Page: page, Sort: SortRelevance}, PlaybackOverlay{})
+}
+
+// SearchPodcastsText is a compatibility helper for text-only callers.
+func (s *Service) SearchPodcastsText(text string, page catalog.PageRequest) catalog.PodcastSearchResults {
+	return s.SearchPodcasts(PodcastQuery{Text: text, Page: page, Sort: SortRelevance}, PlaybackOverlay{})
 }

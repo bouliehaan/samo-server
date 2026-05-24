@@ -15,7 +15,7 @@ import (
 	"github.com/bouliehaan/samo-server/migrations"
 )
 
-func TestStreamShelfEpisodeServesCachedEnclosureBytes(t *testing.T) {
+func TestStreamPodcastEpisodeServesCachedEnclosureBytes(t *testing.T) {
 	ctx := context.Background()
 	payload := []byte("cached-stream-bytes-12345")
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
@@ -33,13 +33,13 @@ func TestStreamShelfEpisodeServesCachedEnclosureBytes(t *testing.T) {
 		t.Fatal(err)
 	}
 	if _, err := db.ExecContext(ctx, `
-		INSERT INTO libraries (id, name, kind, media_type, path)
-		VALUES ('lib-1', 'Podcasts', 'shelf', 'podcast', 'samo://podcast-feeds')`); err != nil {
+		INSERT INTO libraries (id, name, kind, path)
+		VALUES ('lib-1', 'Podcasts', 'podcast', 'samo://podcast-feeds')`); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := db.ExecContext(ctx, `
-		INSERT INTO shelf_items (id, library_id, media_type, media_kind, path)
-		VALUES ('pod-1', 'lib-1', 'podcast', 'podcast', 'samo://show')`); err != nil {
+		INSERT INTO podcasts (id, library_id, path)
+		VALUES ('pod-1', 'lib-1', 'samo://show')`); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := db.ExecContext(ctx, `
@@ -76,7 +76,7 @@ func TestStreamShelfEpisodeServesCachedEnclosureBytes(t *testing.T) {
 		PodcastStream: podcaststream.New(podcaststream.ServiceOptions{AllowPrivateHosts: true}),
 	})
 
-	req := httptest.NewRequest(http.MethodGet, "/api/v1/shelf/episodes/ep-1/stream", nil)
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/podcasts/episodes/ep-1/stream", nil)
 	rec := httptest.NewRecorder()
 	handler.ServeHTTP(rec, req)
 

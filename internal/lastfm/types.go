@@ -15,6 +15,7 @@ var (
 	ErrSessionExpired  = errors.New("last.fm session is invalid or expired")
 	ErrMissingMetadata = errors.New("track is missing artist or title metadata required for scrobbling")
 	ErrInvalidEvent    = errors.New("invalid scrobble event")
+	ErrInvalidConfig   = errors.New("last.fm api key and shared secret are required")
 )
 
 type ScrobbleEvent string
@@ -39,6 +40,19 @@ type Status struct {
 	Username    string     `json:"username,omitempty"`
 	ConnectedAt *time.Time `json:"connectedAt,omitempty"`
 	QueueSize   int        `json:"queueSize"`
+}
+
+type AppConfig struct {
+	Enabled         bool       `json:"enabled"`
+	APIKey          string     `json:"apiKey,omitempty"`
+	HasSharedSecret bool       `json:"hasSharedSecret"`
+	Source          string     `json:"source,omitempty"`
+	UpdatedAt       *time.Time `json:"updatedAt,omitempty"`
+}
+
+type AppConfigInput struct {
+	APIKey       string `json:"apiKey"`
+	SharedSecret string `json:"sharedSecret"`
 }
 
 type AuthBeginResponse struct {

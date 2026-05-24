@@ -3,6 +3,7 @@ package api
 import (
 	"errors"
 	"net/http"
+	"strings"
 
 	"github.com/bouliehaan/samo-server/internal/playlists"
 )
@@ -27,6 +28,48 @@ func (s *Server) createMusicPlaylist(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusCreated, item)
+}
+
+func (s *Server) importMusicPlaylist(w http.ResponseWriter, r *http.Request) {
+	principal, ok := s.currentUser(r)
+	if !ok {
+		writeError(w, http.StatusUnauthorized, "unauthorized")
+		return
+	}
+	var input playlists.ImportInput
+	if !readJSONBody(w, r, &input) {
+		return
+	}
+	if strings.TrimSpace(input.URL) != "" && principal.User.Role != "admin" {
+		writeError(w, http.StatusForbidden, "admin required for server-side playlist url imports")
+		return
+	}
+	result, err := s.playlistsService().Import(r.Context(), principal.User.ID, input)
+	if err != nil {
+		writePlaylistError(w, err)
+		return
+	}
+	if !input.DryRun {
+		if err := s.reloadCatalogProjection(r); err != nil {
+			writeError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+	}
+	writeJSON(w, http.StatusOK, result)
+}
+
+func (s *Server) listMusicPlaylistTracks(w http.ResponseWriter, r *http.Request) {
+	principal, ok := s.currentUser(r)
+	if !ok {
+		writeError(w, http.StatusUnauthorized, "unauthorized")
+		return
+	}
+	if _, err := s.catalog.MusicPlaylistForUser(principal.User.ID, r.PathValue("id")); err != nil {
+		writeCatalogError(w, err)
+		return
+	}
+	items := s.catalog.MusicTracksForPlaylist(r.PathValue("id"))
+	writeJSON(w, http.StatusOK, map[string]any{"items": items, "total": len(items)})
 }
 
 func (s *Server) updateMusicPlaylist(w http.ResponseWriter, r *http.Request) {

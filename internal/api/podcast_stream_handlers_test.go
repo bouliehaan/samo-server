@@ -13,7 +13,7 @@ import (
 	"github.com/bouliehaan/samo-server/migrations"
 )
 
-func TestStreamShelfEpisodeProxiesRemoteEnclosure(t *testing.T) {
+func TestStreamPodcastEpisodeProxiesRemoteEnclosure(t *testing.T) {
 	ctx := context.Background()
 	payload := []byte("0123456789abcdefghij")
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -37,13 +37,13 @@ func TestStreamShelfEpisodeProxiesRemoteEnclosure(t *testing.T) {
 		t.Fatal(err)
 	}
 	if _, err := db.ExecContext(ctx, `
-		INSERT INTO libraries (id, name, kind, media_type, path)
-		VALUES ('lib-pod', 'Podcasts', 'shelf', 'podcast', ?)`, filepath.Join(root, "podcasts")); err != nil {
+		INSERT INTO libraries (id, name, kind, path)
+		VALUES ('lib-pod', 'Podcasts', 'podcast', ?)`, filepath.Join(root, "podcasts")); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := db.ExecContext(ctx, `
-		INSERT INTO shelf_items (id, library_id, media_type, media_kind, path, duration_seconds)
-		VALUES ('pod-1', 'lib-pod', 'podcast', 'podcast', '/remote/show', 0)`); err != nil {
+		INSERT INTO podcasts (id, library_id, path, duration_seconds)
+		VALUES ('pod-1', 'lib-pod', '/remote/show', 0)`); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := db.ExecContext(ctx, `
@@ -64,7 +64,7 @@ func TestStreamShelfEpisodeProxiesRemoteEnclosure(t *testing.T) {
 		PodcastStream: podcaststream.New(podcaststream.ServiceOptions{AllowPrivateHosts: true}),
 	})
 
-	req := httptest.NewRequest(http.MethodGet, "/api/v1/shelf/episodes/ep-1/stream", nil)
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/podcasts/episodes/ep-1/stream", nil)
 	rec := httptest.NewRecorder()
 	handler.ServeHTTP(rec, req)
 

@@ -141,11 +141,10 @@ func (s *Server) runSetupScan(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	if err := s.reloadCatalogProjection(r); err != nil {
-		writeError(w, http.StatusInternalServerError, err.Error())
-		return
-	}
-	writeJSON(w, http.StatusOK, result)
+	// Scan runs async — the wizard polls /api/v1/scan/jobs/{id} for
+	// progress and completion. Catalog reload is wired into the
+	// libraries service's OnScanComplete hook.
+	writeJSON(w, http.StatusAccepted, result)
 }
 
 func (s *Server) completeSetup(w http.ResponseWriter, r *http.Request) {

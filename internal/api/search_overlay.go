@@ -26,10 +26,13 @@ func (s *Server) loadSearchOverlay(r *http.Request, userID string) (search.Playb
 	if overlay.Playlists, err = s.playback.ListForUser(ctx, userID, playback.TargetMusicPlaylist); err != nil {
 		return search.PlaybackOverlay{}, err
 	}
-	if overlay.Items, err = s.playback.ListForUser(ctx, userID, playback.TargetShelfItem); err != nil {
+	if overlay.Audiobooks, err = s.playback.ListForUser(ctx, userID, playback.TargetAudiobook); err != nil {
 		return search.PlaybackOverlay{}, err
 	}
-	if overlay.Episodes, err = s.playback.ListForUser(ctx, userID, playback.TargetShelfEpisode); err != nil {
+	if overlay.Podcasts, err = s.playback.ListForUser(ctx, userID, playback.TargetPodcast); err != nil {
+		return search.PlaybackOverlay{}, err
+	}
+	if overlay.Episodes, err = s.playback.ListForUser(ctx, userID, playback.TargetPodcastEpisode); err != nil {
 		return search.PlaybackOverlay{}, err
 	}
 	return overlay, nil

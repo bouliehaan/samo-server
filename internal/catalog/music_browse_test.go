@@ -52,3 +52,28 @@ func TestParseMusicBrowseView(t *testing.T) {
 		t.Fatal("expected invalid browse view")
 	}
 }
+
+func TestMusicBrowseForUserFiltersPrivatePlaylists(t *testing.T) {
+	service := NewService(Seed{
+		MusicPlaylists: []MusicPlaylist{
+			{ID: "private-other", Name: "Private Other", OwnerID: "user-other"},
+			{ID: "public-other", Name: "Public Other", OwnerID: "user-other", Public: true},
+			{ID: "private-owned", Name: "Private Owned", OwnerID: "user-me"},
+		},
+	})
+
+	results := service.MusicBrowseForUser(
+		nil, nil, nil, nil,
+		MusicBrowseRecentlyAdded,
+		PageRequest{Limit: 10},
+		"user-me",
+	)
+	if len(results.Playlists) != 2 || results.Total != 2 {
+		t.Fatalf("results = %#v", results)
+	}
+	for _, item := range results.Playlists {
+		if item.ID == "private-other" {
+			t.Fatalf("private playlist leaked: %#v", results.Playlists)
+		}
+	}
+}
