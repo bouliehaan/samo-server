@@ -13,6 +13,9 @@ func (s *Service) MusicAlbumsForArtist(artistID string) []MusicAlbum {
 
 	items := make([]MusicAlbum, 0)
 	for _, album := range s.musicAlbums {
+		if album.TrackCount <= 0 {
+			continue
+		}
 		if musicAlbumMatchesArtist(album, artistID) {
 			items = append(items, album)
 		}
@@ -74,24 +77,14 @@ func (s *Service) ResolveMusicCoverArtID(id string) (string, []Image) {
 		if images := nonEmptyImages(track.Images); len(images) > 0 {
 			return id, images
 		}
-		if album, ok := s.musicAlbumByID[track.AlbumID]; ok {
-			return track.AlbumID, nonEmptyImages(album.Images)
-		}
-		return track.AlbumID, nil
+		return track.AlbumID, s.musicAlbumCoverImagesLocked(track.AlbumID)
 	}
-	if album, ok := s.musicAlbumByID[id]; ok {
-		return id, nonEmptyImages(album.Images)
+	if _, ok := s.musicAlbumByID[id]; ok {
+		return id, s.musicAlbumCoverImagesLocked(id)
 	}
 	if artist, ok := s.musicArtistByID[id]; ok {
 		if images := nonEmptyImages(artist.Images); len(images) > 0 {
 			return id, images
-		}
-		for _, album := range s.musicAlbums {
-			if musicAlbumMatchesArtist(album, id) {
-				if images := nonEmptyImages(album.Images); len(images) > 0 {
-					return album.ID, images
-				}
-			}
 		}
 		return id, nil
 	}
@@ -99,11 +92,6 @@ func (s *Service) ResolveMusicCoverArtID(id string) (string, []Image) {
 }
 
 func musicAlbumMatchesArtist(album MusicAlbum, artistID string) bool {
-	for _, id := range album.ArtistIDs {
-		if id == artistID {
-			return true
-		}
-	}
 	for _, id := range album.AlbumArtistIDs {
 		if id == artistID {
 			return true
@@ -118,7 +106,9 @@ func nonEmptyImages(images []Image) []Image {
 	}
 	filtered := make([]Image, 0, len(images))
 	for _, image := range images {
-		if strings.TrimSpace(image.Path) != "" || strings.TrimSpace(image.URL) != "" {
+		if strings.TrimSpace(image.Path) != "" ||
+			strings.TrimSpace(image.URL) != "" ||
+			strings.TrimSpace(image.ID) != "" {
 			filtered = append(filtered, image)
 		}
 	}

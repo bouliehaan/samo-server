@@ -5,6 +5,8 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/bouliehaan/samo-server/internal/media"
@@ -52,17 +54,23 @@ func LoadSeedFromDB(ctx context.Context, db *sql.DB) (Seed, error) {
 		return Seed{}, err
 	}
 
+	coversBySource, err := loadExtractedCoversBySource(ctx, db)
+	if err != nil {
+		return Seed{}, err
+	}
+
 	seed := Seed{
-		MusicArtists:    artists,
-		MusicAlbums:     albums,
-		MusicTracks:     tracks,
-		MusicPlaylists:  playlists,
-		Genres:          genres,
-		Audiobooks:      audiobooks,
-		Podcasts:        podcasts,
-		Contributors:    contributors,
-		Series:          series,
-		PodcastEpisodes: episodes,
+		MusicArtists:            artists,
+		MusicAlbums:             albums,
+		MusicTracks:             tracks,
+		MusicPlaylists:          playlists,
+		Genres:                  genres,
+		Audiobooks:              audiobooks,
+		Podcasts:                podcasts,
+		Contributors:            contributors,
+		Series:                  series,
+		PodcastEpisodes:         episodes,
+		ExtractedCoversBySource: coversBySource,
 	}
 
 	overrides, err := LoadMetadataOverrides(ctx, db)
@@ -548,6 +556,7 @@ func loadAudioFiles(ctx context.Context, db *sql.DB, ownerColumn string) (map[st
 		decodeJSON(metadataFormatsJSON, &item.MetadataFormats)
 		decodeJSON(embeddedTagsJSON, &item.EmbeddedTags)
 		item.ModifiedAt = parseTimePtr(modifiedAt)
+		item = NormalizeAudioFile(item)
 		files[ownerID] = append(files[ownerID], item)
 	}
 	for ownerID := range files {
@@ -593,6 +602,50 @@ func scanChapterRows(rows *sql.Rows) (map[string][]AudioChapter, error) {
 		chapters[ownerID] = append(chapters[ownerID], item)
 	}
 	return chapters, rows.Err()
+}
+
+func loadExtractedCoversBySource(ctx context.Context, db *sql.DB) (map[string]Image, error) {
+	rows, err := db.QueryContext(ctx, `
+		SELECT id, source_path, path, mime_type
+		FROM extracted_covers`)
+	if err != nil {
+		return nil, fmt.Errorf("load extracted covers: %w", err)
+	}
+	defer rows.Close()
+
+	covers := map[string]Image{}
+	for rows.Next() {
+		var image Image
+		var sourcePath string
+		if err := rows.Scan(&image.ID, &sourcePath, &image.Path, &image.MimeType); err != nil {
+			return nil, fmt.Errorf("scan extracted cover: %w", err)
+		}
+		sourcePath = strings.TrimSpace(sourcePath)
+		if sourcePath == "" {
+			continue
+		}
+		registerCoverPathKey(covers, sourcePath, image)
+		if absolute, absErr := filepath.Abs(sourcePath); absErr == nil {
+			registerCoverPathKey(covers, absolute, image)
+		}
+	}
+	return covers, rows.Err()
+}
+
+func registerCoverPathKey(covers map[string]Image, key string, image Image) {
+	key = strings.TrimSpace(key)
+	if key == "" {
+		return
+	}
+	if _, exists := covers[key]; !exists {
+		covers[key] = image
+	}
+	clean := filepath.Clean(key)
+	if clean != key {
+		if _, exists := covers[clean]; !exists {
+			covers[clean] = image
+		}
+	}
 }
 
 func decodeJSON(value string, out any) {

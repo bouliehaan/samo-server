@@ -8,6 +8,24 @@ import (
 	"time"
 )
 
+// parseStoredTime accepts both RFC3339 strings written by Go and the
+// space-separated `YYYY-MM-DD HH:MM:SS` format SQLite produces from
+// CURRENT_TIMESTAMP. Returns zero time if neither parses — callers can
+// treat that as "unknown".
+func parseStoredTime(raw string) time.Time {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return time.Time{}
+	}
+	if t, err := time.Parse(time.RFC3339, raw); err == nil {
+		return t
+	}
+	if t, err := time.Parse("2006-01-02 15:04:05", raw); err == nil {
+		return t.UTC()
+	}
+	return time.Time{}
+}
+
 func loadUserByID(ctx context.Context, db *sql.DB, id string) (User, error) {
 	var item User
 	var createdAt, updatedAt string
@@ -22,8 +40,8 @@ func loadUserByID(ctx context.Context, db *sql.DB, id string) (User, error) {
 	if err != nil {
 		return User{}, fmt.Errorf("load user: %w", err)
 	}
-	item.CreatedAt, _ = time.Parse(time.RFC3339, createdAt)
-	item.UpdatedAt, _ = time.Parse(time.RFC3339, updatedAt)
+	item.CreatedAt = parseStoredTime(createdAt)
+	item.UpdatedAt = parseStoredTime(updatedAt)
 	return item, nil
 }
 
@@ -41,8 +59,8 @@ func loadUserByUsername(ctx context.Context, db *sql.DB, username string) (User,
 	if err != nil {
 		return User{}, "", fmt.Errorf("load user: %w", err)
 	}
-	item.CreatedAt, _ = time.Parse(time.RFC3339, createdAt)
-	item.UpdatedAt, _ = time.Parse(time.RFC3339, updatedAt)
+	item.CreatedAt = parseStoredTime(createdAt)
+	item.UpdatedAt = parseStoredTime(updatedAt)
 	return item, passwordHash, nil
 }
 
@@ -115,10 +133,11 @@ func listUsers(ctx context.Context, db *sql.DB) ([]User, error) {
 }
 
 func insertToken(ctx context.Context, db *sql.DB, id, userID, label, tokenHash string) error {
+	now := time.Now().UTC().Format(time.RFC3339)
 	_, err := db.ExecContext(ctx, `
 		INSERT INTO user_tokens (id, user_id, label, token_hash, created_at)
-		VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP)`,
-		id, userID, label, tokenHash,
+		VALUES (?, ?, ?, ?, ?)`,
+		id, userID, label, tokenHash, now,
 	)
 	return err
 }
@@ -137,7 +156,7 @@ func loadUserByTokenHash(ctx context.Context, db *sql.DB, tokenHash string) (Use
 	if err != nil {
 		return User{}, "", err
 	}
-	_, _ = db.ExecContext(ctx, `UPDATE user_tokens SET last_used_at = CURRENT_TIMESTAMP WHERE id = ?`, tokenID)
+	_, _ = db.ExecContext(ctx, `UPDATE user_tokens SET last_used_at = ? WHERE id = ?`, time.Now().UTC().Format(time.RFC3339), tokenID)
 	return user, tokenID, nil
 }
 
@@ -158,10 +177,10 @@ func listTokens(ctx context.Context, db *sql.DB, userID string) ([]Token, error)
 		if err := rows.Scan(&item.ID, &item.Label, &createdAt, &lastUsed); err != nil {
 			return nil, err
 		}
-		item.CreatedAt, _ = time.Parse(time.RFC3339, createdAt)
+		item.CreatedAt = parseStoredTime(createdAt)
 		if lastUsed.Valid {
-			parsed, err := time.Parse(time.RFC3339, lastUsed.String)
-			if err == nil {
+			parsed := parseStoredTime(lastUsed.String)
+			if !parsed.IsZero() {
 				item.LastUsedAt = &parsed
 			}
 		}

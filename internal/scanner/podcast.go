@@ -21,20 +21,26 @@ func (s *Scanner) scanPodcastLibrary(ctx context.Context, library Library, root 
 		log.Printf("scanner: podcast library %q has no audio files under %q; check the path and supported extensions (.mp3, .m4a, .m4b, .ogg, .opus, .flac, .wav, .aac, .wma, .aif, .aiff, .alac)", library.Path, root)
 	}
 	for _, group := range groups {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
 		if err := s.scanPodcast(ctx, library, root, group); err != nil {
 			return err
 		}
 	}
-	_, err := s.db.ExecContext(ctx, `UPDATE libraries SET last_scan_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP WHERE id = ?`, library.ID)
-	return err
+	return nil
 }
 
 func (s *Scanner) scanPodcast(ctx context.Context, library Library, root string, group groupedAudio) error {
-	probes, err := s.probeGroup(ctx, root, group.Files)
+	probes, err := s.probeGroup(ctx, library.ID, root, group.Files, "episode_id")
 	if err != nil {
 		return err
 	}
 	if len(probes) == 0 {
+		if len(group.Files) > 0 && !s.groupNeedsProbe(group.Files) {
+			s.markPodcastGroupSeen(library.ID, group)
+			return nil
+		}
 		log.Printf("scanner: podcast group %q had %d files but ffprobe rejected all of them; skipping", group.Root, len(group.Files))
 		return nil
 	}
@@ -58,7 +64,7 @@ func (s *Scanner) scanPodcast(ctx context.Context, library Library, root string,
 		audioPaths = append(audioPaths, probed.AudioFile.Path)
 		checksums = append(checksums, probed.AudioFile.Checksum)
 	}
-	cover := s.resolveCover(ctx, group.Root, audioPaths, checksums)
+	cover := s.resolveCover(ctx, group.Root, audioPaths, checksums, nil)
 
 	item := catalog.PodcastItem{
 		ID:              podcastID,
@@ -129,7 +135,7 @@ func (s *Scanner) scanPodcast(ctx context.Context, library Library, root string,
 		if s.activeScan != nil {
 			s.activeScan.seeEpisode(episode.ID)
 		}
-		if err := s.upsertAudioFile(ctx, library.ID, audioFileOwner{PodcastID: item.ID, EpisodeID: episode.ID}, file); err != nil {
+		if err := s.upsertAudioFile(ctx, library.ID, audioFileOwner{PodcastID: item.ID, EpisodeID: episode.ID}, file, "", ""); err != nil {
 			return err
 		}
 		if err := s.replaceEpisodeChapters(ctx, episode.ID, probed.Chapters); err != nil {

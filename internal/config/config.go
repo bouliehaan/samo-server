@@ -14,7 +14,7 @@ const (
 	defaultDataDir = "data"
 )
 
-var defaultMetadataProviders = []string{"openlibrary", "googlebooks", "itunes", "musicbrainz"}
+var defaultMetadataProviders = []string{"audible", "openlibrary", "googlebooks", "itunes", "musicbrainz"}
 
 // Config contains process-level server settings. Feature-specific settings live
 // in their own packages so modules can grow independently.
@@ -42,8 +42,13 @@ type Config struct {
 	PodcastCacheMaxBytes   int64
 	PodcastCacheMaxAge     time.Duration
 	PodcastCacheMaxFile    int64
+	PodcastAutoDownload    bool
 	InternetRadioProbe     bool
 	InternetRadioProbeTick time.Duration
+	ArtistImagesOnScan     bool
+	AutoImportPlaylists    bool
+	ScannerExternal        bool
+	ScanFFprobe            bool
 }
 
 type Library struct {
@@ -75,7 +80,7 @@ func LoadEnv() (Config, error) {
 		Libraries:              loadLibraries(),
 		MetadataProviders:      envCSVOrDefault("SAMO_METADATA_PROVIDERS", defaultMetadataProviders),
 		MetadataUserAgent:      envOrDefault("SAMO_METADATA_USER_AGENT", "SamoServer/0.1 (https://github.com/bouliehaan/samo-server)"),
-		ScanOnStart:            envBool("SAMO_SCAN_ON_START", true),
+		ScanOnStart:            envBool("SAMO_SCAN_ON_START", false),
 		WatchLibraries:         envBool("SAMO_WATCH_LIBRARIES", true),
 		WatchDebounce:          envDuration("SAMO_WATCH_DEBOUNCE", 3*time.Second),
 		PodcastPoll:            envBool("SAMO_PODCAST_POLL", true),
@@ -88,8 +93,13 @@ func LoadEnv() (Config, error) {
 		PodcastCacheMaxBytes:   envInt64("SAMO_PODCAST_CACHE_MAX_BYTES", 10<<30),
 		PodcastCacheMaxAge:     envDuration("SAMO_PODCAST_CACHE_MAX_AGE", 30*24*time.Hour),
 		PodcastCacheMaxFile:    envInt64("SAMO_PODCAST_CACHE_MAX_FILE_BYTES", 500<<20),
+		PodcastAutoDownload:    envBool("SAMO_PODCAST_AUTO_DOWNLOAD", false),
 		InternetRadioProbe:     envBool("SAMO_INTERNET_RADIO_PROBE", true),
 		InternetRadioProbeTick: envDuration("SAMO_INTERNET_RADIO_PROBE_TICK", time.Minute),
+		ArtistImagesOnScan:     envBool("SAMO_ARTIST_IMAGES_ON_SCAN", true),
+		AutoImportPlaylists:    envBool("SAMO_AUTO_IMPORT_PLAYLISTS", true),
+		ScannerExternal:        envBool("SAMO_SCANNER_EXTERNAL", false),
+		ScanFFprobe:            envBool("SAMO_SCAN_FFPROBE", false),
 	}
 
 	return cfg.Validate()

@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/bouliehaan/samo-server/internal/catalog"
+	"github.com/dhowden/tag"
 )
 
 type ffprobeResult struct {
@@ -39,6 +40,9 @@ type ffprobeStream struct {
 	BitsPerRaw    string            `json:"bits_per_raw_sample"`
 	BitRate       string            `json:"bit_rate"`
 	Tags          map[string]string `json:"tags"`
+	Disposition   struct {
+		AttachedPic int `json:"attached_pic"`
+	} `json:"disposition"`
 }
 
 type ffprobeChapter struct {
@@ -49,9 +53,10 @@ type ffprobeChapter struct {
 }
 
 type probeInfo struct {
-	AudioFile catalog.AudioFile
-	Tags      catalog.Tags
-	Chapters  []catalog.AudioChapter
+	AudioFile        catalog.AudioFile
+	Tags             catalog.Tags
+	Chapters         []catalog.AudioChapter
+	HasEmbeddedCover bool
 }
 
 func (raw ffprobeResult) toProbeInfo(path string) probeInfo {
@@ -118,11 +123,25 @@ func (raw ffprobeResult) toProbeInfo(path string) probeInfo {
 		chapters = overdriveChapters(tags)
 	}
 
-	return probeInfo{
-		AudioFile: audioFile,
-		Tags:      tags,
-		Chapters:  chapters,
+	return finalizeProbeInfo(probeInfo{
+		AudioFile:        audioFile,
+		Tags:             tags,
+		Chapters:         chapters,
+		HasEmbeddedCover: raw.hasEmbeddedCover(),
+	})
+}
+
+func (raw ffprobeResult) hasEmbeddedCover() bool {
+	for _, stream := range raw.Streams {
+		if stream.Disposition.AttachedPic == 1 {
+			return true
+		}
+		if stream.CodecType == "video" &&
+			(stream.CodecName == "mjpeg" || stream.CodecName == "png" || stream.CodecName == "apng") {
+			return true
+		}
 	}
+	return false
 }
 
 func (raw ffprobeResult) chapters() []catalog.AudioChapter {
@@ -250,6 +269,26 @@ func fileChecksum(path string, info os.FileInfo) string {
 	return hex.EncodeToString(hash.Sum(nil)[:16])
 }
 
+func metadataFormatsFromTagFormat(path string, format tag.Format, tags catalog.Tags) []string {
+	if len(tags) == 0 {
+		return nil
+	}
+	switch strings.ToUpper(string(format)) {
+	case "MP3":
+		return []string{"id3"}
+	case "MP4", "M4A", "M4B":
+		return []string{"mp4"}
+	case "FLAC":
+		return []string{"flac"}
+	case "OGG":
+		return []string{"vorbis"}
+	case "OPUS":
+		return []string{"opus"}
+	default:
+		return metadataFormatsForPath(path, tags)
+	}
+}
+
 func metadataFormatsForPath(path string, tags catalog.Tags) []string {
 	if len(tags) == 0 {
 		return nil
@@ -257,10 +296,14 @@ func metadataFormatsForPath(path string, tags catalog.Tags) []string {
 	switch strings.ToLower(filepath.Ext(path)) {
 	case ".mp3":
 		return []string{"id3"}
-	case ".m4a", ".m4b":
+	case ".m4a", ".m4b", ".mp4":
 		return []string{"mp4"}
-	case ".flac", ".ogg", ".opus":
+	case ".flac":
+		return []string{"flac"}
+	case ".ogg":
 		return []string{"vorbis"}
+	case ".opus":
+		return []string{"opus"}
 	default:
 		return []string{"embedded"}
 	}

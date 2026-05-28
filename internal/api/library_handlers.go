@@ -1,8 +1,11 @@
 package api
 
 import (
+	"encoding/json"
 	"errors"
+	"io"
 	"net/http"
+	"strings"
 
 	"github.com/bouliehaan/samo-server/internal/libraries"
 )
@@ -87,10 +90,11 @@ func (s *Server) scanAllLibraries(w http.ResponseWriter, r *http.Request) {
 	if _, ok := s.requireAdmin(w, r); !ok {
 		return
 	}
-	// Scans run in a background goroutine; this handler returns the job
-	// row as soon as it's created so the dashboard can start polling for
-	// progress. The catalog reload is wired into Service.OnScanComplete.
-	result, err := s.librariesService().ScanAll(r.Context(), libraries.TriggerAPI)
+	var input struct {
+		Mode string `json:"mode"`
+	}
+	_ = decodeJSONOptional(r, &input)
+	result, err := s.librariesService().ScanAll(r.Context(), libraries.TriggerAPI, strings.TrimSpace(input.Mode))
 	if err != nil {
 		writeLibraryScanError(w, result, err)
 		return
@@ -102,7 +106,18 @@ func (s *Server) scanLibrary(w http.ResponseWriter, r *http.Request) {
 	if _, ok := s.requireAdmin(w, r); !ok {
 		return
 	}
-	result, err := s.librariesService().ScanLibrary(r.Context(), r.PathValue("id"), libraries.TriggerAPI)
+	var input struct {
+		Mode     string   `json:"mode"`
+		Subpaths []string `json:"subpaths"`
+	}
+	_ = decodeJSONOptional(r, &input)
+	result, err := s.librariesService().ScanLibrarySubpaths(
+		r.Context(),
+		r.PathValue("id"),
+		libraries.TriggerAPI,
+		strings.TrimSpace(input.Mode),
+		input.Subpaths,
+	)
 	if err != nil {
 		writeLibraryScanError(w, result, err)
 		return
@@ -139,6 +154,80 @@ func (s *Server) getScanJob(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, item)
 }
 
+func (s *Server) cancelScanJob(w http.ResponseWriter, r *http.Request) {
+	if _, ok := s.requireAdmin(w, r); !ok {
+		return
+	}
+	item, err := s.librariesService().CancelScan(r.Context(), r.PathValue("id"))
+	if err != nil {
+		writeLibraryScanError(w, libraries.ScanResult{Job: item}, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, item)
+}
+
+func (s *Server) cancelActiveScan(w http.ResponseWriter, r *http.Request) {
+	if _, ok := s.requireAdmin(w, r); !ok {
+		return
+	}
+	item, err := s.librariesService().CancelActiveScan(r.Context())
+	if err != nil {
+		writeLibraryScanError(w, libraries.ScanResult{Job: item}, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, item)
+}
+
+func (s *Server) listMissingFiles(w http.ResponseWriter, r *http.Request) {
+	if _, ok := s.requireAdmin(w, r); !ok {
+		return
+	}
+	page, err := readPage(r)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	items, err := s.librariesService().ListMissingFiles(r.Context(), r.URL.Query().Get("library_id"), page.Limit, page.Offset)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, items)
+}
+
+func (s *Server) removeAllMissingFiles(w http.ResponseWriter, r *http.Request) {
+	if _, ok := s.requireAdmin(w, r); !ok {
+		return
+	}
+	result, err := s.librariesService().RemoveAllMissingFiles(r.Context(), r.URL.Query().Get("library_id"))
+	if err != nil {
+		writeLibraryError(w, err)
+		return
+	}
+	if result.Removed > 0 {
+		if err := s.reloadCatalogProjection(r); err != nil {
+			writeError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+	}
+	writeJSON(w, http.StatusOK, result)
+}
+
+func (s *Server) removeMissingFile(w http.ResponseWriter, r *http.Request) {
+	if _, ok := s.requireAdmin(w, r); !ok {
+		return
+	}
+	if err := s.librariesService().RemoveMissingFile(r.Context(), r.PathValue("id")); err != nil {
+		writeLibraryError(w, err)
+		return
+	}
+	if err := s.reloadCatalogProjection(r); err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
 func (s *Server) librariesService() *libraries.Service {
 	if s.libraries == nil {
 		panic("libraries service is not configured")
@@ -168,6 +257,8 @@ func writeLibraryScanError(w http.ResponseWriter, result libraries.ScanResult, e
 	switch {
 	case errors.Is(err, libraries.ErrScanInProgress):
 		writeError(w, http.StatusConflict, err.Error())
+	case errors.Is(err, libraries.ErrScanNotCancellable):
+		writeError(w, http.StatusConflict, err.Error())
 	case result.Job.ID != "" && result.Job.Error != "":
 		writeJSON(w, http.StatusInternalServerError, map[string]any{
 			"error": "scan failed: " + result.Job.Error,
@@ -176,4 +267,19 @@ func writeLibraryScanError(w http.ResponseWriter, result libraries.ScanResult, e
 	default:
 		writeLibraryError(w, err)
 	}
+}
+
+func decodeJSONOptional(r *http.Request, dst any) error {
+	if r.Body == nil {
+		return nil
+	}
+	defer r.Body.Close()
+	decoder := json.NewDecoder(io.LimitReader(r.Body, 1<<20))
+	if err := decoder.Decode(dst); err != nil {
+		if errors.Is(err, io.EOF) {
+			return nil
+		}
+		return err
+	}
+	return nil
 }

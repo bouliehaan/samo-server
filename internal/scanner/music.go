@@ -11,7 +11,33 @@ import (
 )
 
 func (s *Scanner) scanMusicFile(ctx context.Context, library Library, root string, path string) error {
-	probe, err := s.probe(ctx, path)
+	if !shouldScanAudioFile(path) {
+		return nil
+	}
+	if s.skipUnchangedFile(path) {
+		return nil
+	}
+
+	log.Printf("scanner: indexing music file %q", path)
+	if s.onFileActive != nil {
+		s.onFileActive(path)
+	}
+	// Bump files_seen before ffprobe/DB work so the dashboard does not sit at
+	// 0/13637 while the first (slow) file is processed.
+	if s.activeScan != nil {
+		s.activeScan.seeFile(path)
+	}
+
+	var probe probeInfo
+	var err error
+	if s.scanMode == ScanModeRepair {
+		probe, err = s.loadCachedMusicProbe(ctx, library.ID, path)
+		if err != nil {
+			probe, err = s.probeMusic(ctx, path)
+		}
+	} else {
+		probe, err = s.probeMusic(ctx, path)
+	}
 	if err != nil {
 		// One unreadable file (corrupt, unsupported codec, ffprobe
 		// hiccup) used to abort the entire scan. Log + skip so the
@@ -23,6 +49,7 @@ func (s *Scanner) scanMusicFile(ctx context.Context, library Library, root strin
 	relPath, _ := filepath.Rel(root, path)
 	tags := probe.Tags
 	albumDir := filepath.Dir(path)
+	relAlbumDir, _ := filepath.Rel(root, albumDir)
 	albumSidecar := readMusicAlbumSidecar(albumDir)
 	title := firstTag(tags, "title")
 	if title == "" {
@@ -33,26 +60,36 @@ func (s *Scanner) scanMusicFile(ctx context.Context, library Library, root strin
 	if len(artistNames) == 0 {
 		artistNames = []string{"Unknown Artist"}
 	}
-	albumArtistNames := splitTag(tags, "album_artist", "albumartist")
-	if len(albumArtistNames) == 0 {
-		albumArtistNames = []string{artistNames[0]}
-	}
-
 	artistSortNames := splitTag(tags, "artistsort", "artist_sort", "sortname")
 	albumArtistSortNames := splitTag(tags, "albumartistsort", "album_artist_sort", "albumsort")
 	artists := musicArtistsFromNames(artistNames, splitTag(tags, "musicbrainz_artistid", "musicbrainz_artist_id"), artistSortNames)
-	albumArtists := musicArtistsFromNames(albumArtistNames, splitTag(tags, "musicbrainz_albumartistid", "musicbrainz_albumartist_id"), albumArtistSortNames)
-	for _, artist := range append(artists, albumArtists...) {
-		if err := s.upsertMusicArtist(ctx, artist); err != nil {
-			return err
-		}
-	}
 
 	albumTitle := firstNonEmpty(firstTag(tags, "album"), albumSidecar.Title)
 	if albumTitle == "" {
 		albumTitle = filepath.Base(albumDir)
 	}
 	releaseDate := firstTag(tags, "date", "year", "originaldate", "originalyear")
+	albumArtistNames := resolveMusicAlbumArtistNames(tags, albumSidecar)
+	albumID := resolveMusicAlbumID(tags, albumTitle, relAlbumDir, albumArtistNames)
+	trackPID := computeTrackPID(library.ID, relPath, tags, albumID)
+	contentHash := contentHashFromProbe(library.ID, relPath, tags, albumID, probe)
+	if len(albumArtistNames) == 0 {
+		albumArtistNames = s.loadAlbumArtistNamesForAlbum(ctx, albumID)
+	}
+	albumArtists := musicArtistsFromNames(albumArtistNames, splitTag(tags, "musicbrainz_albumartistid", "musicbrainz_albumartist_id"), albumArtistSortNames)
+	if artistImage := findArtistImage(filepath.Dir(albumDir)); artistImage != nil {
+		for index := range albumArtists {
+			if len(albumArtists[index].Images) == 0 {
+				albumArtists[index].Images = []catalog.Image{*artistImage}
+			}
+		}
+	}
+	for _, artist := range append(artists, albumArtists...) {
+		if err := s.upsertMusicArtist(ctx, artist); err != nil {
+			return err
+		}
+	}
+
 	releaseYear := yearFromDate(releaseDate)
 	genres := splitGenreTag(tags, "genre")
 	for _, genre := range genres {
@@ -61,18 +98,16 @@ func (s *Scanner) scanMusicFile(ctx context.Context, library Library, root strin
 		}
 	}
 
-	albumID := stableID("album", strings.Join(albumArtistNames, ";"), albumTitle, releaseDate)
-	albumCover := s.resolveCover(ctx, filepath.Dir(path), []string{path}, []string{probe.AudioFile.Checksum})
+	embeddedKnown := probe.HasEmbeddedCover
+	albumCover := s.resolveCover(ctx, filepath.Dir(path), []string{path}, []string{probe.AudioFile.Checksum}, &embeddedKnown)
 	album := catalog.MusicAlbum{
 		ID:                  albumID,
 		Title:               albumTitle,
 		SortTitle:           firstTag(tags, "albumsort", "album_sort", "sortalbum"),
-		Version:             firstTag(tags, "albumversion", "album_version", "version"),
-		DisplayArtist:       firstNonEmpty(firstTag(tags, "albumartists", "album_artist_display"), strings.Join(albumArtistNames, ", ")),
+		Version:             firstTag(tags, "albumversion", "album_version"),
+		DisplayArtist:       resolveMusicAlbumDisplayArtist(tags, albumSidecar, albumArtistNames),
 		AlbumArtistIDs:      artistIDs(albumArtists),
 		AlbumArtistNames:    albumArtistNames,
-		ArtistIDs:           artistIDs(artists),
-		ArtistNames:         artistNames,
 		ReleaseDate:         releaseDate,
 		OriginalReleaseDate: firstTag(tags, "originaldate", "originalyear", "original_release_date"),
 		ReleaseYear:         releaseYear,
@@ -104,13 +139,17 @@ func (s *Scanner) scanMusicFile(ctx context.Context, library Library, root strin
 	if err := s.upsertMusicAlbum(ctx, album); err != nil {
 		return err
 	}
-	if err := s.setAlbumArtists(ctx, album.ID, albumArtists); err != nil {
+	if s.activeScan != nil {
+		s.activeScan.seeAlbum(album.ID)
+	}
+	if err := s.setAlbumArtists(ctx, album.ID, albumArtists, albumArtistsExplicitFromTags(tags, albumSidecar)); err != nil {
 		return err
 	}
 
 	discNumber, totalDiscs := parseNumberPair(firstTag(tags, "disc", "discnumber"))
 	trackNumber, totalTracks := parseNumberPair(firstTag(tags, "track", "tracknumber"))
-	trackID := stableID("track", album.ID, title, relPath)
+	// Navidrome-style persistent id: stable across path changes; phase 2 reconciles moves.
+	trackID := stableID("track", library.ID, trackPID)
 	track := catalog.MusicTrack{
 		ID:               trackID,
 		Title:            title,
@@ -121,7 +160,7 @@ func (s *Scanner) scanMusicFile(ctx context.Context, library Library, root strin
 		ArtistNames:      artistNames,
 		AlbumID:          album.ID,
 		AlbumTitle:       album.Title,
-		AlbumArtistIDs:   album.ArtistIDs,
+		AlbumArtistIDs:   album.AlbumArtistIDs,
 		AlbumArtistNames: album.AlbumArtistNames,
 		DiscNumber:       discNumber,
 		TrackNumber:      trackNumber,
@@ -160,9 +199,11 @@ func (s *Scanner) scanMusicFile(ctx context.Context, library Library, root strin
 	}
 
 	file := probe.AudioFile
-	file.ID = stableID("file", path)
+	// media_files.path is globally unique — id must be stable per path, not per
+	// trackPID (which changes when tags/album grouping change on rescan).
+	file.ID = stableID("file", file.Path)
 	file.RelativePath = relPath
-	if err := s.upsertAudioFile(ctx, library.ID, audioFileOwner{TrackID: track.ID}, file); err != nil {
+	if err := s.upsertAudioFile(ctx, library.ID, audioFileOwner{TrackID: track.ID}, file, trackPID, contentHash); err != nil {
 		return err
 	}
 

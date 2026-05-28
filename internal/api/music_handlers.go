@@ -55,6 +55,15 @@ func (s *Server) getMusicAlbum(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, item)
 }
 
+func (s *Server) listMusicAlbumTracks(w http.ResponseWriter, r *http.Request) {
+	if _, err := s.catalog.MusicAlbum(r.PathValue("id")); err != nil {
+		writeCatalogError(w, err)
+		return
+	}
+	items := s.catalog.MusicTracksForAlbum(r.PathValue("id"))
+	writeJSON(w, http.StatusOK, map[string]any{"items": items, "total": len(items)})
+}
+
 func (s *Server) listMusicTracks(w http.ResponseWriter, r *http.Request) {
 	page, err := readPage(r)
 	if err != nil {

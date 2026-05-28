@@ -8,8 +8,10 @@ import (
 	"testing"
 
 	"github.com/bouliehaan/samo-server/internal/catalog"
+	"github.com/bouliehaan/samo-server/internal/playback"
 	"github.com/bouliehaan/samo-server/internal/podcaststream"
 	"github.com/bouliehaan/samo-server/internal/storage"
+	"github.com/bouliehaan/samo-server/internal/users"
 	"github.com/bouliehaan/samo-server/migrations"
 )
 
@@ -50,8 +52,14 @@ func TestStreamPodcastEpisodeProxiesRemoteEnclosure(t *testing.T) {
 		INSERT INTO podcast_episodes (
 		  id, library_id, podcast_id, title, duration_seconds, enclosure_url, enclosure_type, enclosure_bytes, progress_json
 		)
-		VALUES ('ep-1', 'lib-pod', 'pod-1', 'Episode', 10, ?, 'audio/mpeg', ?, '{"progressSeconds":5}')`,
+		VALUES ('ep-1', 'lib-pod', 'pod-1', 'Episode', 10, ?, 'audio/mpeg', ?, '{}')`,
 		upstream.URL, len(payload)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.ExecContext(ctx, `
+		INSERT INTO user_playback (user_id, target_kind, target_id, state_json, updated_at)
+		VALUES (?, 'podcast-episode', 'ep-1', ?, datetime('now'))`,
+		users.BootstrapUserID, `{"progressSeconds":5}`); err != nil {
 		t.Fatal(err)
 	}
 
@@ -61,6 +69,7 @@ func TestStreamPodcastEpisodeProxiesRemoteEnclosure(t *testing.T) {
 	}
 	handler := NewServer(ServerOptions{
 		Catalog:       catalog.NewService(seed),
+		Playback:      playback.New(db),
 		PodcastStream: podcaststream.New(podcaststream.ServiceOptions{AllowPrivateHosts: true}),
 	})
 

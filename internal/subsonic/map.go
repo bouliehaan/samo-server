@@ -20,12 +20,12 @@ func toArtist(item catalog.MusicArtist) artist {
 func toArtistAlbumChild(album catalog.MusicAlbum) child {
 	return child{
 		ID:       album.ID,
-		Parent:   firstID(album.ArtistIDs, album.AlbumArtistIDs),
+		Parent:   firstID(album.AlbumArtistIDs),
 		Title:    album.Title,
 		IsDir:    true,
 		Album:    album.Title,
-		Artist:   displayArtist(album.DisplayArtist, album.ArtistNames, album.AlbumArtistNames),
-		ArtistID: firstID(album.ArtistIDs, album.AlbumArtistIDs),
+		Artist:   displayArtist(album.DisplayArtist, album.AlbumArtistNames),
+		ArtistID: firstID(album.AlbumArtistIDs),
 		Year:     album.ReleaseYear,
 		Genre:    firstGenre(album.Genres),
 		CoverArt: album.ID,
@@ -45,8 +45,8 @@ func toSongChild(track catalog.MusicTrack) child {
 		Title:       track.Title,
 		IsDir:       false,
 		Album:       track.AlbumTitle,
-		Artist:      displayArtist(track.DisplayArtist, track.ArtistNames, track.AlbumArtistNames),
-		ArtistID:    firstID(track.ArtistIDs, track.AlbumArtistIDs),
+		Artist:      displayArtist(track.DisplayArtist, track.AlbumArtistNames, track.ArtistNames),
+		ArtistID:    firstID(track.AlbumArtistIDs, track.ArtistIDs),
 		Track:       track.TrackNumber,
 		Year:        track.ReleaseYear,
 		Genre:       firstGenre(track.Genres),
@@ -163,8 +163,8 @@ func audioPath(file catalog.AudioFile) string {
 }
 
 func audioSuffix(file catalog.AudioFile) string {
-	if container := strings.TrimSpace(file.Container); container != "" {
-		return strings.ToLower(container)
+	if format := catalog.DisplayFormat(file); format != "" {
+		return strings.ToLower(format)
 	}
 	if path := audioPath(file); path != "" {
 		ext := strings.TrimPrefix(strings.ToLower(filepath.Ext(path)), ".")

@@ -23,17 +23,19 @@ const (
 )
 
 type SearchRequest struct {
-	Kind      Kind            `json:"kind"`
-	Query     string          `json:"query,omitempty"`
-	Provider  string          `json:"provider,omitempty"`
-	Limit     int             `json:"limit,omitempty"`
-	Title     string          `json:"title,omitempty"`
-	Author    string          `json:"author,omitempty"`
-	ISBN      string          `json:"isbn,omitempty"`
-	Artist    string          `json:"artist,omitempty"`
-	Album     string          `json:"album,omitempty"`
-	Track     string          `json:"track,omitempty"`
-	MusicType MusicSearchType `json:"musicType,omitempty"`
+	Kind        Kind            `json:"kind"`
+	Query       string          `json:"query,omitempty"`
+	Provider    string          `json:"provider,omitempty"`
+	Limit       int             `json:"limit,omitempty"`
+	Title       string          `json:"title,omitempty"`
+	Author      string          `json:"author,omitempty"`
+	ISBN        string          `json:"isbn,omitempty"`
+	ASIN        string          `json:"asin,omitempty"`
+	AudibleASIN string          `json:"audibleAsin,omitempty"`
+	Artist      string          `json:"artist,omitempty"`
+	Album       string          `json:"album,omitempty"`
+	Track       string          `json:"track,omitempty"`
+	MusicType   MusicSearchType `json:"musicType,omitempty"`
 }
 
 type SearchResponse struct {

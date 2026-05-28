@@ -45,8 +45,8 @@ func TestFFProbeResultNormalizesAudioMetadata(t *testing.T) {
 	if probe.AudioFile.SampleRate != 96000 {
 		t.Fatalf("sample rate = %d, want 96000", probe.AudioFile.SampleRate)
 	}
-	if got := probe.AudioFile.MetadataFormats; len(got) != 1 || got[0] != "vorbis" {
-		t.Fatalf("metadata formats = %#v, want vorbis", got)
+	if got := probe.AudioFile.MetadataFormats; len(got) != 1 || got[0] != "flac" {
+		t.Fatalf("metadata formats = %#v, want flac", got)
 	}
 	if got := splitTag(probe.Tags, "genre"); len(got) != 2 || got[1] != "Archive" {
 		t.Fatalf("genres = %#v, want Ambient and Archive", got)

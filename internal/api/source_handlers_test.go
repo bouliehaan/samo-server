@@ -174,9 +174,10 @@ func sourcesTestServer(t *testing.T, db *sql.DB, catalogService *catalog.Service
 		return nil
 	}
 	return NewServer(ServerOptions{
-		Catalog:       catalogService,
-		Radio:         radioService,
-		Sources:       sources.New(db),
-		ReloadCatalog: reload,
+		Catalog:                          catalogService,
+		Radio:                            radioService,
+		Sources:                          sources.New(db),
+		ReloadCatalog:                    reload,
+		DisableInitialInternetRadioProbe: true,
 	})
 }

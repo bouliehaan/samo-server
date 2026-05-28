@@ -13,6 +13,7 @@ import (
 	"github.com/bouliehaan/samo-server/internal/files"
 	"github.com/bouliehaan/samo-server/internal/playback"
 	"github.com/bouliehaan/samo-server/internal/storage"
+	"github.com/bouliehaan/samo-server/internal/users"
 	"github.com/bouliehaan/samo-server/migrations"
 )
 
@@ -52,8 +53,14 @@ func TestStreamAudiobookSelectsFileFromPlaybackProgress(t *testing.T) {
 	}
 	if _, err := db.ExecContext(ctx, `
 		INSERT INTO audiobooks (id, library_id, path, duration_seconds, progress_json)
-		VALUES (?, ?, ?, 15, ?)`,
-		itemID, libraryID, bookDir, `{"progressSeconds":12}`); err != nil {
+		VALUES (?, ?, ?, 15, '{}')`,
+		itemID, libraryID, bookDir); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.ExecContext(ctx, `
+		INSERT INTO user_playback (user_id, target_kind, target_id, state_json, updated_at)
+		VALUES (?, 'audiobook', ?, ?, datetime('now'))`,
+		users.BootstrapUserID, itemID, `{"progressSeconds":12}`); err != nil {
 		t.Fatal(err)
 	}
 	for _, row := range []struct {

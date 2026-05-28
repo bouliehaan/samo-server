@@ -30,12 +30,65 @@ func TestSignParamsMatchesLastFMRules(t *testing.T) {
 	}
 }
 
+func TestSaveConfigRequiresSecretWhenAPIKeyChanges(t *testing.T) {
+	ctx := context.Background()
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{"token":"ok"}`))
+	}))
+	defer server.Close()
+
+	db := openTestDB(t)
+	service := newTestService(t, db, server)
+	if _, err := service.SaveConfig(ctx, AppConfigInput{
+		APIKey:       "original-key",
+		SharedSecret: "original-secret",
+	}); err != nil {
+		t.Fatalf("initial SaveConfig: %v", err)
+	}
+	_, err := service.SaveConfig(ctx, AppConfigInput{
+		APIKey: "new-key",
+	})
+	if err == nil {
+		t.Fatal("expected error when changing api key without shared secret")
+	}
+	if !strings.Contains(err.Error(), "shared secret is required") {
+		t.Fatalf("error = %v", err)
+	}
+}
+
+func TestGetSessionSignature(t *testing.T) {
+	params := map[string]string{
+		"api_key": "key",
+		"format":  "json",
+		"method":  "auth.getSession",
+		"token":   "token-123",
+	}
+	sig := signParams("secret", params)
+	if sig != signParams("secret", map[string]string{
+		"api_key": "key",
+		"method":  "auth.getSession",
+		"token":   "token-123",
+	}) {
+		t.Fatal("signature must ignore format")
+	}
+}
+
 func TestCompleteAuthStoresSession(t *testing.T) {
 	ctx := context.Background()
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		body, _ := io.ReadAll(r.Body)
-		if !strings.Contains(string(body), "method=auth.getSession") {
-			t.Fatalf("unexpected request body: %s", body)
+		if err := r.ParseForm(); err != nil {
+			t.Fatal(err)
+		}
+		expected := signParams("secret", map[string]string{
+			"api_key": "key",
+			"method":  "auth.getSession",
+			"token":   "token-123",
+		})
+		if r.Form.Get("api_sig") != expected {
+			t.Fatalf("api_sig = %q, want %q", r.Form.Get("api_sig"), expected)
+		}
+		if r.Form.Get("method") != "auth.getSession" {
+			t.Fatalf("method = %q", r.Form.Get("method"))
 		}
 		_, _ = w.Write([]byte(`{"session":{"name":"jake","key":"session-key","subscriber":0}}`))
 	}))
@@ -220,19 +273,19 @@ func TestLastFMStatusJSON(t *testing.T) {
 
 func newTestService(t *testing.T, db *sql.DB, server *httptest.Server) *Service {
 	t.Helper()
-	service := NewService(ServiceOptions{
-		DB:           db,
-		APIKey:       "key",
-		SharedSecret: "secret",
-	})
-	service.client.http = &http.Client{
+	httpClient := &http.Client{
 		Transport: roundTripperFunc(func(req *http.Request) (*http.Response, error) {
 			req.URL.Scheme = "http"
 			req.URL.Host = strings.TrimPrefix(server.URL, "http://")
 			return http.DefaultTransport.RoundTrip(req)
 		}),
 	}
-	return service
+	return NewService(ServiceOptions{
+		DB:           db,
+		APIKey:       "key",
+		SharedSecret: "secret",
+		HTTPClient:   httpClient,
+	})
 }
 
 func seedLastFMSession(t *testing.T, db *sql.DB) {

@@ -63,8 +63,13 @@ func TestMusicBrowseForUserFiltersPrivatePlaylists(t *testing.T) {
 	})
 
 	results := service.MusicBrowseForUser(
-		nil, nil, nil, nil,
-		MusicBrowseRecentlyAdded,
+		nil, nil, nil,
+		map[string]PlaybackState{
+			"private-other": {Favorite: true},
+			"public-other":  {Favorite: true},
+			"private-owned": {Favorite: true},
+		},
+		MusicBrowseFavorites,
 		PageRequest{Limit: 10},
 		"user-me",
 	)

@@ -16,10 +16,15 @@ type musicIndex struct {
 }
 
 func buildMusicIndex(seed catalog.Seed) musicIndex {
+	albums := append([]catalog.MusicAlbum(nil), seed.MusicAlbums...)
+	tracks := append([]catalog.MusicTrack(nil), seed.MusicTracks...)
+	// Match catalog.Service.applySeed: search must see the same aggregated
+	// maxBitDepth/maxSampleRate/hiRes fields list endpoints expose.
+	catalog.EnrichAlbumAudioQuality(albums, tracks)
 	return musicIndex{
 		artists:   append([]catalog.MusicArtist(nil), seed.MusicArtists...),
-		albums:    append([]catalog.MusicAlbum(nil), seed.MusicAlbums...),
-		tracks:    append([]catalog.MusicTrack(nil), seed.MusicTracks...),
+		albums:    albums,
+		tracks:    tracks,
 		playlists: append([]catalog.MusicPlaylist(nil), seed.MusicPlaylists...),
 	}
 }
@@ -61,6 +66,9 @@ func filterMusicArtists(items []catalog.MusicArtist, query MusicQuery, overlay P
 func filterMusicAlbums(items []catalog.MusicAlbum, query MusicQuery, overlay PlaybackOverlay) []catalog.MusicAlbum {
 	matches := make([]catalog.MusicAlbum, 0)
 	for _, item := range items {
+		if item.TrackCount <= 0 {
+			continue
+		}
 		item.Playback = overlayAlbums(overlay, item.ID, item.Playback)
 		if !musicEntityMatches(query, item.Genres, item.ReleaseYear, item.AddedAt, item.Playback, albumSearchText(item)) {
 			continue

@@ -18,15 +18,42 @@ type groupedAudio struct {
 }
 
 type probedFile struct {
-	AudioFile catalog.AudioFile
-	Tags      catalog.Tags
-	Chapters  []catalog.AudioChapter
+	AudioFile        catalog.AudioFile
+	Tags             catalog.Tags
+	Chapters         []catalog.AudioChapter
+	HasEmbeddedCover bool
 }
 
-func (s *Scanner) probeGroup(ctx context.Context, root string, files []string) ([]probedFile, error) {
+func (s *Scanner) probeGroup(ctx context.Context, libraryID, root string, files []string, ownerColumn string) ([]probedFile, error) {
+	if !s.groupNeedsProbe(files) {
+		s.markIndexedGroupSeen(files)
+		return nil, nil
+	}
+
 	probes := make([]probedFile, 0, len(files))
 	for _, path := range files {
-		probe, err := s.probe(ctx, path)
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		if s.onFileActive != nil {
+			s.onFileActive(path)
+		}
+		if s.activeScan != nil {
+			s.activeScan.seeFile(path)
+		}
+		var probe probeInfo
+		var err error
+		if ownerColumn == "audiobook_id" {
+			probe, err = s.probeAudiobook(ctx, path)
+		} else {
+			probe, err = s.probe(ctx, path)
+		}
+		if err != nil && ownerColumn != "" {
+			if cached, cacheErr := s.loadCachedMediaProbe(ctx, libraryID, path, ownerColumn); cacheErr == nil {
+				probe = cached
+				err = nil
+			}
+		}
 		if err != nil {
 			// Skip the bad file, log it, keep going. A whole audiobook
 			// shouldn't be dropped because chapter 7 is corrupt.
@@ -36,9 +63,10 @@ func (s *Scanner) probeGroup(ctx context.Context, root string, files []string) (
 		relPath, _ := filepath.Rel(root, path)
 		probe.AudioFile.RelativePath = relPath
 		probes = append(probes, probedFile{
-			AudioFile: probe.AudioFile,
-			Tags:      probe.Tags,
-			Chapters:  probe.Chapters,
+			AudioFile:        probe.AudioFile,
+			Tags:             probe.Tags,
+			Chapters:         probe.Chapters,
+			HasEmbeddedCover: probe.HasEmbeddedCover,
 		})
 	}
 	sort.Slice(probes, func(i, j int) bool {

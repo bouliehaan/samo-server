@@ -8,29 +8,35 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
-	"github.com/bouliehaan/samo-server/internal/catalog"
 	"github.com/bouliehaan/samo-server/internal/libraries"
+	"github.com/bouliehaan/samo-server/internal/scanner"
 	"github.com/fsnotify/fsnotify"
 )
 
+type LibraryRoot struct {
+	ID   string
+	Path string
+}
+
 type Options struct {
-	DB            *sql.DB
-	Catalog       *catalog.Service
-	Scan          func(context.Context) (libraries.ScanResult, error)
-	ListLibraries func(context.Context) ([]string, error)
-	Debounce      time.Duration
-	Logger        *log.Logger
+	DB             *sql.DB
+	ScanSubpaths   func(context.Context, string, []string) (libraries.ScanResult, error)
+	ListLibraries  func(context.Context) ([]LibraryRoot, error)
+	ScanInProgress func() bool
+	Debounce       time.Duration
+	Logger         *log.Logger
 }
 
 type Watcher struct {
-	db            *sql.DB
-	catalog       *catalog.Service
-	scan          func(context.Context) (libraries.ScanResult, error)
-	listLibraries func(context.Context) ([]string, error)
-	debounce      time.Duration
-	logger        *log.Logger
+	db             *sql.DB
+	scanSubpaths   func(context.Context, string, []string) (libraries.ScanResult, error)
+	listLibraries  func(context.Context) ([]LibraryRoot, error)
+	scanInProgress func() bool
+	debounce       time.Duration
+	logger         *log.Logger
 }
 
 func New(options Options) *Watcher {
@@ -43,17 +49,17 @@ func New(options Options) *Watcher {
 		logger = log.Default()
 	}
 	return &Watcher{
-		db:            options.DB,
-		catalog:       options.Catalog,
-		scan:          options.Scan,
-		listLibraries: options.ListLibraries,
-		debounce:      debounce,
-		logger:        logger,
+		db:             options.DB,
+		scanSubpaths:   options.ScanSubpaths,
+		listLibraries:  options.ListLibraries,
+		scanInProgress: options.ScanInProgress,
+		debounce:       debounce,
+		logger:         logger,
 	}
 }
 
 func (w *Watcher) Run(ctx context.Context) error {
-	if w.scan == nil {
+	if w.scanSubpaths == nil {
 		return errors.New("watcher scan callback is nil")
 	}
 	if w.listLibraries == nil {
@@ -69,9 +75,6 @@ func (w *Watcher) Run(ctx context.Context) error {
 	if w.db == nil {
 		return errors.New("watcher database is nil")
 	}
-	if w.catalog == nil {
-		return errors.New("watcher catalog is nil")
-	}
 
 	fsWatcher, err := fsnotify.NewWatcher()
 	if err != nil {
@@ -79,14 +82,19 @@ func (w *Watcher) Run(ctx context.Context) error {
 	}
 	defer fsWatcher.Close()
 
-	if err := addLibraryWatches(fsWatcher, roots); err != nil {
+	paths := make([]string, 0, len(roots))
+	for _, root := range roots {
+		paths = append(paths, root.Path)
+	}
+	if err := addLibraryWatches(fsWatcher, paths); err != nil {
 		return err
 	}
 	w.logger.Printf("watching %d configured library path(s)", len(roots))
 
 	trigger := make(chan struct{}, 1)
 	done := make(chan struct{})
-	go w.scanLoop(ctx, trigger, done)
+	pending := newPendingChanges()
+	go w.scanLoop(ctx, trigger, done, pending, roots)
 	defer func() {
 		close(trigger)
 		<-done
@@ -108,7 +116,10 @@ func (w *Watcher) Run(ctx context.Context) error {
 				}
 			}
 			if interestingEvent(event) {
-				notify(trigger)
+				if change, ok := resolveLibraryChange(event.Name, roots); ok {
+					pending.add(change)
+					notify(trigger)
+				}
 			}
 		case err, ok := <-fsWatcher.Errors:
 			if !ok {
@@ -119,7 +130,78 @@ func (w *Watcher) Run(ctx context.Context) error {
 	}
 }
 
-func (w *Watcher) scanLoop(ctx context.Context, trigger <-chan struct{}, done chan<- struct{}) {
+type libraryChange struct {
+	libraryID string
+	subpath   string
+}
+
+type pendingChanges struct {
+	mu      sync.Mutex
+	changes map[string]map[string]struct{}
+}
+
+func newPendingChanges() *pendingChanges {
+	return &pendingChanges{changes: map[string]map[string]struct{}{}}
+}
+
+func (p *pendingChanges) add(change libraryChange) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.changes[change.libraryID] == nil {
+		p.changes[change.libraryID] = map[string]struct{}{}
+	}
+	p.changes[change.libraryID][change.subpath] = struct{}{}
+}
+
+func (p *pendingChanges) drain() map[string][]string {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	out := make(map[string][]string, len(p.changes))
+	for libraryID, paths := range p.changes {
+		list := make([]string, 0, len(paths))
+		for path := range paths {
+			list = append(list, path)
+		}
+		out[libraryID] = list
+	}
+	p.changes = map[string]map[string]struct{}{}
+	return out
+}
+
+func resolveLibraryChange(eventPath string, roots []LibraryRoot) (libraryChange, bool) {
+	absolute, err := filepath.Abs(strings.TrimSpace(eventPath))
+	if err != nil {
+		return libraryChange{}, false
+	}
+	subpath, err := scanner.ResolveIncrementalScanRoot(absolute)
+	if err != nil {
+		return libraryChange{}, false
+	}
+	for _, root := range roots {
+		if pathUnderRoot(subpath, root.Path) {
+			return libraryChange{libraryID: root.ID, subpath: subpath}, true
+		}
+	}
+	return libraryChange{}, false
+}
+
+func pathUnderRoot(path, root string) bool {
+	absolute, err := filepath.Abs(path)
+	if err != nil {
+		return false
+	}
+	rootAbs, err := filepath.Abs(root)
+	if err != nil {
+		return false
+	}
+	if absolute == rootAbs {
+		return true
+	}
+	sep := string(os.PathSeparator)
+	return strings.HasPrefix(absolute, rootAbs+sep)
+}
+
+func (w *Watcher) scanLoop(ctx context.Context, trigger <-chan struct{}, done chan<- struct{}, pending *pendingChanges, roots []LibraryRoot) {
 	defer close(done)
 
 	var timer *time.Timer
@@ -147,27 +229,28 @@ func (w *Watcher) scanLoop(ctx context.Context, trigger <-chan struct{}, done ch
 		case <-timerC:
 			timer = nil
 			timerC = nil
-			w.rescan(ctx)
+			if w.scanInProgress != nil && w.scanInProgress() {
+				timer = time.NewTimer(w.debounce)
+				timerC = timer.C
+				continue
+			}
+			w.rescan(ctx, pending.drain())
 		}
 	}
 }
 
-func (w *Watcher) rescan(ctx context.Context) {
+func (w *Watcher) rescan(ctx context.Context, grouped map[string][]string) {
+	if len(grouped) == 0 {
+		return
+	}
 	started := time.Now()
-	w.logger.Printf("library change detected; scanning")
-	result, err := w.scan(ctx)
-	if err != nil {
-		w.logger.Printf("watch-triggered scan failed: %v", err)
-		return
+	for libraryID, subpaths := range grouped {
+		w.logger.Printf("library change detected; incremental scan of %d folder(s) in library %s", len(subpaths), libraryID)
+		if _, err := w.scanSubpaths(ctx, libraryID, subpaths); err != nil {
+			w.logger.Printf("watch-triggered scan failed for library %s: %v", libraryID, err)
+		}
 	}
-	seed, err := catalog.LoadSeedFromDB(ctx, w.db)
-	if err != nil {
-		w.logger.Printf("catalog refresh failed after scan: %v", err)
-		return
-	}
-	w.catalog.Replace(seed)
-	w.logger.Printf("catalog refreshed after filesystem changes in %s (job %s, pruned %d files / %d items)",
-		time.Since(started).Round(time.Millisecond), result.Job.ID, result.Job.FilesPruned, result.Job.ItemsPruned)
+	w.logger.Printf("incremental library scan finished in %s", time.Since(started).Round(time.Millisecond))
 }
 
 func addLibraryWatches(watcher *fsnotify.Watcher, roots []string) error {
@@ -198,6 +281,9 @@ func addRecursive(watcher *fsnotify.Watcher, root string) error {
 		if strings.HasPrefix(entry.Name(), ".") && path != root {
 			return filepath.SkipDir
 		}
+		if scanner.ShouldIgnoreLibraryPath(root, path) {
+			return filepath.SkipDir
+		}
 		return watcher.Add(path)
 	})
 }
@@ -219,7 +305,7 @@ func isInterestingPath(path string) bool {
 	}
 	switch strings.ToLower(filepath.Ext(path)) {
 	case ".aac", ".aif", ".aiff", ".alac", ".flac", ".m4a", ".m4b", ".mp3", ".ogg", ".opus", ".wav", ".wma",
-		".opf", ".nfo", ".cue", ".jpg", ".jpeg", ".png", ".webp":
+		".opf", ".nfo", ".cue", ".jpg", ".jpeg", ".png", ".webp", ".m3u", ".m3u8":
 		return true
 	default:
 		return false

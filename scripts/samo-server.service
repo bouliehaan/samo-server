@@ -16,6 +16,7 @@ RestartSec=5s
 # Defaults. Override these by dropping a file in /etc/systemd/system/samo-server.service.d/
 Environment=SAMO_DATA_DIR=/var/lib/samo
 Environment=SAMO_ADDR=:6969
+Environment=SAMO_SCAN_ON_START=false
 
 # Light hardening. The operator can tighten this with a drop-in if their
 # media folders aren't under common locations like /srv, /mnt, /media.

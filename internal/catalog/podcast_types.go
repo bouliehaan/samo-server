@@ -67,8 +67,17 @@ type PodcastEpisode struct {
 	Chapters        []AudioChapter `json:"chapters,omitempty"`
 	Progress        PlaybackState  `json:"progress"`
 	ExternalIDs     ExternalIDs    `json:"externalIds,omitempty"`
+	Cache           *EpisodeCache  `json:"cache,omitempty"`
 	AddedAt         *time.Time     `json:"addedAt,omitempty"`
 	UpdatedAt       *time.Time     `json:"updatedAt,omitempty"`
+}
+
+// EpisodeCache describes whether a remote podcast episode is stored locally.
+type EpisodeCache struct {
+	Cached       bool       `json:"cached,omitempty"`
+	Local        bool       `json:"local,omitempty"`
+	SizeBytes    int64      `json:"sizeBytes,omitempty"`
+	DownloadedAt *time.Time `json:"downloadedAt,omitempty"`
 }
 
 // PodcastSearchResults is the response shape for

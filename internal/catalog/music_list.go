@@ -7,10 +7,12 @@ import (
 )
 
 const (
-	MusicListSortAZ     = "az"
-	MusicListSortRecent = "recent"
-	SortDirectionAsc    = "asc"
-	SortDirectionDesc   = "desc"
+	MusicListSortAZ        = "az"
+	MusicListSortRecent    = "recent"
+	MusicListSortRelease   = "release"
+	MusicListSortPlayCount = "playCount"
+	SortDirectionAsc       = "asc"
+	SortDirectionDesc      = "desc"
 )
 
 type MusicListOptions struct {
@@ -63,8 +65,17 @@ func sortMusicAlbumList(items []MusicAlbum, options MusicListOptions) {
 	sortBy := normalizeMusicListSort(options.Sort)
 	desc := normalizeSortDirection(options.Direction) == SortDirectionDesc
 	sort.SliceStable(items, func(i, j int) bool {
-		if sortBy == MusicListSortRecent {
+		switch sortBy {
+		case MusicListSortRecent:
 			if cmp := compareOptionalTimes(items[i].AddedAt, items[j].AddedAt, desc); cmp != 0 {
+				return cmp < 0
+			}
+		case MusicListSortRelease:
+			if cmp := compareReleaseSortKeys(
+				albumReleaseSortKey(items[i]),
+				albumReleaseSortKey(items[j]),
+				desc,
+			); cmp != 0 {
 				return cmp < 0
 			}
 		}
@@ -76,9 +87,19 @@ func sortMusicTrackList(items []MusicTrack, options MusicListOptions) {
 	sortBy := normalizeMusicListSort(options.Sort)
 	desc := normalizeSortDirection(options.Direction) == SortDirectionDesc
 	sort.SliceStable(items, func(i, j int) bool {
-		if sortBy == MusicListSortRecent {
+		switch sortBy {
+		case MusicListSortRecent:
 			if cmp := compareOptionalTimes(items[i].AddedAt, items[j].AddedAt, desc); cmp != 0 {
 				return cmp < 0
+			}
+		case MusicListSortPlayCount:
+			left := items[i].Playback.PlayCount
+			right := items[j].Playback.PlayCount
+			if left != right {
+				if desc {
+					return left > right
+				}
+				return left < right
 			}
 		}
 		return compareText(firstNonEmpty(items[i].SortTitle, items[i].Title), firstNonEmpty(items[j].SortTitle, items[j].Title), desc) < 0
@@ -89,6 +110,10 @@ func normalizeMusicListSort(raw string) string {
 	switch strings.ToLower(strings.TrimSpace(raw)) {
 	case MusicListSortRecent, "recents", "added", "added_at", "addedat":
 		return MusicListSortRecent
+	case MusicListSortRelease, "release_date", "releasedate", "year", "newest":
+		return MusicListSortRelease
+	case MusicListSortPlayCount, "play_count", "plays", "most_played", "mostplayed":
+		return MusicListSortPlayCount
 	case MusicListSortAZ, "a-z", "title", "name":
 		return MusicListSortAZ
 	default:

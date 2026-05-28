@@ -41,6 +41,7 @@ func (s *Service) UpdatePodcastFeed(ctx context.Context, id string, input Update
 
 	pollEnabled := current.Poll.Enabled
 	interval := current.Poll.IntervalSeconds
+	autoDownload := current.AutoDownloadEnabled
 	if input.PollEnabled != nil {
 		pollEnabled = *input.PollEnabled
 	}
@@ -49,6 +50,9 @@ func (s *Service) UpdatePodcastFeed(ctx context.Context, id string, input Update
 		if err != nil {
 			return PodcastFeed{}, err
 		}
+	}
+	if input.AutoDownloadEnabled != nil {
+		autoDownload = *input.AutoDownloadEnabled
 	}
 
 	var nextPollAt any
@@ -64,12 +68,14 @@ func (s *Service) UpdatePodcastFeed(ctx context.Context, id string, input Update
 	_, err = s.db.ExecContext(ctx, `
 		UPDATE podcast_feeds
 		SET title = ?,
+		    auto_download_enabled = ?,
 		    poll_enabled = ?,
 		    poll_interval_seconds = ?,
 		    next_poll_at = ?,
 		    updated_at = CURRENT_TIMESTAMP
 		WHERE id = ?`,
 		title,
+		boolInt(autoDownload),
 		boolInt(pollEnabled),
 		interval,
 		nextPollAt,

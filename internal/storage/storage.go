@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"fmt"
 	"io/fs"
+	"net/url"
 	"os"
 	"path/filepath"
 	"sort"
@@ -25,25 +26,41 @@ func Open(ctx context.Context, path string) (*sql.DB, error) {
 		return nil, fmt.Errorf("create database directory: %w", err)
 	}
 
-	db, err := sql.Open("sqlite", path)
+	// _pragma query params apply to every connection in the pool. Exec'ing PRAGMA
+	// once after Open only affects the first pooled connection, which caused
+	// SQLITE_BUSY under scan load when progress and catalog writes used other conns.
+	db, err := sql.Open("sqlite", sqliteDSN(path))
 	if err != nil {
 		return nil, fmt.Errorf("open sqlite database: %w", err)
 	}
-	db.SetMaxOpenConns(1)
+	// WAL allows concurrent readers while a scan or catalog reload writes.
+	db.SetMaxOpenConns(4)
 
-	pragmas := []string{
-		"PRAGMA foreign_keys = ON",
-		"PRAGMA journal_mode = WAL",
-		"PRAGMA busy_timeout = 5000",
-	}
-	for _, pragma := range pragmas {
-		if _, err := db.ExecContext(ctx, pragma); err != nil {
-			db.Close()
-			return nil, fmt.Errorf("apply sqlite pragma %q: %w", pragma, err)
-		}
+	// Ensure WAL on existing databases created before DSN pragmas.
+	if _, err := db.ExecContext(ctx, `PRAGMA journal_mode = WAL`); err != nil {
+		db.Close()
+		return nil, fmt.Errorf("apply sqlite journal_mode: %w", err)
 	}
 
 	return db, nil
+}
+
+func sqliteDSN(path string) string {
+	abs := path
+	if a, err := filepath.Abs(path); err == nil {
+		abs = a
+	}
+	u := url.URL{
+		Scheme: "file",
+		Path:   filepath.ToSlash(abs),
+	}
+	q := url.Values{}
+	q.Add("_pragma", "busy_timeout(60000)")
+	q.Add("_pragma", "journal_mode(WAL)")
+	q.Add("_pragma", "foreign_keys(ON)")
+	q.Add("_pragma", "synchronous(NORMAL)")
+	u.RawQuery = q.Encode()
+	return u.String()
 }
 
 func ApplyMigrations(ctx context.Context, db *sql.DB, migrationFS fs.FS) error {

@@ -164,7 +164,7 @@ func TestRefreshStatsUpdatesLibraryAndArtistCounts(t *testing.T) {
 	if err := scanner.upsertMusicAlbum(ctx, album); err != nil {
 		t.Fatal(err)
 	}
-	if err := scanner.setAlbumArtists(ctx, album.ID, []catalog.MusicArtist{artist}); err != nil {
+	if err := scanner.setAlbumArtists(ctx, album.ID, []catalog.MusicArtist{artist}, true); err != nil {
 		t.Fatal(err)
 	}
 	track := catalog.MusicTrack{ID: "track_hotline", Title: "Hotline Bling", AlbumID: album.ID, DurationSeconds: 267}
@@ -178,7 +178,7 @@ func TestRefreshStatsUpdatesLibraryAndArtistCounts(t *testing.T) {
 		ID:              "file_hotline",
 		Path:            "/srv/music/Drake/Views/Hotline Bling.mp3",
 		DurationSeconds: 267,
-	}); err != nil {
+	}, "", ""); err != nil {
 		t.Fatal(err)
 	}
 	// Audiobook library with one book.
@@ -186,7 +186,7 @@ func TestRefreshStatsUpdatesLibraryAndArtistCounts(t *testing.T) {
 	if err := scanner.upsertLibrary(ctx, bookLib); err != nil {
 		t.Fatal(err)
 	}
-	if err := scanner.upsertAudiobook(ctx, catalog.AudiobookItem{
+	if _, err := scanner.upsertAudiobook(ctx, catalog.AudiobookItem{
 		ID:        "book_1",
 		LibraryID: bookLib.ID,
 		Path:      "/srv/books/book1",

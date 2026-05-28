@@ -77,6 +77,46 @@ func TestSplitMixedGroupsHandlesDiscSubfolders(t *testing.T) {
 	}
 }
 
+func TestSplitMixedGroupsKeepsAuthorBookSeparated(t *testing.T) {
+	root := t.TempDir()
+	bookOne := filepath.Join(root, "Author", "Book One")
+	bookTwo := filepath.Join(root, "Author", "Book Two")
+	mustMkdir(t, bookOne)
+	mustMkdir(t, bookTwo)
+	writeFile(t, bookOne, "metadata.json", "{}")
+	writeFile(t, bookTwo, "metadata.json", "{}")
+	disc1 := filepath.Join(bookOne, "Disc 1")
+	disc2 := filepath.Join(bookTwo, "Disc 1")
+	mustMkdir(t, disc1)
+	mustMkdir(t, disc2)
+	a := writeFile(t, disc1, "01.mp3", "")
+	b := writeFile(t, disc2, "01.mp3", "")
+
+	groups := splitMixedGroups(root, []string{a, b})
+	if len(groups.audiobooks) != 2 {
+		t.Fatalf("audiobook group count = %d, want 2", len(groups.audiobooks))
+	}
+}
+
+func TestSplitMixedGroupsDetectsChapterMP3Audiobooks(t *testing.T) {
+	root := t.TempDir()
+	bookRoot := filepath.Join(root, "Harry Potter and the Stone")
+	mustMkdir(t, bookRoot)
+	files := []string{
+		writeFile(t, bookRoot, "01 - Chapter One.mp3", ""),
+		writeFile(t, bookRoot, "02 - Chapter Two.mp3", ""),
+		writeFile(t, bookRoot, "03 - Chapter Three.mp3", ""),
+	}
+
+	groups := splitMixedGroups(root, files)
+	if len(groups.audiobooks) != 1 {
+		t.Fatalf("audiobook group count = %d, want 1", len(groups.audiobooks))
+	}
+	if groups.audiobooks[0].Root != bookRoot {
+		t.Fatalf("audiobook root = %q, want %q", groups.audiobooks[0].Root, bookRoot)
+	}
+}
+
 func TestSplitMixedGroupsDefaultsToMusic(t *testing.T) {
 	root := t.TempDir()
 	folder := filepath.Join(root, "Artist", "Album")

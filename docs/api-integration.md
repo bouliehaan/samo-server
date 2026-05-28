@@ -327,10 +327,10 @@ offset.
 GET /api/v1/music/albums/{id}/cover?stream_token=smt_...
 ```
 
-Returns image bytes (jpeg/png/webp). Album covers also resolve for
-artist covers when the artist has no dedicated image — pass an artist's
-"first album" ID or use the Subsonic getCoverArt resolver if you want
-the universal lookup.
+Returns image bytes (jpeg/png/webp). Artist covers resolve from local
+sidecar files when present, otherwise from Last.fm on first request and
+are cached on disk — subsequent requests serve the cached file without
+calling Last.fm again.
 
 ### Playlist writes
 

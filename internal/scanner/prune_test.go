@@ -44,7 +44,7 @@ func TestPruneRemovesStaleMediaFilesAndOrphanTracks(t *testing.T) {
 		ID:       "file-stale",
 		Path:     stalePath,
 		FileName: "stale.flac",
-	}); err != nil {
+	}, "", ""); err != nil {
 		t.Fatal(err)
 	}
 
@@ -54,19 +54,45 @@ func TestPruneRemovesStaleMediaFilesAndOrphanTracks(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if stats.FilesPruned != 1 {
-		t.Fatalf("files pruned = %d, want 1", stats.FilesPruned)
+	if stats.FilesMarked != 1 {
+		t.Fatalf("files marked missing = %d, want 1", stats.FilesMarked)
 	}
-	if err := scanner.pruneOrphanMusic(ctx); err != nil {
+	if stats.FilesPruned != 0 {
+		t.Fatalf("files pruned = %d, want 0", stats.FilesPruned)
+	}
+
+	var missing int
+	if err := db.QueryRowContext(ctx, `SELECT missing FROM media_files WHERE path = ?`, stalePath).Scan(&missing); err != nil {
 		t.Fatal(err)
+	}
+	if missing != 1 {
+		t.Fatalf("missing flag = %d, want 1", missing)
 	}
 
 	var trackCount int
 	if err := db.QueryRowContext(ctx, `SELECT COUNT(*) FROM music_tracks WHERE id = ?`, track.ID).Scan(&trackCount); err != nil {
 		t.Fatal(err)
 	}
+	if trackCount != 1 {
+		t.Fatalf("track count = %d, want 1 while file is marked missing", trackCount)
+	}
+
+	if _, err := db.ExecContext(ctx, `DELETE FROM media_files WHERE path = ?`, stalePath); err != nil {
+		t.Fatal(err)
+	}
+	orphanPruned, err := scanner.pruneOrphanMusic(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if orphanPruned != 3 {
+		t.Fatalf("orphan rows pruned = %d, want 3 (track, album, artist)", orphanPruned)
+	}
+
+	if err := db.QueryRowContext(ctx, `SELECT COUNT(*) FROM music_tracks WHERE id = ?`, track.ID).Scan(&trackCount); err != nil {
+		t.Fatal(err)
+	}
 	if trackCount != 0 {
-		t.Fatalf("track count = %d, want 0 after prune", trackCount)
+		t.Fatalf("track count = %d, want 0 after manual removal", trackCount)
 	}
 }
 
@@ -94,7 +120,7 @@ func TestScanWithStatsTracksSeenFiles(t *testing.T) {
 		ID:       "file-1",
 		Path:     "/music/song.flac",
 		FileName: "song.flac",
-	}); err != nil {
+	}, "", ""); err != nil {
 		t.Fatal(err)
 	}
 	if len(accumulator.filePaths) != 1 {

@@ -39,6 +39,29 @@ func (s *Server) catalogOverview(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, s.catalog.Overview())
 }
 
+func (s *Server) catalogRecentlyAdded(w http.ResponseWriter, r *http.Request) {
+	page, err := readPage(r)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	if page.Limit <= 0 || page.Limit > 50 {
+		page.Limit = 50
+	}
+	writeJSON(w, http.StatusOK, s.catalog.ListRecentlyAdded(page))
+}
+
+func (s *Server) postCatalogReload(w http.ResponseWriter, r *http.Request) {
+	if _, ok := s.requireAdmin(w, r); !ok {
+		return
+	}
+	if err := s.reloadCatalogProjection(r); err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+}
+
 func (s *Server) catalogManifest(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, catalogManifestResponse{
 		Version:     "v1",
@@ -128,6 +151,9 @@ func (s *Server) catalogManifest(w http.ResponseWriter, r *http.Request) {
 			"music": {
 				"GET /api/v1/music/artists",
 				"GET /api/v1/music/artists/{id}",
+				"POST /api/v1/music/artists/images/backfill",
+				"GET /api/v1/music/artists/images/backfill",
+				"POST /api/v1/music/artists/images/backfill/cancel",
 				"GET /api/v1/music/albums",
 				"GET /api/v1/music/albums/{id}",
 				"GET /api/v1/music/tracks",

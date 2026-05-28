@@ -29,3 +29,28 @@ func (s *Server) musicTrackWithUserPlayback(ctx context.Context, userID, trackID
 	track.Playback = s.userPlayback(ctx, userID, playback.TargetMusicTrack, track.ID)
 	return track, nil
 }
+
+func (s *Server) audiobookWithUserPlayback(ctx context.Context, userID, audiobookID string) (catalog.AudiobookItem, error) {
+	item, err := s.catalog.Audiobook(audiobookID)
+	if err != nil {
+		return catalog.AudiobookItem{}, err
+	}
+	if userID == "" {
+		return item, nil
+	}
+	item.Progress = s.userPlayback(ctx, userID, playback.TargetAudiobook, item.ID)
+	return item, nil
+}
+
+func (s *Server) podcastEpisodeWithUserPlayback(ctx context.Context, userID, episodeID string) (catalog.PodcastEpisode, error) {
+	episode, err := s.catalog.PodcastEpisode(episodeID)
+	if err != nil {
+		return catalog.PodcastEpisode{}, err
+	}
+	s.enrichEpisodeCache(ctx, &episode)
+	if userID == "" {
+		return episode, nil
+	}
+	episode.Progress = s.userPlayback(ctx, userID, playback.TargetPodcastEpisode, episode.ID)
+	return episode, nil
+}

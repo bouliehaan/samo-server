@@ -44,7 +44,7 @@ SAMO_MUSIC_DIRS="/srv/music-a:/srv/music-b"
 Defaults:
 
 - `SAMO_DB_PATH` defaults to `data/samo.db`
-- `SAMO_SCAN_ON_START` defaults to `true`
+- `SAMO_SCAN_ON_START` defaults to `false`
 - `SAMO_WATCH_LIBRARIES` defaults to `true`
 - `SAMO_WATCH_DEBOUNCE` defaults to `3s`
 - if no library directories are set, startup only migrates and loads the existing database

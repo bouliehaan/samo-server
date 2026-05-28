@@ -25,6 +25,9 @@ type Seed struct {
 	Contributors    []Contributor
 	Series          []Series
 	PodcastEpisodes []PodcastEpisode
+	// Maps audio file paths from extracted_covers.source_path to cached cover
+	// metadata. Used to backfill empty track images_json at catalog load.
+	ExtractedCoversBySource map[string]Image
 }
 
 type Service struct {
@@ -42,17 +45,19 @@ type Service struct {
 	series          []Series
 	podcastEpisodes []PodcastEpisode
 
-	musicArtistByID map[string]MusicArtist
-	musicAlbumByID  map[string]MusicAlbum
-	musicTrackByID  map[string]MusicTrack
-	playlistByID    map[string]MusicPlaylist
-	audiobookByID   map[string]AudiobookItem
-	podcastByID     map[string]PodcastItem
-	contributorByID map[string]Contributor
-	seriesByID      map[string]Series
-	episodeByID     map[string]PodcastEpisode
-	audiobookLibIDs map[string]struct{}
-	podcastLibIDs   map[string]struct{}
+	musicArtistByID         map[string]MusicArtist
+	musicAlbumByID          map[string]MusicAlbum
+	musicTrackByID          map[string]MusicTrack
+	playlistByID            map[string]MusicPlaylist
+	audiobookByID           map[string]AudiobookItem
+	podcastByID             map[string]PodcastItem
+	contributorByID         map[string]Contributor
+	seriesByID              map[string]Series
+	episodeByID             map[string]PodcastEpisode
+	audiobookLibIDs         map[string]struct{}
+	podcastLibIDs           map[string]struct{}
+	imageByID               map[string]Image
+	extractedCoversBySource map[string]Image
 }
 
 func NewService(seed Seed) *Service {
@@ -130,6 +135,34 @@ func (s *Service) MusicArtist(id string) (MusicArtist, error) {
 		return MusicArtist{}, ErrNotFound
 	}
 	return item, nil
+}
+
+func (s *Service) SetMusicArtistImages(artistID string, images []Image) {
+	artistID = strings.TrimSpace(artistID)
+	if artistID == "" {
+		return
+	}
+	filtered := nonEmptyImages(images)
+	if len(filtered) == 0 {
+		return
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	artist, ok := s.musicArtistByID[artistID]
+	if !ok {
+		return
+	}
+	artist.Images = filtered
+	s.musicArtistByID[artistID] = artist
+	for index, item := range s.musicArtists {
+		if item.ID == artistID {
+			s.musicArtists[index].Images = filtered
+			break
+		}
+	}
+	registerCatalogImages(s.imageByID, filtered)
 }
 
 func (s *Service) ListMusicAlbums(page PageRequest) Page[MusicAlbum] {
@@ -414,23 +447,31 @@ func (s *Service) reindex() {
 	s.episodeByID = map[string]PodcastEpisode{}
 	s.audiobookLibIDs = map[string]struct{}{}
 	s.podcastLibIDs = map[string]struct{}{}
+	s.imageByID = map[string]Image{}
 
 	for _, item := range s.musicArtists {
 		s.musicArtistByID[item.ID] = item
+		registerCatalogImages(s.imageByID, item.Images)
 	}
 	for _, item := range s.musicAlbums {
 		s.musicAlbumByID[item.ID] = item
+		registerCatalogImages(s.imageByID, item.Images)
 	}
 	for _, item := range s.musicTracks {
 		s.musicTrackByID[item.ID] = item
+		registerCatalogImages(s.imageByID, item.Images)
 	}
 	for _, item := range s.musicPlaylists {
 		s.playlistByID[item.ID] = item
+		registerCatalogImages(s.imageByID, item.Images)
 	}
 	for _, item := range s.audiobooks {
 		s.audiobookByID[item.ID] = item
 		if item.LibraryID != "" {
 			s.audiobookLibIDs[item.LibraryID] = struct{}{}
+		}
+		if item.Cover != nil {
+			registerCatalogImages(s.imageByID, []Image{*item.Cover})
 		}
 	}
 	for _, item := range s.podcasts {
@@ -438,9 +479,13 @@ func (s *Service) reindex() {
 		if item.LibraryID != "" {
 			s.podcastLibIDs[item.LibraryID] = struct{}{}
 		}
+		if item.Cover != nil {
+			registerCatalogImages(s.imageByID, []Image{*item.Cover})
+		}
 	}
 	for _, item := range s.contributors {
 		s.contributorByID[item.ID] = item
+		registerCatalogImages(s.imageByID, item.Images)
 	}
 	for _, item := range s.series {
 		s.seriesByID[item.ID] = item
@@ -448,6 +493,19 @@ func (s *Service) reindex() {
 	for _, item := range s.podcastEpisodes {
 		s.episodeByID[item.ID] = item
 	}
+
+	// Re-link covers from extracted_covers when images_json was wiped, repair
+	// stale id-only rows, copy track art onto empty albums, then artists inherit.
+	s.registerExtractedCoverCatalog()
+	s.backfillMusicImagesFromExtractedCovers()
+	s.repairBrokenMusicImageReferences()
+	s.enrichAlbumImagesFromTracks()
+	s.enrichAlbumImagesFromExtractedCovers()
+	s.enrichAlbumAudioQuality()
+	s.enrichAlbumAddedAtFromFiles()
+	EnrichAudiobookAddedAtFromFiles(s.audiobooks)
+	EnrichPodcastAddedAtFromFiles(s.podcasts)
+	s.enrichPlaylistImagesFromTracks()
 
 	sort.Slice(s.musicArtists, func(i, j int) bool { return s.musicArtists[i].Name < s.musicArtists[j].Name })
 	sort.Slice(s.musicAlbums, func(i, j int) bool { return s.musicAlbums[i].Title < s.musicAlbums[j].Title })
@@ -472,6 +530,10 @@ func (s *Service) reindex() {
 }
 
 func (s *Service) applySeed(seed Seed) {
+	s.extractedCoversBySource = seed.ExtractedCoversBySource
+	if s.extractedCoversBySource == nil {
+		s.extractedCoversBySource = map[string]Image{}
+	}
 	s.musicArtists = slices.Clone(seed.MusicArtists)
 	s.musicAlbums = slices.Clone(seed.MusicAlbums)
 	s.musicTracks = slices.Clone(seed.MusicTracks)

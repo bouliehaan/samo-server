@@ -41,8 +41,8 @@ func loadAppConfig(ctx context.Context, db *sql.DB) (appConfigRecord, bool, erro
 	}
 	return appConfigRecord{
 		Enabled:      enabled != 0,
-		APIKey:       apiKey,
-		SharedSecret: sharedSecret,
+		APIKey:       strings.TrimSpace(apiKey),
+		SharedSecret: strings.TrimSpace(sharedSecret),
 		UpdatedAt:    parsed,
 	}, true, nil
 }

@@ -2,18 +2,21 @@ package catalog
 
 import "testing"
 
-func TestMusicAlbumsForArtistMatchesAlbumAndAlbumArtistIDs(t *testing.T) {
+func TestMusicAlbumsForArtistMatchesAlbumArtistOnly(t *testing.T) {
 	service := NewService(Seed{
 		MusicAlbums: []MusicAlbum{
-			{ID: "album-1", Title: "One", ArtistIDs: []string{"artist-1"}},
-			{ID: "album-2", Title: "Two", AlbumArtistIDs: []string{"artist-1"}},
-			{ID: "album-3", Title: "Three", ArtistIDs: []string{"artist-2"}},
+			{ID: "album-1", Title: "One", ArtistIDs: []string{"artist-1"}, TrackCount: 1},
+			{ID: "album-2", Title: "Two", AlbumArtistIDs: []string{"artist-1"}, TrackCount: 3},
+			{ID: "album-3", Title: "Three", AlbumArtistIDs: []string{"artist-2"}, TrackCount: 1},
 		},
 	})
 
 	albums := service.MusicAlbumsForArtist("artist-1")
-	if len(albums) != 2 {
-		t.Fatalf("album count = %d, want 2", len(albums))
+	if len(albums) != 1 {
+		t.Fatalf("album count = %d, want 1 (album artist only)", len(albums))
+	}
+	if albums[0].ID != "album-2" {
+		t.Fatalf("album = %q, want album-2", albums[0].ID)
 	}
 }
 
@@ -63,5 +66,21 @@ func TestResolveMusicCoverArtIDPrefersTrackThenAlbum(t *testing.T) {
 	id, images = service.ResolveMusicCoverArtID("album-1")
 	if id != "album-1" || images[0].Path != "/covers/album.jpg" {
 		t.Fatalf("album cover = %q %#v", id, images)
+	}
+}
+
+func TestResolveMusicCoverArtIDFallsBackToTrackBackedAlbumArt(t *testing.T) {
+	service := NewService(Seed{
+		MusicAlbums: []MusicAlbum{{ID: "album-1", Title: "Album"}},
+		MusicTracks: []MusicTrack{{
+			ID:      "track-1",
+			AlbumID: "album-1",
+			Images:  []Image{{Path: "/covers/track.jpg"}},
+		}},
+	})
+
+	id, images := service.ResolveMusicCoverArtID("album-1")
+	if id != "album-1" || len(images) != 1 || images[0].Path != "/covers/track.jpg" {
+		t.Fatalf("album cover fallback = %q %#v", id, images)
 	}
 }

@@ -20,6 +20,7 @@ type Client struct {
 	apiKey       string
 	sharedSecret string
 	http         *http.Client
+	apiBaseURL   string
 }
 
 func NewClient(apiKey, sharedSecret string, httpClient *http.Client) *Client {
@@ -30,7 +31,28 @@ func NewClient(apiKey, sharedSecret string, httpClient *http.Client) *Client {
 		apiKey:       strings.TrimSpace(apiKey),
 		sharedSecret: strings.TrimSpace(sharedSecret),
 		http:         httpClient,
+		apiBaseURL:   apiBaseURL,
 	}
+}
+
+// SetAPIBaseURL overrides the Last.fm API endpoint. Intended for tests.
+func (c *Client) SetAPIBaseURL(baseURL string) {
+	if c == nil {
+		return
+	}
+	baseURL = strings.TrimSpace(baseURL)
+	if baseURL == "" {
+		c.apiBaseURL = apiBaseURL
+		return
+	}
+	c.apiBaseURL = baseURL
+}
+
+func (c *Client) requestBaseURL() string {
+	if c == nil || strings.TrimSpace(c.apiBaseURL) == "" {
+		return apiBaseURL
+	}
+	return c.apiBaseURL
 }
 
 func (c *Client) Enabled() bool {
@@ -163,7 +185,7 @@ func (c *Client) post(ctx context.Context, params map[string]string, sessionKey 
 		form.Set(key, value)
 	}
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, apiBaseURL, strings.NewReader(form.Encode()))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.requestBaseURL(), strings.NewReader(form.Encode()))
 	if err != nil {
 		return err
 	}
@@ -193,6 +215,9 @@ func (c *Client) post(ctx context.Context, params map[string]string, sessionKey 
 	if envelope.Error != 0 {
 		if envelope.Error == 4 || envelope.Error == 9 || envelope.Error == 14 {
 			return ErrInvalidToken
+		}
+		if envelope.Error == 13 {
+			return fmt.Errorf("%w: check that the API key and shared secret are a matching pair from your Last.fm application settings", ErrInvalidSignature)
 		}
 		if envelope.Message == "" {
 			envelope.Message = fmt.Sprintf("last.fm error %d", envelope.Error)

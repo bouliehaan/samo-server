@@ -162,6 +162,62 @@ func (s *Service) EnsureCached(ctx context.Context, episode catalog.PodcastEpiso
 	return s.download(ctx, episodeID, enclosureURL, episode.EnclosureType)
 }
 
+func (s *Service) Evict(ctx context.Context, episodeID string) error {
+	if s == nil || s.db == nil || !s.enabled {
+		return ErrDisabled
+	}
+	episodeID = strings.TrimSpace(episodeID)
+	if episodeID == "" {
+		return ErrInvalidInput
+	}
+	row, found, err := loadCacheRow(ctx, s.db, episodeID)
+	if err != nil {
+		return err
+	}
+	if !found {
+		return ErrNotCached
+	}
+	return s.removeCacheRow(ctx, episodeID, row.CachePath)
+}
+
+func (s *Service) EpisodeCacheStatus(ctx context.Context, episode catalog.PodcastEpisode) catalog.EpisodeCache {
+	if len(episode.AudioFiles) > 0 {
+		return catalog.EpisodeCache{Local: true, Cached: true}
+	}
+	if s == nil || s.db == nil || !s.enabled || strings.TrimSpace(episode.EnclosureURL) == "" {
+		return catalog.EpisodeCache{}
+	}
+	row, found, err := loadCacheRow(ctx, s.db, episode.ID)
+	if err != nil || !found {
+		return catalog.EpisodeCache{}
+	}
+	if strings.TrimSpace(row.EnclosureURL) != strings.TrimSpace(episode.EnclosureURL) {
+		return catalog.EpisodeCache{}
+	}
+	info, err := os.Stat(row.CachePath)
+	if err != nil || info.Size() == 0 {
+		return catalog.EpisodeCache{}
+	}
+	status := catalog.EpisodeCache{Cached: true, SizeBytes: info.Size()}
+	if parsed := parseCacheTime(row.DownloadedAt); parsed != nil {
+		status.DownloadedAt = parsed
+	}
+	return status
+}
+
+func parseCacheTime(raw string) *time.Time {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return nil
+	}
+	for _, format := range []string{time.RFC3339Nano, time.RFC3339, "2006-01-02 15:04:05"} {
+		if parsed, err := time.Parse(format, raw); err == nil {
+			return &parsed
+		}
+	}
+	return nil
+}
+
 func (s *Service) download(ctx context.Context, episodeID, enclosureURL, fallbackType string) error {
 	if err := s.PruneRetention(ctx); err != nil {
 		return err

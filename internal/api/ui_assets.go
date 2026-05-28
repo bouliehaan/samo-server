@@ -21,6 +21,7 @@ const samoBaseCSS = `
   color-scheme: dark;
 }
 * { box-sizing: border-box; }
+[hidden] { display: none !important; }
 html, body {
   margin: 0;
   padding: 0;
@@ -269,8 +270,40 @@ html, body {
   letter-spacing: 0.06em;
 }
 
+/* Shared utility text styles used across pages. */
+p.lede {
+  margin: 0;
+  color: var(--text-dim);
+  font-family: var(--sans);
+  font-size: 0.95rem;
+  line-height: 1.55;
+  max-width: 64ch;
+}
+.kind-chip {
+  display: inline-block;
+  font-family: var(--mono);
+  font-size: 0.6rem;
+  letter-spacing: 0.18em;
+  text-transform: uppercase;
+  padding: 3px 8px;
+  border: 1px solid var(--accent);
+  color: var(--accent);
+  line-height: 1;
+  background: color-mix(in srgb, var(--accent) 6%, transparent);
+}
+
 a { color: var(--accent); text-decoration: none; }
 a:hover { text-decoration: underline; }
 
 ::selection { background: var(--accent); color: #000; }
+
+/* Subtle scrollbar tuning so panels feel native to the theme. */
+* { scrollbar-width: thin; scrollbar-color: var(--ghost) transparent; }
+*::-webkit-scrollbar { width: 8px; height: 8px; }
+*::-webkit-scrollbar-track { background: transparent; }
+*::-webkit-scrollbar-thumb {
+  background: var(--ghost);
+  border-radius: 0;
+}
+*::-webkit-scrollbar-thumb:hover { background: var(--accent); }
 `

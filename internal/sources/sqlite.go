@@ -16,6 +16,7 @@ type scanner interface {
 func scanPodcastFeed(row scanner) (PodcastFeed, error) {
 	var feed PodcastFeed
 	var explicit int
+	var autoDownload int
 	var pollEnabled int
 	var categoriesJSON string
 	var lastFetchedAt, nextPollAt, lastPollStartedAt, lastPollFinishedAt, createdAt, updatedAt sql.NullString
@@ -37,6 +38,7 @@ func scanPodcastFeed(row scanner) (PodcastFeed, error) {
 		&feed.Status,
 		&feed.LastError,
 		&lastFetchedAt,
+		&autoDownload,
 		&pollEnabled,
 		&feed.Poll.IntervalSeconds,
 		&nextPollAt,
@@ -51,6 +53,7 @@ func scanPodcastFeed(row scanner) (PodcastFeed, error) {
 	feed.Explicit = explicit != 0
 	decodeJSON(categoriesJSON, &feed.Categories)
 	feed.LastFetchedAt = parseTimePtr(lastFetchedAt)
+	feed.AutoDownloadEnabled = autoDownload != 0
 	feed.Poll.Enabled = pollEnabled != 0
 	feed.Poll.NextPollAt = parseTimePtr(nextPollAt)
 	feed.Poll.LastPollStartedAt = parseTimePtr(lastPollStartedAt)
@@ -77,6 +80,7 @@ func scanInternetRadioStation(row scanner) (InternetRadioStation, error) {
 		&station.StreamURL,
 		&station.HomepageURL,
 		&station.ImageURL,
+		&station.CoverID,
 		&station.ContentType,
 		&station.Codec,
 		&station.Bitrate,

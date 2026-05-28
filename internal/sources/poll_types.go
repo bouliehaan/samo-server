@@ -16,6 +16,7 @@ type UpdatePodcastFeedInput struct {
 	Title               *string `json:"title,omitempty"`
 	PollEnabled         *bool   `json:"pollEnabled,omitempty"`
 	PollIntervalSeconds *int    `json:"pollIntervalSeconds,omitempty"`
+	AutoDownloadEnabled *bool   `json:"autoDownloadEnabled,omitempty"`
 }
 
 type PollCycleResult struct {

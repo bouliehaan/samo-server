@@ -16,6 +16,7 @@ replace, plus what's intentionally out of scope.
 | Recently added / played, starred, favorites | ✅ |
 | Cover art (embedded + sidecar)         | ✅   |
 | Cover art download from external metadata | ✅ |
+| Artist photos via Last.fm (cached on demand) | ✅ when Last.fm API key configured |
 | Bit-perfect streaming with Range       | ✅   |
 | Watch folders + incremental rescan     | ✅   |
 | Multi-user accounts + per-user state   | ✅   |
@@ -47,7 +48,7 @@ replace, plus what's intentionally out of scope.
 | Podcast RSS subscriptions                | ✅   |
 | Podcast episode caching                  | ✅ (size + age retention) |
 | Podcast metadata search (iTunes)         | ✅   |
-| Book metadata search (OpenLibrary, Google Books) | ✅ |
+| Book metadata search (Audible/Audnexus, OpenLibrary, Google Books) | ✅ |
 | User-applied metadata overrides          | ✅ (rescans + RSS refreshes don't clobber) |
 | E-books (epub, pdf)                      | ❌ out of scope (audio-only) |
 | Comics                                   | ❌ out of scope |

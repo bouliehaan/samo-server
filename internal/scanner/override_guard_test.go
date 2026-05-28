@@ -105,7 +105,7 @@ func TestScannerSkipsAlbumArtistSyncWhenOverridden(t *testing.T) {
 	scanner := New(db)
 	scanner.overrideIndex = idx
 	newArtist := catalog.MusicArtist{ID: "artist-new", Name: "New Artist"}
-	if err := scanner.setAlbumArtists(ctx, albumID, []catalog.MusicArtist{newArtist}); err != nil {
+	if err := scanner.setAlbumArtists(ctx, albumID, []catalog.MusicArtist{newArtist}, true); err != nil {
 		t.Fatal(err)
 	}
 

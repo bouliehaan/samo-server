@@ -65,7 +65,7 @@ func (s *Service) Search(ctx context.Context, request SearchRequest) (SearchResp
 	}
 
 	response := SearchResponse{
-		Query:     request,
+		Query:     prepareSearchRequest(request),
 		Providers: s.Providers(),
 	}
 	if s == nil || len(s.providers) == 0 {
@@ -77,20 +77,31 @@ func (s *Service) Search(ctx context.Context, request SearchRequest) (SearchResp
 	if err != nil {
 		return SearchResponse{}, err
 	}
-	for _, provider := range providers {
-		results, err := provider.Search(ctx, request)
+
+	attempts := searchAttempts(request)
+	var providerErrors []ProviderError
+	seen := make(map[string]struct{})
+	for _, attempt := range attempts {
+		results, attemptErrors, err := s.searchProviders(ctx, providers, attempt)
 		if err != nil {
-			if request.Provider != "" {
-				return SearchResponse{}, fmt.Errorf("%s metadata search: %w", provider.Name(), err)
-			}
-			response.ProviderErrors = append(response.ProviderErrors, ProviderError{
-				Provider: provider.Name(),
-				Error:    err.Error(),
-			})
-			continue
+			return SearchResponse{}, err
 		}
-		response.Results = append(response.Results, results...)
+		for _, result := range results {
+			key := strings.ToLower(result.Provider) + ":" + result.ID
+			if _, ok := seen[key]; ok {
+				continue
+			}
+			seen[key] = struct{}{}
+			response.Results = append(response.Results, result)
+		}
+		if len(attemptErrors) > 0 {
+			providerErrors = attemptErrors
+		}
+		if len(response.Results) > 0 {
+			break
+		}
 	}
+	response.ProviderErrors = providerErrors
 
 	sort.SliceStable(response.Results, func(i, j int) bool {
 		if response.Results[i].Score == response.Results[j].Score {
@@ -102,6 +113,27 @@ func (s *Service) Search(ctx context.Context, request SearchRequest) (SearchResp
 		response.Results = slices.Clone(response.Results[:request.Limit])
 	}
 	return response, nil
+}
+
+func (s *Service) searchProviders(ctx context.Context, providers []Provider, request SearchRequest) ([]SearchResult, []ProviderError, error) {
+	request = prepareSearchRequest(request)
+	var results []SearchResult
+	var providerErrors []ProviderError
+	for _, provider := range providers {
+		providerResults, err := provider.Search(ctx, request)
+		if err != nil {
+			if request.Provider != "" {
+				return nil, nil, fmt.Errorf("%s metadata search: %w", provider.Name(), err)
+			}
+			providerErrors = append(providerErrors, ProviderError{
+				Provider: provider.Name(),
+				Error:    err.Error(),
+			})
+			continue
+		}
+		results = append(results, providerResults...)
+	}
+	return results, providerErrors, nil
 }
 
 func (s *Service) providersForRequest(request SearchRequest) ([]Provider, error) {
@@ -141,6 +173,8 @@ func DefaultProviders(names []string, userAgent string, client *http.Client) []P
 	var providers []Provider
 	for _, name := range names {
 		switch strings.ToLower(strings.TrimSpace(name)) {
+		case "audible", "audnexus":
+			providers = append(providers, NewAudibleProvider(client))
 		case "openlibrary", "open-library":
 			providers = append(providers, NewOpenLibraryProvider(client))
 		case "googlebooks", "google-books", "google_books":
@@ -161,6 +195,8 @@ func normalizeRequest(request SearchRequest) SearchRequest {
 	request.Title = strings.TrimSpace(request.Title)
 	request.Author = strings.TrimSpace(request.Author)
 	request.ISBN = strings.TrimSpace(request.ISBN)
+	request.ASIN = strings.ToUpper(strings.TrimSpace(request.ASIN))
+	request.AudibleASIN = strings.ToUpper(strings.TrimSpace(request.AudibleASIN))
 	request.Artist = strings.TrimSpace(request.Artist)
 	request.Album = strings.TrimSpace(request.Album)
 	request.Track = strings.TrimSpace(request.Track)
@@ -177,7 +213,7 @@ func normalizeRequest(request SearchRequest) SearchRequest {
 func validateRequest(request SearchRequest) error {
 	switch request.Kind {
 	case KindAudiobook:
-		if request.Query == "" && request.Title == "" && request.Author == "" && request.ISBN == "" {
+		if request.Query == "" && request.Title == "" && request.Author == "" && request.ISBN == "" && request.ASIN == "" && request.AudibleASIN == "" {
 			return ErrInvalidRequest
 		}
 	case KindPodcast:

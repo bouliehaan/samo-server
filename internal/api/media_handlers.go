@@ -44,8 +44,27 @@ func (s *Server) streamMusicTrack(w http.ResponseWriter, r *http.Request) {
 	s.streamCatalogAudioFiles(w, r, track.AudioFiles, track.Playback, track.DiscNumber)
 }
 
+func (s *Server) streamAudiobook(w http.ResponseWriter, r *http.Request) {
+	principal, ok := s.currentUser(r)
+	if !ok {
+		writeError(w, http.StatusUnauthorized, "unauthorized")
+		return
+	}
+	item, err := s.audiobookWithUserPlayback(r.Context(), principal.User.ID, r.PathValue("id"))
+	if err != nil {
+		writeCatalogError(w, err)
+		return
+	}
+	s.streamCatalogAudioFiles(w, r, item.AudioFiles, item.Progress, 0)
+}
+
 func (s *Server) streamPodcastEpisode(w http.ResponseWriter, r *http.Request) {
-	episode, err := s.catalog.PodcastEpisode(r.PathValue("id"))
+	principal, ok := s.currentUser(r)
+	if !ok {
+		writeError(w, http.StatusUnauthorized, "unauthorized")
+		return
+	}
+	episode, err := s.podcastEpisodeWithUserPlayback(r.Context(), principal.User.ID, r.PathValue("id"))
 	if err != nil {
 		writeCatalogError(w, err)
 		return
@@ -55,15 +74,6 @@ func (s *Server) streamPodcastEpisode(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.streamCatalogAudioFiles(w, r, episode.AudioFiles, episode.Progress, 0)
-}
-
-func (s *Server) streamAudiobook(w http.ResponseWriter, r *http.Request) {
-	item, err := s.catalog.Audiobook(r.PathValue("id"))
-	if err != nil {
-		writeCatalogError(w, err)
-		return
-	}
-	s.streamCatalogAudioFiles(w, r, item.AudioFiles, item.Progress, 0)
 }
 
 func (s *Server) streamCatalogAudioFiles(w http.ResponseWriter, r *http.Request, audioFiles []catalog.AudioFile, playback catalog.PlaybackState, defaultDisc int) {
@@ -155,12 +165,57 @@ func writeStreamSelectError(w http.ResponseWriter, err error) {
 }
 
 func (s *Server) serveMusicAlbumCover(w http.ResponseWriter, r *http.Request) {
-	album, err := s.catalog.MusicAlbum(r.PathValue("id"))
+	if _, err := s.catalog.MusicAlbum(r.PathValue("id")); err != nil {
+		writeCatalogError(w, err)
+		return
+	}
+	s.serveCatalogImage(w, r, s.catalog.MusicAlbumCoverImages(r.PathValue("id")))
+}
+
+func (s *Server) serveMusicArtistCover(w http.ResponseWriter, r *http.Request) {
+	artist, err := s.catalog.MusicArtist(r.PathValue("id"))
 	if err != nil {
 		writeCatalogError(w, err)
 		return
 	}
-	s.serveCatalogImage(w, r, album.Images)
+	images := s.musicArtistCoverImages(r.Context(), artist)
+	s.serveCatalogImage(w, r, images)
+}
+
+func (s *Server) musicArtistCoverImages(ctx context.Context, artist catalog.MusicArtist) []catalog.Image {
+	_, images := s.catalog.ResolveMusicCoverArtID(artist.ID)
+	if len(images) > 0 {
+		return images
+	}
+	if s.artistImages == nil {
+		return nil
+	}
+	resolved, ok := s.artistImages.ResolveMusicArtistCover(ctx, artist)
+	if !ok {
+		return nil
+	}
+	return resolved
+}
+
+// serveMetadataImage streams any catalog image record the API ships in
+// metadata `images[]` arrays — embedded cover art (cover_*), sidecars
+// (image_*), and the same IDs list responses already include.
+func (s *Server) serveMetadataImage(w http.ResponseWriter, r *http.Request) {
+	id := strings.TrimSpace(r.PathValue("id"))
+	if id == "" {
+		writeError(w, http.StatusBadRequest, "image id is required")
+		return
+	}
+	if strings.HasPrefix(id, "cover_") {
+		s.serveExtractedCover(w, r)
+		return
+	}
+	image, err := s.catalog.ImageByID(id)
+	if err != nil {
+		writeCatalogError(w, err)
+		return
+	}
+	s.serveCatalogImage(w, r, []catalog.Image{image})
 }
 
 func (s *Server) serveAudiobookCover(w http.ResponseWriter, r *http.Request) {
@@ -191,6 +246,7 @@ func (s *Server) servePodcastCover(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) serveCatalogImage(w http.ResponseWriter, r *http.Request, images []catalog.Image) {
 	if path := firstImagePath(images); path != "" {
+		w.Header().Set("Cache-Control", "public, max-age=31536000, immutable")
 		if err := s.filesService().ServeLocalPath(r.Context(), path, w, r); err != nil {
 			writeFilesError(w, err)
 		}
@@ -204,7 +260,34 @@ func (s *Server) serveCatalogImage(w http.ResponseWriter, r *http.Request, image
 		http.Redirect(w, r, url, http.StatusTemporaryRedirect)
 		return
 	}
+	if resolved, ok := s.resolveCatalogImageRecord(r.Context(), images); ok {
+		s.serveCatalogImage(w, r, []catalog.Image{resolved})
+		return
+	}
 	writeError(w, http.StatusNotFound, "cover not found")
+}
+
+func (s *Server) resolveCatalogImageRecord(ctx context.Context, images []catalog.Image) (catalog.Image, bool) {
+	for _, image := range images {
+		if strings.TrimSpace(image.Path) != "" || strings.TrimSpace(image.URL) != "" {
+			continue
+		}
+		id := strings.TrimSpace(image.ID)
+		if id == "" {
+			continue
+		}
+		if strings.HasPrefix(id, "cover_") {
+			resolved, err := s.coversService().Get(ctx, id)
+			if err == nil && strings.TrimSpace(resolved.Path) != "" {
+				return resolved, true
+			}
+		}
+		resolved, err := s.catalog.ImageByID(id)
+		if err == nil && (strings.TrimSpace(resolved.Path) != "" || strings.TrimSpace(resolved.URL) != "") {
+			return resolved, true
+		}
+	}
+	return catalog.Image{}, false
 }
 
 func firstImagePath(images []catalog.Image) string {

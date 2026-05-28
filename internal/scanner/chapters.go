@@ -51,6 +51,12 @@ func overdriveChapters(tags catalog.Tags) []catalog.AudioChapter {
 	for i := 0; i < len(chapters)-1; i++ {
 		chapters[i].EndSeconds = chapters[i+1].StartSeconds
 	}
+	if len(chapters) > 0 {
+		last := &chapters[len(chapters)-1]
+		if last.EndSeconds <= last.StartSeconds {
+			last.EndSeconds = last.StartSeconds + 1
+		}
+	}
 	return chapters
 }
 

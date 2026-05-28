@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"database/sql"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
@@ -12,9 +13,13 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/bouliehaan/samo-server/internal/catalog"
 )
+
+const coverProbeTimeout = 45 * time.Second
+const coverExtractTimeout = 90 * time.Second
 
 type Service struct {
 	db             *sql.DB
@@ -69,7 +74,30 @@ func (s *Service) CoverDir() string {
 	return s.coverDir
 }
 
-func (s *Service) ResolveForAudio(ctx context.Context, audioPath, sourceChecksum string) (*catalog.Image, error) {
+func (s *Service) LookupCached(ctx context.Context, audioPath, sourceChecksum string) (*catalog.Image, error) {
+	if s == nil || s.db == nil {
+		return nil, ErrDisabled
+	}
+	audioPath = strings.TrimSpace(audioPath)
+	if audioPath == "" {
+		return nil, ErrInvalidPath
+	}
+	absolute, err := filepath.Abs(audioPath)
+	if err != nil {
+		return nil, err
+	}
+	existing, err := s.loadBySource(ctx, absolute)
+	if err != nil {
+		return nil, err
+	}
+	if existing.sourceChecksum != sourceChecksum || !fileExists(existing.path) {
+		return nil, ErrNotFound
+	}
+	image := existing.image
+	return &image, nil
+}
+
+func (s *Service) ResolveForAudio(ctx context.Context, audioPath, sourceChecksum string, embeddedKnown *bool) (*catalog.Image, error) {
 	if s == nil || s.db == nil {
 		return nil, ErrDisabled
 	}
@@ -89,11 +117,20 @@ func (s *Service) ResolveForAudio(ctx context.Context, audioPath, sourceChecksum
 		}
 	}
 
-	if !hasEmbeddedCover(ctx, s.ffprobePath, absolute) {
+	if embeddedKnown != nil && !*embeddedKnown {
 		return nil, ErrNoArtwork
 	}
+	if embeddedKnown == nil {
+		probeCtx, probeCancel := context.WithTimeout(ctx, coverProbeTimeout)
+		defer probeCancel()
+		if !hasEmbeddedCover(probeCtx, s.ffprobePath, absolute) {
+			return nil, ErrNoArtwork
+		}
+	}
 
-	image, err := s.extract(ctx, absolute, sourceChecksum)
+	extractCtx, extractCancel := context.WithTimeout(ctx, coverExtractTimeout)
+	defer extractCancel()
+	image, err := s.extract(extractCtx, absolute, sourceChecksum)
 	if err != nil {
 		return nil, err
 	}
@@ -163,27 +200,37 @@ func (s *Service) extract(ctx context.Context, sourcePath, sourceChecksum string
 	id := coverID(sourcePath)
 	dest := filepath.Join(s.coverDir, id+".jpg")
 
-	cmd := exec.CommandContext(ctx, s.ffmpegPath,
-		"-hide_banner", "-loglevel", "error", "-y",
-		"-i", sourcePath,
-		"-map", "0:v:0",
-		"-frames:v", "1",
-		"-f", "image2",
-		dest,
-	)
-	if output, err := cmd.CombinedOutput(); err != nil {
-		if strings.Contains(strings.ToLower(string(output)), "stream map") || strings.Contains(string(output), "does not exist") {
-			return nil, ErrNoArtwork
-		}
-		return nil, fmt.Errorf("extract embedded cover from %q: %s: %w", sourcePath, strings.TrimSpace(string(output)), err)
+	strategies := [][]string{
+		{"-map", "0:v:0", "-frames:v", "1", "-f", "image2"},
+		{"-an", "-vcodec", "copy"},
 	}
+	for _, args := range strategies {
+		cmd := exec.CommandContext(ctx, s.ffmpegPath,
+			append([]string{"-hide_banner", "-loglevel", "error", "-nostdin", "-y", "-i", sourcePath}, args...)...,
+		)
+		cmd.Args = append(cmd.Args, dest)
+		if output, err := cmd.CombinedOutput(); err != nil {
+			if strings.Contains(strings.ToLower(string(output)), "stream map") ||
+				strings.Contains(string(output), "does not exist") {
+				continue
+			}
+			continue
+		}
+		image, err := s.finalizeExtract(ctx, sourcePath, sourceChecksum, id, dest)
+		if err == nil {
+			return image, nil
+		}
+		_ = os.Remove(dest)
+	}
+	return nil, ErrNoArtwork
+}
 
+func (s *Service) finalizeExtract(ctx context.Context, sourcePath, sourceChecksum, id, dest string) (*catalog.Image, error) {
 	info, err := os.Stat(dest)
 	if err != nil {
 		return nil, fmt.Errorf("stat extracted cover: %w", err)
 	}
 	if info.Size() == 0 {
-		_ = os.Remove(dest)
 		return nil, ErrNoArtwork
 	}
 
@@ -217,11 +264,25 @@ func (s *Service) upsert(ctx context.Context, sourcePath, sourceChecksum string,
 	return nil
 }
 
+type ffprobeCoverStreams struct {
+	Streams []struct {
+		CodecType   string            `json:"codec_type"`
+		CodecName   string            `json:"codec_name"`
+		Tags        map[string]string `json:"tags"`
+		Disposition struct {
+			AttachedPic int `json:"attached_pic"`
+		} `json:"disposition"`
+	} `json:"streams"`
+	Format struct {
+		Tags map[string]string `json:"tags"`
+	} `json:"format"`
+}
+
 func hasEmbeddedCover(ctx context.Context, ffprobePath, audioPath string) bool {
 	cmd := exec.CommandContext(ctx, ffprobePath,
 		"-v", "error",
-		"-select_streams", "v",
-		"-show_entries", "stream=codec_type,disposition:attached_pic",
+		"-nostdin",
+		"-show_entries", "stream=codec_name,codec_type:stream_tags=METADATA_BLOCK_PICTURE:stream_disposition=attached_pic:format_tags=METADATA_BLOCK_PICTURE",
 		"-of", "json",
 		audioPath,
 	)
@@ -229,8 +290,27 @@ func hasEmbeddedCover(ctx context.Context, ffprobePath, audioPath string) bool {
 	if err != nil {
 		return false
 	}
-	return strings.Contains(string(output), `"attached_pic": 1`) ||
-		strings.Contains(string(output), `"attached_pic":1`)
+
+	var parsed ffprobeCoverStreams
+	if err := json.Unmarshal(output, &parsed); err != nil {
+		return false
+	}
+	for _, stream := range parsed.Streams {
+		if stream.Disposition.AttachedPic == 1 {
+			return true
+		}
+		if strings.TrimSpace(stream.Tags["METADATA_BLOCK_PICTURE"]) != "" {
+			return true
+		}
+		if stream.CodecType == "video" &&
+			(stream.CodecName == "mjpeg" || stream.CodecName == "png" || stream.CodecName == "apng") {
+			return true
+		}
+	}
+	if strings.TrimSpace(parsed.Format.Tags["METADATA_BLOCK_PICTURE"]) != "" {
+		return true
+	}
+	return false
 }
 
 func coverID(sourcePath string) string {

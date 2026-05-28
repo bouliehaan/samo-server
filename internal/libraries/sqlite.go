@@ -235,8 +235,8 @@ func listScanJobs(ctx context.Context, db *sql.DB, limit, offset int) (ScanJobPa
 	}
 
 	rows, err := db.QueryContext(ctx, `
-		SELECT id, status, scope, library_id, trigger_source, started_at, finished_at, error,
-		       files_seen, files_total, files_pruned, items_pruned
+		SELECT id, status, scope, library_id, trigger_source, scan_mode, started_at, finished_at, error,
+		       files_seen, files_total, files_pruned, files_marked, items_pruned
 		FROM scan_jobs
 		ORDER BY started_at DESC
 		LIMIT ? OFFSET ?`, limit, offset)
@@ -254,8 +254,8 @@ func listScanJobs(ctx context.Context, db *sql.DB, limit, offset int) (ScanJobPa
 
 func getScanJob(ctx context.Context, db *sql.DB, id string) (ScanJob, error) {
 	row := db.QueryRowContext(ctx, `
-		SELECT id, status, scope, library_id, trigger_source, started_at, finished_at, error,
-		       files_seen, files_total, files_pruned, items_pruned
+		SELECT id, status, scope, library_id, trigger_source, scan_mode, started_at, finished_at, error,
+		       files_seen, files_total, files_pruned, files_marked, items_pruned
 		FROM scan_jobs
 		WHERE id = ?`, id)
 	item, err := scanJobRow(row)
@@ -271,13 +271,13 @@ func getScanJob(ctx context.Context, db *sql.DB, id string) (ScanJob, error) {
 func insertScanJob(ctx context.Context, db *sql.DB, job ScanJob) error {
 	_, err := db.ExecContext(ctx, `
 		INSERT INTO scan_jobs (
-		  id, status, scope, library_id, trigger_source, started_at, finished_at, error,
-		  files_seen, files_total, files_pruned, items_pruned
+		  id, status, scope, library_id, trigger_source, scan_mode, started_at, finished_at, error,
+		  files_seen, files_total, files_pruned, files_marked, items_pruned
 		)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		job.ID, job.Status, job.Scope, nullableString(job.LibraryID), job.TriggerSource,
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		job.ID, job.Status, job.Scope, nullableString(job.LibraryID), job.TriggerSource, normalizeScanJobMode(job.ScanMode),
 		job.StartedAt.UTC().Format(time.RFC3339), timeString(job.FinishedAt), job.Error,
-		job.FilesSeen, job.FilesTotal, job.FilesPruned, job.ItemsPruned)
+		job.FilesSeen, job.FilesTotal, job.FilesPruned, job.FilesMarked, job.ItemsPruned)
 	if err != nil {
 		return fmt.Errorf("insert scan job: %w", err)
 	}
@@ -287,9 +287,9 @@ func insertScanJob(ctx context.Context, db *sql.DB, job ScanJob) error {
 func updateScanJob(ctx context.Context, db *sql.DB, job ScanJob) error {
 	_, err := db.ExecContext(ctx, `
 		UPDATE scan_jobs
-		SET status = ?, finished_at = ?, error = ?, files_seen = ?, files_total = ?, files_pruned = ?, items_pruned = ?
+		SET status = ?, finished_at = ?, error = ?, files_seen = ?, files_total = ?, files_pruned = ?, files_marked = ?, items_pruned = ?
 		WHERE id = ?`,
-		job.Status, timeString(job.FinishedAt), job.Error, job.FilesSeen, job.FilesTotal, job.FilesPruned, job.ItemsPruned, job.ID)
+		job.Status, timeString(job.FinishedAt), job.Error, job.FilesSeen, job.FilesTotal, job.FilesPruned, job.FilesMarked, job.ItemsPruned, job.ID)
 	if err != nil {
 		return fmt.Errorf("update scan job: %w", err)
 	}
@@ -347,8 +347,8 @@ func scanJobRow(scanner interface {
 	var startedAt string
 	var finishedAt sql.NullString
 	if err := scanner.Scan(
-		&item.ID, &item.Status, &item.Scope, &libraryID, &item.TriggerSource, &startedAt, &finishedAt,
-		&item.Error, &item.FilesSeen, &item.FilesTotal, &item.FilesPruned, &item.ItemsPruned,
+		&item.ID, &item.Status, &item.Scope, &libraryID, &item.TriggerSource, &item.ScanMode, &startedAt, &finishedAt,
+		&item.Error, &item.FilesSeen, &item.FilesTotal, &item.FilesPruned, &item.FilesMarked, &item.ItemsPruned,
 	); err != nil {
 		return ScanJob{}, err
 	}
@@ -356,6 +356,17 @@ func scanJobRow(scanner interface {
 	item.StartedAt = parseTime(startedAt)
 	item.FinishedAt = parseTimePtr(finishedAt)
 	return item, nil
+}
+
+func normalizeScanJobMode(mode string) string {
+	switch strings.ToLower(strings.TrimSpace(mode)) {
+	case ScanModeQuick:
+		return ScanModeQuick
+	case ScanModeRepair:
+		return ScanModeRepair
+	default:
+		return ScanModeFull
+	}
 }
 
 func isProtectedLibrary(item Library) bool {

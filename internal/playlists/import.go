@@ -210,12 +210,17 @@ func (s *Service) importContent(ctx context.Context, input ImportInput) (string,
 	}
 	if isYouTubeURL(parsed) {
 		sourceType = "youtube"
+		content, err := fetchYouTubePlaylistContent(ctx, rawURL)
+		if err != nil {
+			return "", "", err
+		}
+		return sourceType, content, nil
 	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, rawURL, nil)
 	if err != nil {
 		return "", "", err
 	}
-	req.Header.Set("User-Agent", "SamoServer/0.1 playlist importer")
+	req.Header.Set("User-Agent", youtubeBrowserUserAgent)
 	client := &http.Client{Timeout: 20 * time.Second}
 	resp, err := client.Do(req)
 	if err != nil {
@@ -253,6 +258,12 @@ func parseImportCandidates(sourceType string, content string) ([]importCandidate
 		items, err = parseJSONImport(content)
 	case "youtube":
 		items, err = parseYouTubeImport(content)
+		if err != nil {
+			return nil, sourceType, err
+		}
+		if len(items) == 0 {
+			return nil, sourceType, fmt.Errorf("%w: youtube playlist did not contain any tracks", ErrInvalidInput)
+		}
 	default:
 		sourceType = "plain"
 		items, err = parsePlainImport(content)
@@ -465,9 +476,13 @@ func parseJSONImport(content string) ([]importCandidate, error) {
 }
 
 func parseYouTubeImport(content string) ([]importCandidate, error) {
-	data := extractYouTubeInitialData(content)
-	if data == "" {
-		return nil, fmt.Errorf("%w: could not find playlist metadata in youtube page", ErrInvalidInput)
+	content = strings.TrimSpace(content)
+	data := content
+	if !strings.HasPrefix(content, "{") {
+		data = extractYouTubeInitialData(content)
+		if data == "" {
+			return nil, fmt.Errorf("%w: could not find playlist metadata in youtube page", ErrInvalidInput)
+		}
 	}
 	var root any
 	if err := json.Unmarshal([]byte(data), &root); err != nil {
@@ -487,6 +502,16 @@ func walkYouTube(value any, items *[]importCandidate) {
 			}
 		}
 		if renderer, ok := node["playlistVideoRenderer"]; ok {
+			if item := candidateFromYouTubeRenderer(renderer); item.Title != "" {
+				*items = append(*items, item)
+			}
+		}
+		if renderer, ok := node["playlistPanelVideoRenderer"]; ok {
+			if item := candidateFromYouTubeRenderer(renderer); item.Title != "" {
+				*items = append(*items, item)
+			}
+		}
+		if renderer, ok := node["musicTwoRowItemRenderer"]; ok {
 			if item := candidateFromYouTubeRenderer(renderer); item.Title != "" {
 				*items = append(*items, item)
 			}
@@ -813,24 +838,6 @@ func inferSourceTypeFromURL(parsed *url.URL) string {
 func isYouTubeURL(parsed *url.URL) bool {
 	host := strings.ToLower(parsed.Hostname())
 	return host == "music.youtube.com" || host == "www.youtube.com" || host == "youtube.com" || host == "youtu.be"
-}
-
-func extractYouTubeInitialData(content string) string {
-	for _, marker := range []string{"var ytInitialData = ", "window[\"ytInitialData\"] = ", "ytInitialData = "} {
-		index := strings.Index(content, marker)
-		if index < 0 {
-			continue
-		}
-		start := strings.Index(content[index:], "{")
-		if start < 0 {
-			continue
-		}
-		start += index
-		if end := matchingJSONEnd(content, start); end > start {
-			return content[start:end]
-		}
-	}
-	return ""
 }
 
 func matchingJSONEnd(content string, start int) int {

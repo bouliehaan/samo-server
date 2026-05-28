@@ -225,6 +225,8 @@ func writeLastFMError(w http.ResponseWriter, err error) {
 		writeError(w, http.StatusServiceUnavailable, err.Error())
 	case errors.Is(err, lastfm.ErrInvalidConfig):
 		writeError(w, http.StatusBadRequest, err.Error())
+	case errors.Is(err, lastfm.ErrInvalidSignature):
+		writeError(w, http.StatusBadRequest, err.Error())
 	case errors.Is(err, lastfm.ErrNotConnected):
 		writeError(w, http.StatusConflict, err.Error())
 	case errors.Is(err, lastfm.ErrInvalidToken):

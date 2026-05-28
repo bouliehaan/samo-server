@@ -17,7 +17,12 @@ func (s *Server) listAudiobooks(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) getAudiobook(w http.ResponseWriter, r *http.Request) {
-	item, err := s.catalog.Audiobook(r.PathValue("id"))
+	principal, ok := s.currentUser(r)
+	if !ok {
+		writeError(w, http.StatusUnauthorized, "unauthorized")
+		return
+	}
+	item, err := s.audiobookWithUserPlayback(r.Context(), principal.User.ID, r.PathValue("id"))
 	if err != nil {
 		writeCatalogError(w, err)
 		return

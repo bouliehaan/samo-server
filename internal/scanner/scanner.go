@@ -14,9 +14,15 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/bouliehaan/samo-server/internal/catalog"
 )
+
+// probeFileTimeout caps ffprobe per file so a corrupt file or slow network
+// mount cannot stall an entire library scan.
+const probeFileTimeout = 90 * time.Second
+const technicalProbeTimeout = 45 * time.Second
 
 type Library struct {
 	ID        string
@@ -27,16 +33,33 @@ type Library struct {
 }
 
 type Options struct {
-	Covers      CoverResolver
-	FFprobePath string
+	Covers              CoverResolver
+	FFprobePath         string
+	PlaylistImport      PlaylistImporter
+	AutoImportPlaylists bool
+	ExternalScanner     bool
+	// UseFFprobeForScan runs ffprobe per file during library scans. Default is
+	// native header/tag parsing, which is faster and does not spawn subprocesses.
+	UseFFprobeForScan bool
 }
 
 type Scanner struct {
-	db            *sql.DB
-	ffprobePath   string
-	covers        CoverResolver
-	activeScan    *scanAccumulator
-	overrideIndex *catalog.OverrideIndex
+	db                  *sql.DB
+	ffprobePath         string
+	covers              CoverResolver
+	playlistImport      PlaylistImporter
+	autoImportPlaylists bool
+	externalScanner     bool
+	useFFprobeForScan   bool
+	activeScan          *scanAccumulator
+	onWalkProgress      func(int)
+	onActivity          func(string)
+	onFileActive        func(path string)
+	overrideIndex       *catalog.OverrideIndex
+	scanMode            string
+	scanSubpaths        []string
+	fileIndex           map[string]indexedFile
+	trackIDMigrations   map[string]string
 }
 
 func New(db *sql.DB) *Scanner {
@@ -49,9 +72,13 @@ func NewWithOptions(db *sql.DB, options Options) *Scanner {
 		ffprobePath = "ffprobe"
 	}
 	return &Scanner{
-		db:          db,
-		ffprobePath: ffprobePath,
-		covers:      options.Covers,
+		db:                  db,
+		ffprobePath:         ffprobePath,
+		covers:              options.Covers,
+		playlistImport:      options.PlaylistImport,
+		autoImportPlaylists: options.AutoImportPlaylists,
+		externalScanner:     options.ExternalScanner,
+		useFFprobeForScan:   options.UseFFprobeForScan,
 	}
 }
 
@@ -64,6 +91,8 @@ func LibraryID(kind, mediaType, path string) string {
 	return stableID("library", kind, mediaType, path)
 }
 
+// scanLibrary runs the Navidrome-style phased pipeline for one library.
+// Prefer ScanWithProgress for production scans (progress callbacks, multi-library).
 func (s *Scanner) scanLibrary(ctx context.Context, library Library) error {
 	root, err := filepath.Abs(strings.TrimSpace(library.Path))
 	if err != nil {
@@ -76,55 +105,22 @@ func (s *Scanner) scanLibrary(ctx context.Context, library Library) error {
 	if !info.IsDir() {
 		return fmt.Errorf("library path %q is not a directory", root)
 	}
-
 	library.Path = root
 	if library.Name == "" {
 		library.Name = filepath.Base(root)
 	}
-	// Only compute a fresh ID when the caller didn't provide one. Recomputing
-	// would diverge from the row already stored in the DB whenever the kind,
-	// media_type, or path normalization differs from what produced the
-	// original ID — which silently broke item_count refresh because
-	// media_files/audiobooks/podcasts kept referencing the original row.
 	if library.ID == "" {
 		library.ID = LibraryID(library.Kind, library.MediaType, root)
 	}
 
-	if err := s.upsertLibrary(ctx, library); err != nil {
-		return err
+	accumulator := s.activeScan
+	if accumulator == nil {
+		accumulator = newScanAccumulator()
+		s.activeScan = accumulator
 	}
-
-	files, err := audioFiles(root)
-	if err != nil {
-		return err
-	}
-
-	// Library kinds are now first-class enum values, not (kind, mediaType)
-	// tuples. The "shelf" umbrella is gone — audiobook libraries and podcast
-	// libraries each have their own kind and their own scanner entry point.
-	// Normalize before dispatch so a stray "Podcast" / "PODCAST" / " podcast"
-	// (from a hand-rolled API call or an old DB row) still routes correctly
-	// instead of falling into the default "unsupported" branch.
-	kind := strings.ToLower(strings.TrimSpace(library.Kind))
-	log.Printf("scanner: scanning library %q kind=%q path=%q with %d audio files", library.Name, kind, library.Path, len(files))
-	switch kind {
-	case "music":
-		for _, path := range files {
-			if err := s.scanMusicFile(ctx, library, root, path); err != nil {
-				return err
-			}
-		}
-	case "audiobook":
-		return s.scanAudiobookLibrary(ctx, library, root, files)
-	case "podcast":
-		return s.scanPodcastLibrary(ctx, library, root, files)
-	case "mixed":
-		return s.scanMixedLibrary(ctx, library, root, files)
-	default:
-		return fmt.Errorf("unsupported library kind %q", library.Kind)
-	}
-
-	_, err = s.db.ExecContext(ctx, `UPDATE libraries SET last_scan_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP WHERE id = ?`, library.ID)
+	fullScan := s.scanMode == ScanModeFull || s.scanMode == ScanModeRepair
+	state := newScanState(fullScan, s.scanMode, s.scanSubpaths)
+	_, err = s.runLibraryPipeline(ctx, library, accumulator, state)
 	return err
 }
 
@@ -136,34 +132,69 @@ func (s *Scanner) scanLibrary(ctx context.Context, library Library) error {
 // Walks the same tree audioFiles() walks, with the same extension filter
 // and dotfile-folder skipping, so the count matches what the scan will
 // actually probe.
-func CountAudioFiles(root string) (int, error) {
-	files, err := audioFiles(root)
+func CountAudioFiles(ctx context.Context, root string) (int, error) {
+	files, err := audioFiles(ctx, root, nil)
 	if err != nil {
 		return 0, err
 	}
 	return len(files), nil
 }
 
-func audioFiles(root string) ([]string, error) {
+// CountAudioFilesInSubpaths counts audio files under one or more library
+// subdirectories. Used for incremental scan progress totals.
+func CountAudioFilesInSubpaths(ctx context.Context, root string, subpaths []string) (int, error) {
+	return countAudioFilesInSubpaths(ctx, root, subpaths)
+}
+
+// PruneOrphanMusic removes music rows no longer referenced by media_files.
+func (s *Scanner) PruneOrphanMusic(ctx context.Context) (int, error) {
+	return s.pruneOrphanMusic(ctx)
+}
+
+func relDepthUnderRoot(root, path string) int {
+	root = filepath.Clean(root)
+	path = filepath.Clean(path)
+	if path == root {
+		return 0
+	}
+	rel, err := filepath.Rel(root, path)
+	if err != nil || rel == "." {
+		return 0
+	}
+	// "album" => 1, "album/track.flac" => 2
+	return strings.Count(filepath.ToSlash(rel), "/") + 1
+}
+
+func audioFiles(ctx context.Context, root string, onProgress func(int)) ([]string, error) {
 	var paths []string
-	err := filepath.WalkDir(root, func(path string, entry os.DirEntry, err error) error {
-		if err != nil {
-			return err
-		}
-		if entry.IsDir() {
-			name := entry.Name()
-			if strings.HasPrefix(name, ".") && path != root {
-				return filepath.SkipDir
-			}
-			return nil
-		}
-		if isAudioPath(path) {
+	err := walkLibraryDir(ctx, root, func(path string, entry os.DirEntry) error {
+		if shouldScanAudioFile(path) && isAudioPath(path) {
 			paths = append(paths, path)
+			if onProgress != nil && (len(paths) == 1 || len(paths)%10 == 0) {
+				onProgress(len(paths))
+			}
 		}
 		return nil
 	})
 	sort.Strings(paths)
+	if onProgress != nil && len(paths) > 0 {
+		onProgress(len(paths))
+	}
 	return paths, err
+}
+
+func shouldScanAudioFile(path string) bool {
+	name := filepath.Base(path)
+	// macOS AppleDouble/resource-fork sidecars (._*) often carry audio
+	// extensions but are not playable tracks — indexing them duplicates albums
+	// and surfaces garbage titles like "._1 - Ultralight Beam".
+	if strings.HasPrefix(name, "._") {
+		return false
+	}
+	if strings.HasPrefix(name, ".") {
+		return false
+	}
+	return true
 }
 
 func isAudioPath(path string) bool {
@@ -175,10 +206,120 @@ func isAudioPath(path string) bool {
 	}
 }
 
+// probe is used for podcast file scans.
 func (s *Scanner) probe(ctx context.Context, path string) (probeInfo, error) {
-	cmd := exec.CommandContext(ctx, s.ffprobePath, "-v", "error", "-print_format", "json", "-show_format", "-show_streams", "-show_chapters", path)
-	output, err := cmd.Output()
+	info, err := s.probeMedia(ctx, path, false)
 	if err != nil {
+		return probeInfo{}, err
+	}
+	return finalizeProbeInfo(info), nil
+}
+
+// probeAudiobook reads tags natively, supplements technical fields via ffprobe,
+// and loads embedded chapter markers from .m4b/.m4a when present.
+func (s *Scanner) probeAudiobook(ctx context.Context, path string) (probeInfo, error) {
+	info, err := s.probeMediaHybrid(ctx, path, true)
+	if err != nil {
+		return probeInfo{}, err
+	}
+	if len(info.Chapters) == 0 {
+		ff, ffErr := s.probeMediaFFprobeWithTimeout(ctx, path, true, "32M", "10M", probeFileTimeout)
+		if ffErr == nil {
+			if len(ff.Chapters) > 0 {
+				info.Chapters = ff.Chapters
+			}
+			info = mergeProbeInfo(info, ff, true)
+		} else {
+			log.Printf("scanner: audiobook chapter probe failed for %q: %v", path, ffErr)
+		}
+	}
+	return finalizeProbeInfo(info), nil
+}
+
+// probeMusic probes a music track without parsing chapters. Chapter tables on
+// some files are huge or malformed and can make ffprobe appear hung; music
+// scanning does not use chapter metadata anyway.
+func (s *Scanner) probeMusic(ctx context.Context, path string) (probeInfo, error) {
+	return s.probeMedia(ctx, path, false)
+}
+
+func (s *Scanner) probeMedia(ctx context.Context, path string, includeChapters bool) (probeInfo, error) {
+	if s.useFFprobeForScan {
+		return s.probeMediaFFprobe(ctx, path, includeChapters)
+	}
+	return s.probeMediaHybrid(ctx, path, includeChapters)
+}
+
+// probeMediaHybrid reads tags natively, then calls ffprobe when duration or other
+// technical fields cannot be determined from headers/tags alone.
+func (s *Scanner) probeMediaHybrid(ctx context.Context, path string, includeChapters bool) (probeInfo, error) {
+	nativeCtx, cancel := context.WithTimeout(ctx, nativeProbeTimeout)
+	defer cancel()
+
+	native, nativeErr := probeNative(nativeCtx, path, includeChapters)
+	if nativeErr != nil {
+		logFFprobeFallback(path, "native tags: "+nativeErr.Error())
+		ff, err := s.probeMediaFFprobe(ctx, path, includeChapters)
+		if err != nil {
+			return probeInfo{}, err
+		}
+		return finalizeProbeInfo(ff), nil
+	}
+	if !probeNeedsTechnicalSupplement(native) {
+		return finalizeProbeInfo(native), nil
+	}
+
+	logFFprobeFallback(path, "incomplete technical metadata")
+	ff, err := s.probeMediaFFprobeTechnical(ctx, path, includeChapters)
+	if err != nil {
+		log.Printf("scanner: ffprobe technical probe failed for %q: %v (using native metadata)", path, err)
+		return finalizeProbeInfo(native), nil
+	}
+	merged := mergeProbeInfo(native, ff, includeChapters)
+	if merged.AudioFile.DurationSeconds <= 0 {
+		log.Printf("scanner: ffprobe returned no duration for %q (using native metadata)", path)
+		return finalizeProbeInfo(native), nil
+	}
+	return merged, nil
+}
+
+func (s *Scanner) probeMediaFFprobeTechnical(ctx context.Context, path string, includeChapters bool) (probeInfo, error) {
+	if includeChapters {
+		return s.probeMediaFFprobeWithTimeout(ctx, path, true, "32M", "10M", probeFileTimeout)
+	}
+	return s.probeMediaFFprobeWithTimeout(ctx, path, false, "256k", "1M", technicalProbeTimeout)
+}
+
+func (s *Scanner) probeMediaFFprobeWithTimeout(ctx context.Context, path string, includeChapters bool, probeSize, analyzeDuration string, timeout time.Duration) (probeInfo, error) {
+	probeCtx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+	return s.probeMediaFFprobeWithLimits(probeCtx, path, includeChapters, probeSize, analyzeDuration)
+}
+
+func (s *Scanner) probeMediaFFprobe(ctx context.Context, path string, includeChapters bool) (probeInfo, error) {
+	return s.probeMediaFFprobeWithTimeout(ctx, path, includeChapters, "32M", "10M", probeFileTimeout)
+}
+
+func (s *Scanner) probeMediaFFprobeWithLimits(ctx context.Context, path string, includeChapters bool, probeSize, analyzeDuration string) (probeInfo, error) {
+	args := []string{
+		"-v", "error",
+		"-probesize", probeSize,
+		"-analyzeduration", analyzeDuration,
+		"-print_format", "json",
+		"-show_format", "-show_streams",
+	}
+	if includeChapters {
+		args = append(args, "-show_chapters")
+	}
+	args = append(args, path)
+
+	cmd := exec.CommandContext(ctx, s.ffprobePath, args...)
+	cmd.Stdin = nil
+	output, err := runCommandOutputWithTimeout(ctx, cmd)
+	if err != nil {
+		if errors.Is(ctx.Err(), context.DeadlineExceeded) {
+			return probeInfo{}, fmt.Errorf("ffprobe %q: timed out: %w", path, ctx.Err())
+		}
 		var exitErr *exec.ExitError
 		if errors.As(err, &exitErr) {
 			return probeInfo{}, fmt.Errorf("ffprobe %q: %s", path, strings.TrimSpace(string(exitErr.Stderr)))
@@ -192,6 +333,29 @@ func (s *Scanner) probe(ctx context.Context, path string) (probeInfo, error) {
 	}
 
 	return raw.toProbeInfo(path), nil
+}
+
+func runCommandOutputWithTimeout(ctx context.Context, cmd *exec.Cmd) ([]byte, error) {
+	type result struct {
+		out []byte
+		err error
+	}
+	done := make(chan result, 1)
+	go func() {
+		out, err := cmd.Output()
+		done <- result{out: out, err: err}
+	}()
+	select {
+	case <-ctx.Done():
+		// Best effort kill. Do not wait here; waiting can deadlock when the child
+		// is stuck in uninterruptible I/O on network storage.
+		if cmd.Process != nil {
+			_ = cmd.Process.Kill()
+		}
+		return nil, ctx.Err()
+	case res := <-done:
+		return res.out, res.err
+	}
 }
 
 func stableID(prefix string, parts ...string) string {

@@ -23,13 +23,19 @@ const (
 	ScanStatusRunning   = "running"
 	ScanStatusCompleted = "completed"
 	ScanStatusFailed    = "failed"
+	ScanStatusCancelled = "cancelled"
 
-	ScanScopeAll     = "all"
-	ScanScopeLibrary = "library"
+	ScanScopeAll      = "all"
+	ScanScopeLibrary  = "library"
+	ScanScopeSubpaths = "subpaths"
 
 	TriggerAPI        = "api"
 	TriggerStartup    = "startup"
 	TriggerFilesystem = "filesystem"
+
+	ScanModeFull   = "full"
+	ScanModeQuick  = "quick"
+	ScanModeRepair = "repair"
 )
 
 type Library struct {
@@ -65,13 +71,17 @@ type ScanJob struct {
 	Scope         string     `json:"scope"`
 	LibraryID     string     `json:"libraryId,omitempty"`
 	TriggerSource string     `json:"triggerSource"`
+	ScanMode      string     `json:"scanMode"`
 	StartedAt     time.Time  `json:"startedAt"`
 	FinishedAt    *time.Time `json:"finishedAt,omitempty"`
 	Error         string     `json:"error,omitempty"`
 	FilesSeen     int        `json:"filesSeen"`
 	FilesTotal    int        `json:"filesTotal"`
 	FilesPruned   int        `json:"filesPruned"`
+	FilesMarked   int        `json:"filesMarked"`
 	ItemsPruned   int        `json:"itemsPruned"`
+	// CurrentPath is populated for the in-process active scan only.
+	CurrentPath string `json:"currentPath,omitempty"`
 }
 
 type ScanResult struct {

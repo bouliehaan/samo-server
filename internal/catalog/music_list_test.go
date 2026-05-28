@@ -50,3 +50,28 @@ func TestMusicListSortsByRecentAndTitle(t *testing.T) {
 		t.Fatalf("recent asc artist = %s, want artist-a", artistsAsc.Items[0].ID)
 	}
 }
+
+func TestMusicAlbumListSortsByReleaseDate(t *testing.T) {
+	service := NewService(Seed{
+		MusicAlbums: []MusicAlbum{
+			{ID: "old", Title: "Old", ReleaseYear: 1999},
+			{ID: "new", Title: "New", ReleaseDate: "2024-06-01"},
+			{ID: "unknown", Title: "Unknown"},
+		},
+	})
+
+	releases := service.ListMusicAlbumsSorted(MusicListOptions{
+		Page:      PageRequest{Limit: 10},
+		Sort:      MusicListSortRelease,
+		Direction: SortDirectionDesc,
+	})
+	if releases.Items[0].ID != "new" {
+		t.Fatalf("newest release = %s, want new", releases.Items[0].ID)
+	}
+	if releases.Items[1].ID != "old" {
+		t.Fatalf("second release = %s, want old", releases.Items[1].ID)
+	}
+	if releases.Items[2].ID != "unknown" {
+		t.Fatalf("last release = %s, want unknown", releases.Items[2].ID)
+	}
+}

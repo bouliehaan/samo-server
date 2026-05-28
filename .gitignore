@@ -1,21 +1,20 @@
-# Go
-bin/
+# ===== Build outputs =====
 dist/
-.cache/
-internal/toolchain/assets/*
-!internal/toolchain/assets/README.md
-*.test
-*.out
+bin/
+*.tar.gz
 
-# Local config/database
-data/
-*.db
-*.db-shm
-*.db-wal
-config.local.*
+# ===== Toolchain / generated assets =====
+internal/toolchain/assets/
+
+# ===== Local dev / tooling =====
+.claude/
 .env
-
-# OS/editor
 .DS_Store
-.idea/
-.vscode/
+
+# ===== Logs =====
+*.log
+.cache/
+*.tar.xz
+samo-server
+data/*.db
+data/*.db-*

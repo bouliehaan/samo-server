@@ -391,6 +391,40 @@ const setupHTML = `<!doctype html>
     /* ---------------- STEP 2 : libraries ---------------- */
     let currentBrowsePath = "";
     let attachedLibraries = [];
+    let attachedPodcastFeeds = [];
+
+    async function refreshPodcastFeedList() {
+      try {
+        const data = await withToken("/api/v1/podcasts/feeds?limit=50", { method: "GET" });
+        attachedPodcastFeeds = (data && data.items) || [];
+      } catch (err) {
+        attachedPodcastFeeds = [];
+      }
+      renderAttachedFeedList();
+    }
+
+    function renderAttachedFeedList() {
+      const wrap = document.querySelector(".feeds-attached-body");
+      const countEl = document.querySelector(".feeds-attached-head .count");
+      if (!wrap) return;
+      if (countEl) countEl.textContent = attachedPodcastFeeds.length + " ADDED";
+      if (attachedPodcastFeeds.length === 0) {
+        wrap.innerHTML = "<div class=\"libs-empty\">// no rss feeds yet · optional — add subscriptions for remote podcasts</div>";
+        return;
+      }
+      wrap.innerHTML = "";
+      attachedPodcastFeeds.forEach((feed) => {
+        const row = document.createElement("div");
+        row.className = "lib-row";
+        const auto = feed.autoDownloadEnabled ? " · AUTO-DOWNLOAD ON" : "";
+        row.innerHTML =
+          "<div class=\"lib-main\">" +
+            "<div class=\"lib-name\">" + escapeHTML(feed.title || feed.feedUrl) + "</div>" +
+            "<div class=\"lib-path\">" + escapeHTML(feed.feedUrl) + auto + "</div>" +
+          "</div>";
+        wrap.appendChild(row);
+      });
+    }
 
     async function loadDirectories(path) {
       currentBrowsePath = path || "";
@@ -531,6 +565,34 @@ const setupHTML = `<!doctype html>
             </div>
           </div>
 
+          <div class="libs-add" style="margin-top: 18px;">
+            <div class="libs-add-head">+ PODCAST RSS FEEDS (OPTIONAL)</div>
+            <div class="libs-add-body">
+              <div class="feeds-attached">
+                <div class="feeds-attached-head">
+                  <span class="label">ADDED FEEDS</span>
+                  <span class="count">0 ADDED</span>
+                </div>
+                <div class="feeds-attached-body"></div>
+              </div>
+              <label class="field">
+                <span class="field-label">FEED URL</span>
+                <input type="url" id="podcastFeedURL" placeholder="https://example.com/feed.xml">
+              </label>
+              <label class="field">
+                <span class="field-label">TITLE (OPTIONAL)</span>
+                <input type="text" id="podcastFeedTitle" placeholder="show name">
+              </label>
+              <label class="field" style="display:flex; align-items:center; gap:10px; margin-top:8px;">
+                <input type="checkbox" id="podcastFeedAutoDownload">
+                <span>AUTO-DOWNLOAD NEW EPISODES AS THEY APPEAR</span>
+              </label>
+              <div class="actions">
+                <button class="btn primary" id="podcastFeedAdd">+ ADD FEED</button>
+              </div>
+            </div>
+          </div>
+
           <div class="continue-row">
             <button class="btn ghost" id="librariesContinue" disabled>CONTINUE TO SCAN &rarr;</button>
           </div>
@@ -538,8 +600,35 @@ const setupHTML = `<!doctype html>
       ` + "`" + `;
       loadDirectories("").catch((e) => setError(e.message));
       refreshLibraryList();
+      refreshPodcastFeedList();
 
       document.getElementById("libraryName").addEventListener("input", (e) => { e.target.dataset.touched = "1"; });
+
+      document.getElementById("podcastFeedAdd").addEventListener("click", async () => {
+        const url = document.getElementById("podcastFeedURL").value.trim();
+        const title = document.getElementById("podcastFeedTitle").value.trim();
+        const autoDownloadEnabled = document.getElementById("podcastFeedAutoDownload").checked;
+        setError("");
+        if (!url) return setError("paste a podcast feed url first");
+        const button = document.getElementById("podcastFeedAdd");
+        button.disabled = true;
+        const original = button.textContent;
+        button.textContent = "ADDING…";
+        try {
+          await withToken("/api/v1/podcasts/feeds", {
+            method: "POST",
+            body: JSON.stringify({ url, title, autoDownloadEnabled }),
+          });
+          document.getElementById("podcastFeedURL").value = "";
+          document.getElementById("podcastFeedTitle").value = "";
+          await refreshPodcastFeedList();
+        } catch (err) {
+          setError(err.message);
+        } finally {
+          button.disabled = false;
+          button.textContent = original;
+        }
+      });
 
       document.getElementById("libraryAdd").addEventListener("click", async () => {
         const path = document.getElementById("libraryPath").value.trim();

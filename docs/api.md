@@ -191,7 +191,7 @@ External metadata lookup is explicit and disabled by default. Search returns can
 Enable providers with:
 
 ```sh
-SAMO_METADATA_PROVIDERS=openlibrary,googlebooks,itunes,musicbrainz
+SAMO_METADATA_PROVIDERS=audible,openlibrary,googlebooks,itunes,musicbrainz
 SAMO_METADATA_USER_AGENT="SamoServer/0.1 (you@example.com)"
 ```
 
@@ -227,7 +227,7 @@ Supported `targetKind` values: `music-artist`, `music-album`, `music-track`, `mu
 Search examples:
 
 ```text
-GET /api/v1/metadata/search?kind=audiobook&title=Signal+Manual&author=Ada+Archive
+GET /api/v1/metadata/search?kind=audiobook&title=Signal+Manual&author=Ada+Archive&audibleAsin=B000SAMO
 GET /api/v1/metadata/search?kind=audiobook&isbn=9780000000001&provider=openlibrary
 GET /api/v1/metadata/search?kind=podcast&q=Night+Signals&provider=itunes
 GET /api/v1/metadata/search?kind=music&musicType=track&track=Signal+One&artist=The+Static&provider=musicbrainz
@@ -236,6 +236,7 @@ GET /api/v1/metadata/search?kind=music&musicType=album&album=Night+Broadcasts&ar
 
 Supported initial providers:
 
+- `audible`: audiobook candidates from Audible catalog + Audnexus (square cover art, narrators, series, ASIN)
 - `openlibrary`: audiobook/book candidates from Open Library
 - `googlebooks`: audiobook/book candidates from Google Books
 - `itunes`: podcast candidates from Apple's iTunes Search API

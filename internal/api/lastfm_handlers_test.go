@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -70,7 +71,30 @@ func TestLastFMConfigCanBeSavedViaAPI(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	service := lastfm.NewService(lastfm.ServiceOptions{DB: db})
+	service := lastfm.NewService(lastfm.ServiceOptions{
+		DB: db,
+		HTTPClient: &http.Client{
+			Transport: roundTripperFunc(func(req *http.Request) (*http.Response, error) {
+				if err := req.ParseForm(); err != nil {
+					return nil, err
+				}
+				if req.FormValue("method") == "auth.getToken" {
+					return &http.Response{
+						StatusCode: http.StatusOK,
+						Header:     make(http.Header),
+						Body:       io.NopCloser(strings.NewReader(`{"token":"ok"}`)),
+						Request:    req,
+					}, nil
+				}
+				return &http.Response{
+					StatusCode: http.StatusForbidden,
+					Header:     make(http.Header),
+					Body:       io.NopCloser(strings.NewReader(`{"message":"unexpected method","error":0}`)),
+					Request:    req,
+				}, nil
+			}),
+		},
+	})
 	handler := NewServer(ServerOptions{
 		LastFM:   service,
 		Playback: playback.New(db),
@@ -102,4 +126,10 @@ func TestLastFMConfigCanBeSavedViaAPI(t *testing.T) {
 	if service.Enabled() {
 		t.Fatal("service should be disabled after clearing config")
 	}
+}
+
+type roundTripperFunc func(*http.Request) (*http.Response, error)
+
+func (fn roundTripperFunc) RoundTrip(req *http.Request) (*http.Response, error) {
+	return fn(req)
 }

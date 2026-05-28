@@ -12,19 +12,30 @@ import (
 )
 
 func getJSON[T any](client *http.Client, req *http.Request) (T, error) {
-	var out T
-	resp, err := client.Do(req)
+	out, status, err := getJSONOptional[T](client, req)
 	if err != nil {
 		return out, err
 	}
-	defer resp.Body.Close()
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return out, fmt.Errorf("status %d", resp.StatusCode)
-	}
-	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
-		return out, err
+	if status < 200 || status >= 300 {
+		return out, fmt.Errorf("status %d", status)
 	}
 	return out, nil
+}
+
+func getJSONOptional[T any](client *http.Client, req *http.Request) (T, int, error) {
+	var out T
+	resp, err := client.Do(req)
+	if err != nil {
+		return out, 0, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode == http.StatusNoContent {
+		return out, resp.StatusCode, nil
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+		return out, resp.StatusCode, err
+	}
+	return out, resp.StatusCode, nil
 }
 
 func withQuery(baseURL string, values url.Values) string {

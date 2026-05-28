@@ -24,36 +24,42 @@ type MusicArtist struct {
 }
 
 type MusicAlbum struct {
-	ID                  string        `json:"id"`
-	Title               string        `json:"title"`
-	SortTitle           string        `json:"sortTitle,omitempty"`
-	Version             string        `json:"version,omitempty"`
-	DisplayArtist       string        `json:"displayArtist,omitempty"`
-	AlbumArtistIDs      []string      `json:"albumArtistIds,omitempty"`
-	AlbumArtistNames    []string      `json:"albumArtistNames,omitempty"`
-	ArtistIDs           []string      `json:"artistIds,omitempty"`
-	ArtistNames         []string      `json:"artistNames,omitempty"`
-	ReleaseDate         string        `json:"releaseDate,omitempty"`
-	OriginalReleaseDate string        `json:"originalReleaseDate,omitempty"`
-	ReleaseYear         int           `json:"releaseYear,omitempty"`
-	ReleaseType         string        `json:"releaseType,omitempty"`
-	ReleaseStatus       string        `json:"releaseStatus,omitempty"`
-	Compilation         bool          `json:"compilation,omitempty"`
-	RecordLabel         string        `json:"recordLabel,omitempty"`
-	CatalogNumber       string        `json:"catalogNumber,omitempty"`
-	Barcode             string        `json:"barcode,omitempty"`
-	Genres              []string      `json:"genres,omitempty"`
-	Styles              []string      `json:"styles,omitempty"`
-	Moods               []string      `json:"moods,omitempty"`
-	Tags                []string      `json:"tags,omitempty"`
-	DiscCount           int           `json:"discCount,omitempty"`
-	TrackCount          int           `json:"trackCount"`
-	DurationSeconds     int           `json:"durationSeconds"`
-	Images              []Image       `json:"images,omitempty"`
-	ExternalIDs         ExternalIDs   `json:"externalIds,omitempty"`
-	Playback            PlaybackState `json:"playback"`
-	AddedAt             *time.Time    `json:"addedAt,omitempty"`
-	UpdatedAt           *time.Time    `json:"updatedAt,omitempty"`
+	ID                  string   `json:"id"`
+	Title               string   `json:"title"`
+	SortTitle           string   `json:"sortTitle,omitempty"`
+	Version             string   `json:"version,omitempty"`
+	DisplayArtist       string   `json:"displayArtist,omitempty"`
+	AlbumArtistIDs      []string `json:"albumArtistIds,omitempty"`
+	AlbumArtistNames    []string `json:"albumArtistNames,omitempty"`
+	ArtistIDs           []string `json:"artistIds,omitempty"`
+	ArtistNames         []string `json:"artistNames,omitempty"`
+	ReleaseDate         string   `json:"releaseDate,omitempty"`
+	OriginalReleaseDate string   `json:"originalReleaseDate,omitempty"`
+	ReleaseYear         int      `json:"releaseYear,omitempty"`
+	ReleaseType         string   `json:"releaseType,omitempty"`
+	ReleaseStatus       string   `json:"releaseStatus,omitempty"`
+	Compilation         bool     `json:"compilation,omitempty"`
+	RecordLabel         string   `json:"recordLabel,omitempty"`
+	CatalogNumber       string   `json:"catalogNumber,omitempty"`
+	Barcode             string   `json:"barcode,omitempty"`
+	Genres              []string `json:"genres,omitempty"`
+	Styles              []string `json:"styles,omitempty"`
+	Moods               []string `json:"moods,omitempty"`
+	Tags                []string `json:"tags,omitempty"`
+	DiscCount           int      `json:"discCount,omitempty"`
+	TrackCount          int      `json:"trackCount"`
+	DurationSeconds     int      `json:"durationSeconds"`
+	// Audio quality is aggregated from track media_files at catalog load so list
+	// endpoints (home, search) can show hi-res badges without fetching every track.
+	MaxBitDepth   int           `json:"maxBitDepth,omitempty"`
+	MaxSampleRate int           `json:"maxSampleRate,omitempty"`
+	AudioQuality  string        `json:"audioQuality,omitempty"` // e.g. "24/192"
+	HiRes         bool          `json:"hiRes,omitempty"`
+	Images        []Image       `json:"images,omitempty"`
+	ExternalIDs   ExternalIDs   `json:"externalIds,omitempty"`
+	Playback      PlaybackState `json:"playback"`
+	AddedAt       *time.Time    `json:"addedAt,omitempty"`
+	UpdatedAt     *time.Time    `json:"updatedAt,omitempty"`
 }
 
 type MusicTrack struct {

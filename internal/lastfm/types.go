@@ -9,13 +9,14 @@ import (
 )
 
 var (
-	ErrDisabled        = errors.New("last.fm integration is not configured")
-	ErrNotConnected    = errors.New("last.fm account is not connected")
-	ErrInvalidToken    = errors.New("last.fm auth token is invalid or expired")
-	ErrSessionExpired  = errors.New("last.fm session is invalid or expired")
-	ErrMissingMetadata = errors.New("track is missing artist or title metadata required for scrobbling")
-	ErrInvalidEvent    = errors.New("invalid scrobble event")
-	ErrInvalidConfig   = errors.New("last.fm api key and shared secret are required")
+	ErrDisabled         = errors.New("last.fm integration is not configured")
+	ErrNotConnected     = errors.New("last.fm account is not connected")
+	ErrInvalidToken     = errors.New("last.fm auth token is invalid or expired")
+	ErrSessionExpired   = errors.New("last.fm session is invalid or expired")
+	ErrMissingMetadata  = errors.New("track is missing artist or title metadata required for scrobbling")
+	ErrInvalidEvent     = errors.New("invalid scrobble event")
+	ErrInvalidConfig    = errors.New("last.fm api key and shared secret are required")
+	ErrInvalidSignature = errors.New("last.fm api signature rejected")
 )
 
 type ScrobbleEvent string

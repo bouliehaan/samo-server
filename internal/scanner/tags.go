@@ -16,6 +16,9 @@ var tagAliases = map[string][]string{
 	"album": {
 		"album", "talb", "albumtitle", "album_title",
 	},
+	"albumversion": {
+		"albumversion", "version", "musicbrainz_albumcomment", "musicbrainz_album_comment",
+	},
 	"artist": {
 		"artist", "artists", "tpe1", "performer", "performer_name",
 	},
@@ -105,6 +108,18 @@ var tagAliases = map[string][]string{
 	},
 	"movementname": {
 		"movementname", "movement", "chapter",
+	},
+	"musicbrainz_releasegroupid": {
+		"musicbrainz_releasegroupid", "musicbrainz_albumgroupid", "releasegroup",
+	},
+	"musicbrainz_albumid": {
+		"musicbrainz_albumid", "musicbrainz_releaseid", "musicbrainz_album_id",
+	},
+	"musicbrainz_albumartistid": {
+		"musicbrainz_albumartistid", "musicbrainz_albumartist_id",
+	},
+	"musicbrainz_artistid": {
+		"musicbrainz_artistid", "musicbrainz_artist_id",
 	},
 }
 

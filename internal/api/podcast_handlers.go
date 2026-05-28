@@ -30,7 +30,9 @@ func (s *Server) listPodcastEpisodes(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	writeJSON(w, http.StatusOK, s.catalog.ListPodcastEpisodes(page))
+	items := s.catalog.ListPodcastEpisodes(page)
+	items.Items = s.enrichEpisodeListCache(r.Context(), items.Items)
+	writeJSON(w, http.StatusOK, items)
 }
 
 func (s *Server) listPodcastShowEpisodes(w http.ResponseWriter, r *http.Request) {
@@ -44,11 +46,17 @@ func (s *Server) listPodcastShowEpisodes(w http.ResponseWriter, r *http.Request)
 		writeCatalogError(w, err)
 		return
 	}
+	items.Items = s.enrichEpisodeListCache(r.Context(), items.Items)
 	writeJSON(w, http.StatusOK, items)
 }
 
 func (s *Server) getPodcastEpisode(w http.ResponseWriter, r *http.Request) {
-	item, err := s.catalog.PodcastEpisode(r.PathValue("id"))
+	principal, ok := s.currentUser(r)
+	if !ok {
+		writeError(w, http.StatusUnauthorized, "unauthorized")
+		return
+	}
+	item, err := s.podcastEpisodeWithUserPlayback(r.Context(), principal.User.ID, r.PathValue("id"))
 	if err != nil {
 		writeCatalogError(w, err)
 		return

@@ -15,6 +15,7 @@ func TestSearchMusicMatchesAlbumArtistAndFiltersGenre(t *testing.T) {
 		ArtistNames: []string{"The Static"},
 		Genres:      []string{"Electronic"},
 		ReleaseYear: 2020,
+		TrackCount:  8,
 	}}})
 
 	results := service.SearchMusicText("static", catalog.PageRequest{Limit: 10})

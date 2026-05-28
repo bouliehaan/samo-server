@@ -2,13 +2,19 @@ package main
 
 import (
 	"context"
+	"fmt"
 	"log"
 	"net/http"
+	"os"
 	"path/filepath"
+	"sync"
+	"time"
 
 	"github.com/bouliehaan/samo-server/internal/api"
+	"github.com/bouliehaan/samo-server/internal/artistimages"
 	"github.com/bouliehaan/samo-server/internal/bookmarks"
 	"github.com/bouliehaan/samo-server/internal/catalog"
+	"github.com/bouliehaan/samo-server/internal/channels"
 	"github.com/bouliehaan/samo-server/internal/config"
 	"github.com/bouliehaan/samo-server/internal/covers"
 	"github.com/bouliehaan/samo-server/internal/files"
@@ -32,6 +38,11 @@ import (
 
 func main() {
 	ctx := context.Background()
+
+	if payload := scanner.PayloadPathFromArgs(os.Args[1:]); payload != "" {
+		runScanSubprocess(ctx, payload)
+		return
+	}
 
 	cfg, err := config.LoadEnv()
 	if err != nil {
@@ -63,14 +74,30 @@ func main() {
 		log.Fatal(err)
 	}
 
+	playlistService := playlists.New(db)
 	scan := scanner.NewWithOptions(db, scanner.Options{
-		Covers:      coverService,
-		FFprobePath: tools.FFprobe,
+		Covers:              coverService,
+		FFprobePath:         tools.FFprobe,
+		PlaylistImport:      playlistScanBridge{db: db, svc: playlistService},
+		AutoImportPlaylists: cfg.AutoImportPlaylists,
+		ExternalScanner:     cfg.ScannerExternal,
+		UseFFprobeForScan:   cfg.ScanFFprobe,
 	})
 	libraryService := libraries.New(db, scan)
 	libraryService.SetBackgroundContext(ctx)
 	if err := libraryService.SyncConfigured(ctx, cfg.Libraries); err != nil {
 		log.Fatal(err)
+	}
+
+	// install.sh restarts the service on every deploy, which kills any
+	// in-flight scan goroutine and leaves its scan_jobs row stuck in
+	// "running" forever — the dashboard then shows ghost scans the
+	// operator can't cancel. Sweep those out before accepting any new
+	// scan requests.
+	if reconciled, err := libraryService.ReconcileOrphanScans(ctx); err != nil {
+		log.Printf("reconcile orphan scan jobs failed: %v", err)
+	} else if reconciled > 0 {
+		log.Printf("reconciled %d orphan scan job(s) from previous run", reconciled)
 	}
 
 	// Always refresh aggregate counts at startup. Scans normally do this at
@@ -81,16 +108,6 @@ func main() {
 	// counts even before the next scan.
 	if err := scan.RefreshStats(ctx); err != nil {
 		log.Printf("startup stat refresh failed: %v", err)
-	}
-
-	if cfg.ScanOnStart {
-		log.Printf("scanning configured libraries on startup")
-		// Startup scan is async too — we don't block server boot on it.
-		// The goroutine runs against the lifecycle ctx and reloads the
-		// catalog on completion via the OnScanComplete hook below.
-		if _, err := libraryService.ScanAll(ctx, libraries.TriggerStartup); err != nil {
-			log.Fatal(err)
-		}
 	}
 
 	catalogSeed, err := catalog.LoadSeedFromDB(ctx, db)
@@ -116,7 +133,6 @@ func main() {
 		CoverDownloader: coverService,
 		Logger:          log.Printf,
 	})
-	playlistService := playlists.New(db)
 	podcastStreamService := podcaststream.New()
 	searchService := search.New()
 	searchService.Rebuild(catalogSeed)
@@ -133,7 +149,11 @@ func main() {
 		log.Fatal(err)
 	}
 	filesService := files.New(db, coverService.CoverDir(), podcastCacheService.CacheDir())
-	sourceService := sources.New(db, sources.Options{PodcastCache: podcastCacheService})
+	sourceService := sources.New(db, sources.Options{
+		Covers:              coverService,
+		PodcastCache:        podcastCacheService,
+		DefaultAutoDownload: cfg.PodcastAutoDownload,
+	})
 	userService := users.New(users.ServiceOptions{
 		DB:             db,
 		LegacyAPIToken: cfg.APIToken,
@@ -187,7 +207,18 @@ func main() {
 	if err := lastfmService.LoadConfig(ctx); err != nil {
 		log.Printf("last.fm config load failed: %v", err)
 	}
+	artistImageService := artistimages.NewService(artistimages.ServiceOptions{
+		DB:      db,
+		LastFM:  lastfmService,
+		Covers:  coverService,
+		Catalog: catalogService,
+		Logger:  log.Printf,
+	})
+	artistImageService.SetBackgroundContext(ctx)
+	var catalogReloadMu sync.Mutex
 	reloadCatalog := func(ctx context.Context) error {
+		catalogReloadMu.Lock()
+		defer catalogReloadMu.Unlock()
 		seed, err := catalog.LoadSeedFromDB(ctx, db)
 		if err != nil {
 			return err
@@ -196,15 +227,40 @@ func main() {
 		searchService.Rebuild(seed)
 		return nil
 	}
-	// Refresh catalog projection whenever an async scan finishes (success
-	// or failure — failed scans still touch the DB before bailing). Failures
-	// log the underlying reload error but don't block the next scan.
-	libraryService.OnScanComplete(func(ctx context.Context, job libraries.ScanJob) {
+	libraryService.OnScanComplete(func(ctx context.Context, job libraries.ScanJob, stats scanner.ScanStats) {
 		if err := reloadCatalog(ctx); err != nil {
 			log.Printf("catalog reload after scan %s failed: %v", job.ID, err)
 		}
+		if job.Status != libraries.ScanStatusCompleted || !cfg.ArtistImagesOnScan || !artistImageService.Enabled() {
+			return
+		}
+		if len(stats.NewArtistIDs) > 0 {
+			artistImageService.FetchArtistsByIDs(ctx, stats.NewArtistIDs)
+			return
+		}
+		if job.ScanMode == libraries.ScanModeFull {
+			if _, err := artistImageService.StartBackfill(ctx, artistimages.BackfillModeMissing); err != nil {
+				log.Printf("artist image backfill after full scan failed: %v", err)
+			}
+		}
 	})
+	if cfg.ScanOnStart {
+		log.Printf("scanning configured libraries on startup")
+		if _, err := libraryService.ScanAll(ctx, libraries.TriggerStartup, ""); err != nil {
+			log.Fatal(err)
+		}
+	}
+	channelsService := channels.NewService(channels.ServiceOptions{
+		DB:               db,
+		Catalog:          catalogService,
+		Cache:            podcastCacheAdapter{service: podcastCacheService},
+		InternetStations: internetStationAdapter{service: sourceService},
+		FFmpegPath:       tools.FFmpeg,
+		Logger:           log.Default(),
+	})
+
 	handler := api.NewServer(api.ServerOptions{
+		DB:            db,
 		APIToken:      cfg.APIToken,
 		Catalog:       catalogService,
 		Libraries:     libraryService,
@@ -221,8 +277,11 @@ func main() {
 		Radio:         radioService,
 		Sources:       sourceService,
 		LastFM:        lastfmService,
+		ArtistImages:  artistImageService,
 		Users:         userService,
+		Channels:      channelsService,
 		ReloadCatalog: reloadCatalog,
+		StartedAt:     time.Now(),
 	})
 
 	if cfg.LastFMPoll && lastfmService.Enabled() {
@@ -267,24 +326,24 @@ func main() {
 
 	if cfg.WatchLibraries {
 		watcher := watch.New(watch.Options{
-			DB:      db,
-			Catalog: catalogService,
-			Scan: func(ctx context.Context) (libraries.ScanResult, error) {
-				return libraryService.ScanFilesystem(ctx)
+			DB: db,
+			ScanSubpaths: func(ctx context.Context, libraryID string, subpaths []string) (libraries.ScanResult, error) {
+				return libraryService.ScanFilesystem(ctx, libraryID, subpaths)
 			},
-			ListLibraries: func(ctx context.Context) ([]string, error) {
+			ListLibraries: func(ctx context.Context) ([]watch.LibraryRoot, error) {
 				scannerLibraries, err := libraryService.ScannerLibraries(ctx)
 				if err != nil {
 					return nil, err
 				}
-				paths := make([]string, 0, len(scannerLibraries))
+				roots := make([]watch.LibraryRoot, 0, len(scannerLibraries))
 				for _, library := range scannerLibraries {
-					paths = append(paths, library.Path)
+					roots = append(roots, watch.LibraryRoot{ID: library.ID, Path: library.Path})
 				}
-				return paths, nil
+				return roots, nil
 			},
-			Debounce: cfg.WatchDebounce,
-			Logger:   log.Default(),
+			ScanInProgress: libraryService.ScanInProgress,
+			Debounce:       cfg.WatchDebounce,
+			Logger:         log.Default(),
 		})
 		go func() {
 			if err := watcher.Run(ctx); err != nil && err != context.Canceled {
@@ -308,6 +367,11 @@ func main() {
 	log.Printf("sqlite database: %s", cfg.DBPath)
 	log.Printf("ffmpeg: %s", tools.FFmpeg)
 	log.Printf("ffprobe: %s", tools.FFprobe)
+	if cfg.ScanFFprobe {
+		log.Printf("library scan metadata: ffprobe only (SAMO_SCAN_FFPROBE=1)")
+	} else {
+		log.Printf("library scan metadata: native tags + ffprobe fallback for duration/technical fields")
+	}
 	log.Printf("cover cache: %s", coverDir)
 	log.Printf("radio config: %s (%d station(s))", cfg.RadioConfigPath, radioService.StationCount())
 	if lastfmService.Enabled() {
@@ -319,4 +383,50 @@ func main() {
 	if err := http.Serve(listener, handler); err != nil {
 		log.Fatal(err)
 	}
+}
+
+// podcastCacheAdapter satisfies channels.EpisodeCacheLookup by forwarding
+// to the real podcastcache.Service. The channels package can't depend on
+// podcastcache directly without an import cycle, so the adapter lives
+// here in main.
+type podcastCacheAdapter struct {
+	service *podcastcache.Service
+}
+
+func (a podcastCacheAdapter) Lookup(ctx context.Context, episodeID, enclosureURL string) (channels.LocalCachedFile, bool, error) {
+	if a.service == nil {
+		return channels.LocalCachedFile{}, false, nil
+	}
+	cached, ok, err := a.service.Lookup(ctx, episodeID, enclosureURL)
+	if err != nil || !ok {
+		return channels.LocalCachedFile{}, ok, err
+	}
+	return channels.LocalCachedFile{
+		Path:        cached.Path,
+		ContentType: cached.ContentType,
+		SizeBytes:   cached.SizeBytes,
+	}, true, nil
+}
+
+// internetStationAdapter exposes sources.Service.GetInternetRadioStation
+// through the channels.InternetStationLookup interface. Same pattern as
+// podcastCacheAdapter — keeps internal/channels free of a sources
+// import and lets channels.InternetStation stay a minimal struct.
+type internetStationAdapter struct {
+	service *sources.Service
+}
+
+func (a internetStationAdapter) GetInternetRadioStation(ctx context.Context, stationID string) (channels.InternetStation, error) {
+	if a.service == nil {
+		return channels.InternetStation{}, fmt.Errorf("sources service unavailable")
+	}
+	station, err := a.service.GetInternetRadioStation(ctx, stationID)
+	if err != nil {
+		return channels.InternetStation{}, err
+	}
+	return channels.InternetStation{
+		ID:        station.ID,
+		Name:      station.Name,
+		StreamURL: station.StreamURL,
+	}, nil
 }

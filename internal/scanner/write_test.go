@@ -41,7 +41,7 @@ func TestScannerWritesHydratableMusicRows(t *testing.T) {
 	if err := scanner.upsertMusicAlbum(ctx, album); err != nil {
 		t.Fatal(err)
 	}
-	if err := scanner.setAlbumArtists(ctx, album.ID, []catalog.MusicArtist{artist}); err != nil {
+	if err := scanner.setAlbumArtists(ctx, album.ID, []catalog.MusicArtist{artist}, true); err != nil {
 		t.Fatal(err)
 	}
 	track := catalog.MusicTrack{
@@ -67,11 +67,11 @@ func TestScannerWritesHydratableMusicRows(t *testing.T) {
 		Container:       "flac",
 		MimeType:        "audio/flac",
 		Codec:           "flac",
-		MetadataFormats: []string{"vorbis"},
+		MetadataFormats: []string{"flac"},
 		SampleRate:      96000,
 		DurationSeconds: 245,
 		EmbeddedTags:    catalog.Tags{"title": []string{"Signal One"}},
-	}); err != nil {
+	}, "", ""); err != nil {
 		t.Fatal(err)
 	}
 	if err := scanner.upsertGenre(ctx, string(media.KindMusic), "Ambient"); err != nil {
@@ -88,8 +88,8 @@ func TestScannerWritesHydratableMusicRows(t *testing.T) {
 	if seed.MusicTracks[0].DisplayArtist != "The Static" {
 		t.Fatalf("display artist = %q, want The Static", seed.MusicTracks[0].DisplayArtist)
 	}
-	if got := seed.MusicTracks[0].AudioFiles[0].MetadataFormats[0]; got != "vorbis" {
-		t.Fatalf("metadata format = %q, want vorbis", got)
+	if got := seed.MusicTracks[0].AudioFiles[0].MetadataFormats[0]; got != "flac" {
+		t.Fatalf("metadata format = %q, want flac", got)
 	}
 }
 
@@ -123,7 +123,7 @@ func TestSetAudiobookContributorsUpsertsNarrators(t *testing.T) {
 		Path:      "/books/the-signal",
 		Book:      &catalog.BookMetadata{Title: "The Signal"},
 	}
-	if err := scanner.upsertAudiobook(ctx, item); err != nil {
+	if _, err := scanner.upsertAudiobook(ctx, item); err != nil {
 		t.Fatal(err)
 	}
 
@@ -166,5 +166,58 @@ func TestSetAudiobookContributorsUpsertsNarrators(t *testing.T) {
 	}
 	if narratorName != "Vox Reader" {
 		t.Fatalf("narrator name = %q, want Vox Reader", narratorName)
+	}
+}
+
+// Regression: upsertAudiobook preserves an existing row's id when the path
+// already exists under a different hash. Callers must use the returned id for
+// contributor/series/chapter links — using the freshly computed id trips the
+// audiobook_contributors FK (`insert audiobook contributor: FOREIGN KEY
+// constraint failed`).
+func TestUpsertAudiobookPathCollisionReturnsExistingID(t *testing.T) {
+	ctx := context.Background()
+	db, err := storage.Open(ctx, t.TempDir()+"/samo.db")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	if err := storage.ApplyMigrations(ctx, db, migrations.Files); err != nil {
+		t.Fatal(err)
+	}
+
+	scanner := New(db)
+	library := Library{ID: "library-books", Name: "Books", Kind: "audiobook", Path: "/books"}
+	if err := scanner.upsertLibrary(ctx, library); err != nil {
+		t.Fatal(err)
+	}
+
+	const path = "/books/the-signal"
+	existing := catalog.AudiobookItem{
+		ID:        "audiobook-old",
+		LibraryID: library.ID,
+		Path:      path,
+		Book:      &catalog.BookMetadata{Title: "The Signal"},
+	}
+	if _, err := scanner.upsertAudiobook(ctx, existing); err != nil {
+		t.Fatal(err)
+	}
+
+	candidate := catalog.AudiobookItem{
+		ID:        "audiobook-new",
+		LibraryID: library.ID,
+		Path:      path,
+		Book:      &catalog.BookMetadata{Title: "The Signal (updated)"},
+	}
+	resolvedID, err := scanner.upsertAudiobook(ctx, candidate)
+	if err != nil {
+		t.Fatalf("upsertAudiobook path collision: %v", err)
+	}
+	if resolvedID != existing.ID {
+		t.Fatalf("resolved id = %q, want %q", resolvedID, existing.ID)
+	}
+
+	authors := []catalog.ContributorRef{{ID: "person-author", Name: "Ada Archive", Role: "author"}}
+	if err := scanner.setAudiobookContributors(ctx, resolvedID, authors); err != nil {
+		t.Fatalf("setAudiobookContributors with resolved id: %v", err)
 	}
 }

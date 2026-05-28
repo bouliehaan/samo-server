@@ -20,27 +20,35 @@ import (
 // already wrote it to the podcasts table. Anything that fails both falls
 // back to music, which matches user intent for the common case of a
 // mixed library that is mostly an album collection.
-func (s *Scanner) scanMixedLibrary(ctx context.Context, library Library, root string, files []string) error {
+func (s *Scanner) scanMixedLibrary(ctx context.Context, library Library, root string, files []string, state *scanState) error {
 	groups := splitMixedGroups(root, files)
 
-	for _, group := range groups.audiobooks {
+	if libraryRootLooksLikePodcast(root) {
+		return s.scanPodcastLibrary(ctx, library, root, files)
+	}
+
+	for _, group := range splitAudiobookGroups(groups.audiobooks) {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
 		if err := s.scanAudiobook(ctx, library, root, group); err != nil {
 			return err
 		}
 	}
 	for _, group := range groups.podcasts {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
 		if err := s.scanPodcast(ctx, library, root, group); err != nil {
 			return err
 		}
 	}
-	for _, path := range groups.music {
-		if err := s.scanMusicFile(ctx, library, root, path); err != nil {
+	if len(groups.music) > 0 {
+		if err := s.scanMusicLibraryByFolder(ctx, library, root, groups.music, state); err != nil {
 			return err
 		}
 	}
-
-	_, err := s.db.ExecContext(ctx, `UPDATE libraries SET last_scan_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP WHERE id = ?`, library.ID)
-	return err
+	return nil
 }
 
 type mixedGroups struct {
@@ -80,12 +88,10 @@ func splitMixedGroups(root string, files []string) mixedGroups {
 		}
 		switch {
 		case classifyFolderAsAudiobook(folder, folderFiles):
-			// Use the highest-level audiobook root (the folder directly
-			// under the library root, or the actual folder if it is one).
-			bookRoot := audiobookRoot(rootAbs, folder)
+			bookRoot := audiobookGroupRootFromDir(rootAbs, folder)
 			out.audiobooks = mergeGroup(out.audiobooks, bookRoot, folderFiles)
 		case classifyFolderAsPodcast(folder, folderFiles):
-			showRoot := audiobookRoot(rootAbs, folder)
+			showRoot := audiobookGroupRootFromDir(rootAbs, folder)
 			out.podcasts = mergeGroup(out.podcasts, showRoot, folderFiles)
 		default:
 			out.music = append(out.music, folderFiles...)
@@ -101,20 +107,6 @@ func splitMixedGroups(root string, files []string) mixedGroups {
 	})
 	sort.Strings(out.music)
 	return out
-}
-
-func audiobookRoot(libraryRoot, folder string) string {
-	// Walk up until the parent is the library root. The first child of the
-	// library root is the audiobook root, even if the actual audio file
-	// lives deeper (e.g. `book-name/Disc 1/track-01.mp3`).
-	current := filepath.Clean(folder)
-	for {
-		parent := filepath.Dir(current)
-		if parent == libraryRoot || parent == current {
-			return current
-		}
-		current = parent
-	}
 }
 
 // mergeGroup merges files into an existing group with the same root, or
@@ -173,6 +165,11 @@ func classifyFolderAsPodcast(folder string, files []string) bool {
 	if prefix != "" && matched*2 >= len(files) {
 		return true
 	}
+	// Old-time radio and serial podcast folders often have many episodes
+	// with inconsistent filenames — treat large episode bundles as shows.
+	if len(files) >= 8 {
+		return true
+	}
 	return false
 }
 
@@ -184,6 +181,9 @@ func classifyFolderAsPodcast(folder string, files []string) bool {
 func classifyFolderAsAudiobook(folder string, files []string) bool {
 	if len(files) == 0 {
 		return false
+	}
+	if audiobookPathHint(folder) {
+		return true
 	}
 	if hasAudiobookSidecar(folder) {
 		return true
@@ -201,9 +201,33 @@ func classifyFolderAsAudiobook(folder string, files []string) bool {
 			return true
 		}
 	}
-	// Single large file in a folder is almost always an audiobook chapter.
+	// Multi-file chapter audiobooks: several MP3/M4A parts in one folder.
+	if len(files) >= 3 && looksLikeChapterBundle(files) && !looksLikeMusicAlbum(files) {
+		return true
+	}
+	// Single-file audiobooks, including ones smaller than legacy 50MB cutoff.
 	if len(files) == 1 {
-		if info, err := os.Stat(files[0]); err == nil && info.Size() > 50*1024*1024 {
+		info, err := os.Stat(files[0])
+		if err != nil {
+			return false
+		}
+		ext := strings.ToLower(filepath.Ext(files[0]))
+		switch {
+		case info.Size() > 50*1024*1024:
+			return true
+		case ext == ".m4b":
+			return info.Size() > 1024
+		case ext == ".mp3", ext == ".m4a", ext == ".opus", ext == ".flac":
+			return info.Size() >= 5*1024*1024
+		}
+	}
+	return false
+}
+
+func audiobookPathHint(folder string) bool {
+	for _, segment := range strings.Split(strings.ToLower(filepath.Clean(folder)), string(filepath.Separator)) {
+		switch segment {
+		case "audiobook", "audiobooks", "audible", "books":
 			return true
 		}
 	}

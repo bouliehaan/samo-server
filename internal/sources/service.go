@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"github.com/bouliehaan/samo-server/internal/catalog"
+	"github.com/bouliehaan/samo-server/internal/covers"
 	"github.com/bouliehaan/samo-server/internal/podcastcache"
 )
 
@@ -35,14 +36,18 @@ var (
 )
 
 type Service struct {
-	db           *sql.DB
-	client       *http.Client
-	podcastCache *podcastcache.Service
+	db                  *sql.DB
+	client              *http.Client
+	covers              *covers.Service
+	podcastCache        *podcastcache.Service
+	defaultAutoDownload bool
 }
 
 type Options struct {
-	HTTPClient   *http.Client
-	PodcastCache *podcastcache.Service
+	HTTPClient          *http.Client
+	Covers              *covers.Service
+	PodcastCache        *podcastcache.Service
+	DefaultAutoDownload bool
 }
 
 func New(db *sql.DB, opts ...Options) *Service {
@@ -54,7 +59,13 @@ func New(db *sql.DB, opts ...Options) *Service {
 	if client == nil {
 		client = &http.Client{Timeout: 30 * time.Second}
 	}
-	return &Service{db: db, client: client, podcastCache: options.PodcastCache}
+	return &Service{
+		db:                  db,
+		client:              client,
+		covers:              options.Covers,
+		podcastCache:        options.PodcastCache,
+		defaultAutoDownload: options.DefaultAutoDownload,
+	}
 }
 
 func NewWithHTTPClient(db *sql.DB, client *http.Client) *Service {
@@ -81,7 +92,9 @@ func (s *Service) AddPodcastFeed(ctx context.Context, input AddPodcastFeedInput)
 		parsed.Title = resolvedFeedURL
 	}
 
-	if err := s.savePodcastFeed(ctx, resolvedFeedURL, parsed); err != nil {
+	if err := s.savePodcastFeed(ctx, resolvedFeedURL, parsed, feedSaveOptions{
+		autoDownloadOnInsert: s.resolveAutoDownload(input.AutoDownloadEnabled),
+	}); err != nil {
 		return PodcastFeed{}, err
 	}
 	return s.GetPodcastFeed(ctx, podcastFeedID(resolvedFeedURL))
@@ -311,6 +324,28 @@ func (s *Service) DeleteInternetRadioStation(ctx context.Context, id string) err
 	return err
 }
 
+func (s *Service) SetInternetRadioCover(ctx context.Context, id, coverID string) (InternetRadioStation, error) {
+	if s == nil || s.db == nil {
+		return InternetRadioStation{}, ErrDisabled
+	}
+	id = strings.TrimSpace(id)
+	coverID = strings.TrimSpace(coverID)
+	if id == "" {
+		return InternetRadioStation{}, ErrNotFound
+	}
+	if _, err := s.GetInternetRadioStation(ctx, id); err != nil {
+		return InternetRadioStation{}, err
+	}
+	_, err := s.db.ExecContext(ctx, `
+		UPDATE internet_radio_stations
+		SET cover_id = ?, updated_at = CURRENT_TIMESTAMP
+		WHERE id = ?`, coverID, id)
+	if err != nil {
+		return InternetRadioStation{}, fmt.Errorf("set internet radio cover: %w", err)
+	}
+	return s.GetInternetRadioStation(ctx, id)
+}
+
 func (s *Service) fetchPodcastFeed(ctx context.Context, feedURL string) (parsedPodcastFeed, string, error) {
 	return s.fetchPodcastFeedURL(ctx, feedURL, true)
 }
@@ -356,7 +391,21 @@ func (s *Service) fetchPodcastFeedURL(ctx context.Context, feedURL string, allow
 	return parsedPodcastFeed{}, "", parseErr
 }
 
-func (s *Service) savePodcastFeed(ctx context.Context, feedURL string, parsed parsedPodcastFeed) error {
+func (s *Service) resolveAutoDownload(input *bool) bool {
+	if input != nil {
+		return *input
+	}
+	if s == nil {
+		return false
+	}
+	return s.defaultAutoDownload
+}
+
+type feedSaveOptions struct {
+	autoDownloadOnInsert bool
+}
+
+func (s *Service) savePodcastFeed(ctx context.Context, feedURL string, parsed parsedPodcastFeed, opts ...feedSaveOptions) error {
 	idx, err := catalog.LoadOverrideIndex(ctx, s.db)
 	if err != nil {
 		return err
@@ -369,6 +418,29 @@ func (s *Service) savePodcastFeed(ctx context.Context, feedURL string, parsed pa
 		return err
 	}
 	guardedEpisodes, err := s.guardPodcastEpisodesSave(ctx, idx, podcastID, parsed.Episodes)
+	if err != nil {
+		return err
+	}
+
+	var saveOpts feedSaveOptions
+	if len(opts) > 0 {
+		saveOpts = opts[0]
+	}
+
+	autoDownload := false
+	autoDownloadInsert := boolInt(saveOpts.autoDownloadOnInsert)
+	var existingAutoDownload sql.NullInt64
+	if err := s.db.QueryRowContext(ctx, `
+		SELECT auto_download_enabled FROM podcast_feeds WHERE id = ?`, feedID).
+		Scan(&existingAutoDownload); err == sql.ErrNoRows {
+		autoDownload = saveOpts.autoDownloadOnInsert
+	} else if err != nil {
+		return fmt.Errorf("load podcast feed auto download: %w", err)
+	} else {
+		autoDownload = existingAutoDownload.Int64 != 0
+	}
+
+	existingEpisodeIDs, err := s.loadPodcastEpisodeIDs(ctx, podcastID)
 	if err != nil {
 		return err
 	}
@@ -402,9 +474,9 @@ func (s *Service) savePodcastFeed(ctx context.Context, feedURL string, parsed pa
 			URLs:     cleanStringSlice([]string{feedURL, parsed.SiteURL}),
 		},
 	}
-	coverJSON := "{}"
-	if parsed.ImageURL != "" {
-		coverJSON = jsonText(catalog.Image{URL: parsed.ImageURL})
+	coverJSON, err := s.resolvePodcastFeedCoverJSON(ctx, idx, podcastID, parsed.ImageURL)
+	if err != nil {
+		return err
 	}
 
 	durationSeconds := 0
@@ -438,9 +510,9 @@ func (s *Service) savePodcastFeed(ctx context.Context, feedURL string, parsed pa
 		INSERT INTO podcast_feeds (
 		  id, podcast_id, feed_url, title, description, author, site_url, image_url, language, explicit,
 		  categories_json, owner_name, owner_email, episode_count, status, last_error, last_fetched_at,
-		  poll_enabled, poll_interval_seconds, next_poll_at, consecutive_errors, updated_at
+		  auto_download_enabled, poll_enabled, poll_interval_seconds, next_poll_at, consecutive_errors, updated_at
 		)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, '', CURRENT_TIMESTAMP, 1, ?, ?, 0, CURRENT_TIMESTAMP)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, '', CURRENT_TIMESTAMP, ?, 1, ?, ?, 0, CURRENT_TIMESTAMP)
 		ON CONFLICT(id) DO UPDATE SET
 		  podcast_id = excluded.podcast_id,
 		  feed_url = excluded.feed_url,
@@ -461,7 +533,7 @@ func (s *Service) savePodcastFeed(ctx context.Context, feedURL string, parsed pa
 		  updated_at = CURRENT_TIMESTAMP`,
 		feedID, podcastID, feedURL, parsed.Title, parsed.Description, parsed.Author, parsed.SiteURL, parsed.ImageURL,
 		parsed.Language, boolInt(parsed.Explicit), jsonText(categories), parsed.OwnerName, parsed.OwnerEmail,
-		episodeCount, defaultSourceStatus, DefaultPollIntervalSeconds, scheduleInitialPoll()); err != nil {
+		episodeCount, defaultSourceStatus, autoDownloadInsert, DefaultPollIntervalSeconds, scheduleInitialPoll()); err != nil {
 		return fmt.Errorf("upsert podcast feed source: %w", err)
 	}
 
@@ -506,6 +578,18 @@ func (s *Service) savePodcastFeed(ctx context.Context, feedURL string, parsed pa
 	if err := tx.Commit(); err != nil {
 		return err
 	}
+
+	var newEpisodes []catalog.PodcastEpisode
+	for _, episode := range guardedEpisodes {
+		if _, seen := existingEpisodeIDs[episode.ID]; seen {
+			continue
+		}
+		newEpisodes = append(newEpisodes, episode)
+	}
+	if autoDownload && len(newEpisodes) > 0 {
+		s.prefetchPodcastEpisodes(newEpisodes)
+	}
+
 	if s.podcastCache != nil {
 		return s.podcastCache.PruneAfterFeedSave(ctx)
 	}
@@ -629,6 +713,40 @@ func cleanStringSlice(values []string) []string {
 		return strings.ToLower(cleaned[i]) < strings.ToLower(cleaned[j])
 	})
 	return uniqueStrings(cleaned)
+}
+
+func (s *Service) resolvePodcastFeedCoverJSON(
+	ctx context.Context,
+	idx *catalog.OverrideIndex,
+	podcastID, rssImageURL string,
+) (string, error) {
+	podcastID = strings.TrimSpace(podcastID)
+	if podcastID == "" {
+		return "{}", nil
+	}
+	if idx != nil {
+		if patch := idx.Patch(catalog.OverrideKindPodcast, podcastID); len(patch) > 0 {
+			if _, hasCover := patch["cover"]; hasCover {
+				var existing string
+				if err := s.db.QueryRowContext(ctx, `SELECT cover_json FROM podcasts WHERE id = ?`, podcastID).Scan(&existing); err == nil {
+					existing = strings.TrimSpace(existing)
+					if existing != "" && existing != "{}" && existing != "null" {
+						return existing, nil
+					}
+				}
+			}
+		}
+	}
+	rssImageURL = strings.TrimSpace(rssImageURL)
+	if rssImageURL == "" {
+		return "{}", nil
+	}
+	if s.covers != nil {
+		if image, err := s.covers.DownloadFromURL(ctx, rssImageURL); err == nil && image != nil {
+			return jsonText(*image), nil
+		}
+	}
+	return jsonText(catalog.Image{URL: rssImageURL}), nil
 }
 
 func jsonText(value any) string {

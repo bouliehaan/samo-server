@@ -2,7 +2,9 @@ package scanner
 
 import (
 	"context"
+	"database/sql"
 	"fmt"
+	"log"
 	"strings"
 	"time"
 
@@ -17,18 +19,30 @@ func (s *Scanner) upsertMusicArtist(ctx context.Context, artist catalog.MusicArt
 			return err
 		}
 	}
+	existed := false
+	if err := s.db.QueryRowContext(ctx, `SELECT 1 FROM music_artists WHERE id = ? LIMIT 1`, artist.ID).Scan(new(int)); err == nil {
+		existed = true
+	}
 	_, err := s.db.ExecContext(ctx, `
-		INSERT INTO music_artists (id, name, sort_name, genres_json, external_ids_json, updated_at)
-		VALUES (?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+		INSERT INTO music_artists (id, name, sort_name, genres_json, images_json, external_ids_json, updated_at)
+		VALUES (?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
 		ON CONFLICT(id) DO UPDATE SET
 		  name = excluded.name,
 		  sort_name = excluded.sort_name,
 		  genres_json = excluded.genres_json,
+		  images_json = CASE
+		    WHEN excluded.images_json IS NULL OR excluded.images_json IN ('[]', 'null', '')
+		    THEN music_artists.images_json
+		    ELSE excluded.images_json
+		  END,
 		  external_ids_json = excluded.external_ids_json,
 		  updated_at = CURRENT_TIMESTAMP`,
-		artist.ID, artist.Name, artist.SortName, jsonText(artist.Genres), jsonText(artist.ExternalIDs))
+		artist.ID, artist.Name, artist.SortName, jsonText(artist.Genres), jsonText(artist.Images), jsonText(artist.ExternalIDs))
 	if err != nil {
 		return fmt.Errorf("upsert music artist %q: %w", artist.Name, err)
+	}
+	if s.activeScan != nil && !existed {
+		s.activeScan.noteNewArtist(artist.ID)
 	}
 	return nil
 }
@@ -52,7 +66,11 @@ func (s *Scanner) upsertMusicAlbum(ctx context.Context, album catalog.MusicAlbum
 		  title = excluded.title,
 		  sort_title = excluded.sort_title,
 		  version = excluded.version,
-		  display_artist = excluded.display_artist,
+		  display_artist = CASE
+		    WHEN excluded.display_artist IS NULL OR TRIM(excluded.display_artist) = ''
+		    THEN music_albums.display_artist
+		    ELSE excluded.display_artist
+		  END,
 		  release_date = excluded.release_date,
 		  original_release_date = excluded.original_release_date,
 		  release_year = excluded.release_year,
@@ -66,7 +84,11 @@ func (s *Scanner) upsertMusicAlbum(ctx context.Context, album catalog.MusicAlbum
 		  styles_json = excluded.styles_json,
 		  moods_json = excluded.moods_json,
 		  tags_json = excluded.tags_json,
-		  images_json = excluded.images_json,
+		  images_json = CASE
+		    WHEN excluded.images_json IS NULL OR excluded.images_json IN ('[]', 'null', '')
+		    THEN music_albums.images_json
+		    ELSE excluded.images_json
+		  END,
 		  external_ids_json = excluded.external_ids_json,
 		  updated_at = CURRENT_TIMESTAMP`,
 		album.ID, album.Title, album.SortTitle, album.Version, album.DisplayArtist, album.ReleaseDate, album.OriginalReleaseDate, album.ReleaseYear,
@@ -79,9 +101,51 @@ func (s *Scanner) upsertMusicAlbum(ctx context.Context, album catalog.MusicAlbum
 	return nil
 }
 
-func (s *Scanner) setAlbumArtists(ctx context.Context, albumID string, artists []catalog.MusicArtist) error {
+func (s *Scanner) loadAlbumArtistNamesForAlbum(ctx context.Context, albumID string) []string {
+	albumID = strings.TrimSpace(albumID)
+	if albumID == "" || s.db == nil {
+		return nil
+	}
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT a.name
+		FROM music_album_artists aa
+		JOIN music_artists a ON a.id = aa.artist_id
+		WHERE aa.album_id = ?
+		ORDER BY aa.position`, albumID)
+	if err != nil {
+		return nil
+	}
+	defer rows.Close()
+
+	names := make([]string, 0, 2)
+	for rows.Next() {
+		var name string
+		if err := rows.Scan(&name); err != nil {
+			return names
+		}
+		name = strings.TrimSpace(name)
+		if name != "" {
+			names = append(names, name)
+		}
+	}
+	return names
+}
+
+func (s *Scanner) setAlbumArtists(ctx context.Context, albumID string, artists []catalog.MusicArtist, replace bool) error {
 	if s.overrideIndex != nil && s.overrideIndex.HasField(catalog.OverrideKindMusicAlbum, albumID, "artists") {
 		return nil
+	}
+	if len(artists) == 0 {
+		return nil
+	}
+	if !replace {
+		var count int
+		if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM music_album_artists WHERE album_id = ?`, albumID).Scan(&count); err != nil {
+			return fmt.Errorf("count album artists: %w", err)
+		}
+		if count > 0 {
+			return nil
+		}
 	}
 	if _, err := s.db.ExecContext(ctx, `DELETE FROM music_album_artists WHERE album_id = ?`, albumID); err != nil {
 		return fmt.Errorf("clear album artists: %w", err)
@@ -134,7 +198,11 @@ func (s *Scanner) upsertMusicTrack(ctx context.Context, track catalog.MusicTrack
 		  musical_key = excluded.musical_key,
 		  comment = excluded.comment,
 		  lyrics_json = excluded.lyrics_json,
-		  images_json = excluded.images_json,
+		  images_json = CASE
+		    WHEN excluded.images_json IS NULL OR excluded.images_json IN ('[]', 'null', '')
+		    THEN music_tracks.images_json
+		    ELSE excluded.images_json
+		  END,
 		  external_ids_json = excluded.external_ids_json,
 		  updated_at = CURRENT_TIMESTAMP`,
 		track.ID, track.Title, track.SortTitle, track.Subtitle, track.DisplayArtist, nullableString(track.AlbumID), track.AlbumTitle,
@@ -165,12 +233,12 @@ func (s *Scanner) setTrackArtists(ctx context.Context, trackID string, artists [
 	return nil
 }
 
-func (s *Scanner) upsertAudiobook(ctx context.Context, item catalog.AudiobookItem) error {
+func (s *Scanner) upsertAudiobook(ctx context.Context, item catalog.AudiobookItem) (string, error) {
 	if s.overrideIndex != nil {
 		var err error
 		item, err = s.overrideIndex.GuardAudiobook(ctx, s.db, item)
 		if err != nil {
-			return err
+			return "", err
 		}
 	}
 	coverJSON := "{}"
@@ -208,15 +276,19 @@ func (s *Scanner) upsertAudiobook(ctx context.Context, item catalog.AudiobookIte
 		boolInt(item.Missing), boolInt(item.Invalid), coverJSON, jsonText(item.Tags), jsonText(item.Genres),
 		item.DurationSeconds, jsonText(item.Progress), bookJSON)
 	if err == nil {
-		return nil
+		return item.ID, nil
 	}
 	if !strings.Contains(strings.ToLower(err.Error()), "unique") {
-		return fmt.Errorf("upsert audiobook %q: %w", item.ID, err)
+		return "", fmt.Errorf("upsert audiobook %q: %w", item.ID, err)
 	}
 	// Path UNIQUE collision — a row exists at this path under a different
 	// id (e.g. left over from an earlier scan when the library_id hashed
 	// differently). Preserve the existing id and update everything else
 	// against it.
+	var existingID string
+	if err := s.db.QueryRowContext(ctx, `SELECT id FROM audiobooks WHERE path = ?`, item.Path).Scan(&existingID); err != nil {
+		return "", fmt.Errorf("resolve audiobook id by path %q: %w", item.Path, err)
+	}
 	_, err = s.db.ExecContext(ctx, `
 		UPDATE audiobooks
 		SET library_id = ?, folder_id = ?, inode = ?, size_bytes = ?, missing = ?, invalid = ?,
@@ -227,9 +299,9 @@ func (s *Scanner) upsertAudiobook(ctx context.Context, item catalog.AudiobookIte
 		boolInt(item.Missing), boolInt(item.Invalid), coverJSON, jsonText(item.Tags), jsonText(item.Genres),
 		item.DurationSeconds, bookJSON, item.Path)
 	if err != nil {
-		return fmt.Errorf("update audiobook by path %q: %w", item.Path, err)
+		return "", fmt.Errorf("update audiobook by path %q: %w", item.Path, err)
 	}
-	return nil
+	return existingID, nil
 }
 
 func (s *Scanner) upsertPodcast(ctx context.Context, item catalog.PodcastItem) error {
@@ -475,14 +547,31 @@ func (s *Scanner) replaceEpisodeChapters(ctx context.Context, episodeID string, 
 	return nil
 }
 
-func (s *Scanner) upsertAudioFile(ctx context.Context, libraryID string, owner audioFileOwner, file catalog.AudioFile) error {
-	_, err := s.db.ExecContext(ctx, `
+func (s *Scanner) upsertAudioFile(ctx context.Context, libraryID string, owner audioFileOwner, file catalog.AudioFile, trackPID, contentHash string) error {
+	existingID, err := s.mediaFileIDByPath(ctx, file.Path)
+	if err != nil {
+		return fmt.Errorf("lookup media file by path %q: %w", file.Path, err)
+	}
+	var prior mediaFileOwnerSnapshot
+	if existingID != "" {
+		file.ID = existingID
+		prior, err = s.mediaFileOwners(ctx, existingID)
+		if err != nil {
+			return fmt.Errorf("load media file owners for %q: %w", file.Path, err)
+		}
+	} else if strings.TrimSpace(file.ID) == "" {
+		file.ID = stableID("file", file.Path)
+	}
+	file = finalizeAudioFile(file)
+
+	_, err = s.db.ExecContext(ctx, `
 		INSERT INTO media_files (
 		  id, library_id, audiobook_id, podcast_id, track_id, episode_id, path, relative_path, file_name, inode, size_bytes,
 		  modified_at, container, mime_type, codec, codec_profile, metadata_formats_json, bitrate, bit_depth, sample_rate, channels,
-		  channel_layout, duration_seconds, checksum, embedded_tags_json, updated_at
+		  channel_layout, duration_seconds, checksum, embedded_tags_json, track_pid, content_hash,
+		  missing, missing_detected_at, updated_at
 		)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, NULL, CURRENT_TIMESTAMP)
 		ON CONFLICT(id) DO UPDATE SET
 		  library_id = excluded.library_id,
 		  audiobook_id = excluded.audiobook_id,
@@ -508,19 +597,97 @@ func (s *Scanner) upsertAudioFile(ctx context.Context, libraryID string, owner a
 		  duration_seconds = excluded.duration_seconds,
 		  checksum = excluded.checksum,
 		  embedded_tags_json = excluded.embedded_tags_json,
+		  track_pid = excluded.track_pid,
+		  content_hash = excluded.content_hash,
+		  missing = 0,
+		  missing_detected_at = NULL,
 		  updated_at = CURRENT_TIMESTAMP`,
 		file.ID, libraryID, nullableString(owner.AudiobookID), nullableString(owner.PodcastID),
 		nullableString(owner.TrackID), nullableString(owner.EpisodeID),
 		file.Path, file.RelativePath, file.FileName, fileInode(file.Path), file.SizeBytes, timeString(file.ModifiedAt),
 		file.Container, file.MimeType, file.Codec, file.CodecProfile, jsonText(file.MetadataFormats), file.Bitrate, file.BitDepth, file.SampleRate,
-		file.Channels, file.ChannelLayout, file.DurationSeconds, file.Checksum, jsonText(file.EmbeddedTags))
+		file.Channels, file.ChannelLayout, file.DurationSeconds, file.Checksum, jsonText(file.EmbeddedTags),
+		trackPID, contentHash)
 	if err != nil {
-		return fmt.Errorf("upsert audio file %q: %w", file.Path, err)
+		if strings.Contains(strings.ToLower(err.Error()), "unique") {
+			if err := s.reclaimMediaFileByPath(ctx, libraryID, owner, file, trackPID, contentHash); err != nil {
+				return fmt.Errorf("reclaim media file %q: %w", file.Path, err)
+			}
+		} else {
+			return fmt.Errorf("upsert audio file %q: %w", file.Path, err)
+		}
+	} else {
+		if prior.TrackID != "" && owner.TrackID != "" && prior.TrackID != owner.TrackID {
+			s.noteTrackIDMigration(prior.TrackID, owner.TrackID)
+		}
+		if err := s.cleanupReplacedMediaOwners(ctx, prior, owner); err != nil {
+			log.Printf("scanner: cleanup after media file %q: %v", file.Path, err)
+		}
 	}
 	if s.activeScan != nil {
 		s.activeScan.seeFile(file.Path)
 	}
 	return nil
+}
+
+func (s *Scanner) reclaimMediaFileByPath(ctx context.Context, libraryID string, owner audioFileOwner, file catalog.AudioFile, trackPID, contentHash string) error {
+	existingID, err := s.mediaFileIDByPath(ctx, file.Path)
+	if err != nil {
+		return err
+	}
+	if existingID == "" {
+		return sql.ErrNoRows
+	}
+	file.ID = existingID
+	prior, err := s.mediaFileOwners(ctx, existingID)
+	if err != nil {
+		return err
+	}
+	file = finalizeAudioFile(file)
+	_, err = s.db.ExecContext(ctx, `
+		UPDATE media_files
+		SET library_id = ?,
+		    audiobook_id = ?,
+		    podcast_id = ?,
+		    track_id = ?,
+		    episode_id = ?,
+		    relative_path = ?,
+		    file_name = ?,
+		    inode = ?,
+		    size_bytes = ?,
+		    modified_at = ?,
+		    container = ?,
+		    mime_type = ?,
+		    codec = ?,
+		    codec_profile = ?,
+		    metadata_formats_json = ?,
+		    bitrate = ?,
+		    bit_depth = ?,
+		    sample_rate = ?,
+		    channels = ?,
+		    channel_layout = ?,
+		    duration_seconds = ?,
+		    checksum = ?,
+		    embedded_tags_json = ?,
+		    track_pid = ?,
+		    content_hash = ?,
+		    missing = 0,
+		    missing_detected_at = NULL,
+		    updated_at = CURRENT_TIMESTAMP
+		WHERE path = ?`,
+		libraryID, nullableString(owner.AudiobookID), nullableString(owner.PodcastID),
+		nullableString(owner.TrackID), nullableString(owner.EpisodeID),
+		file.RelativePath, file.FileName, fileInode(file.Path), file.SizeBytes, timeString(file.ModifiedAt),
+		file.Container, file.MimeType, file.Codec, file.CodecProfile, jsonText(file.MetadataFormats), file.Bitrate, file.BitDepth, file.SampleRate,
+		file.Channels, file.ChannelLayout, file.DurationSeconds, file.Checksum, jsonText(file.EmbeddedTags),
+		trackPID, contentHash, file.Path)
+	if err != nil {
+		return err
+	}
+	if prior.TrackID != "" && owner.TrackID != "" && prior.TrackID != owner.TrackID {
+		s.noteTrackIDMigration(prior.TrackID, owner.TrackID)
+	}
+	return s.cleanupReplacedMediaOwners(ctx, prior, owner)
 }
 
 // audioFileOwner identifies which domain row a media_files row belongs to.
@@ -554,7 +721,10 @@ func (s *Scanner) upsertGenre(ctx context.Context, kind string, name string) err
 // (e.g. after migration 016 renamed shelf libraries, or after Cursor's
 // refactor changed schemas before the scanner had a chance to re-run).
 func (s *Scanner) RefreshStats(ctx context.Context) error {
-	return s.refreshStats(ctx)
+	if err := s.refreshStats(ctx); err != nil {
+		return err
+	}
+	return s.reconcileMediaFileOwners(ctx)
 }
 
 func (s *Scanner) refreshStats(ctx context.Context) error {

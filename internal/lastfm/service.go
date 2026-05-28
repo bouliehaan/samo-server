@@ -118,9 +118,11 @@ func (s *Service) SaveConfig(ctx context.Context, input AppConfigInput) (AppConf
 	}
 	apiKey := strings.TrimSpace(input.APIKey)
 	sharedSecret := strings.TrimSpace(input.SharedSecret)
+	var previousKey string
 	if record, ok, err := loadAppConfig(ctx, s.db); err != nil {
 		return AppConfig{}, err
 	} else if ok {
+		previousKey = record.APIKey
 		if apiKey == "" {
 			apiKey = record.APIKey
 		}
@@ -135,8 +137,29 @@ func (s *Service) SaveConfig(ctx context.Context, input AppConfigInput) (AppConf
 	if sharedSecret == "" {
 		sharedSecret = currentSharedSecret
 	}
+	effectivePreviousKey := previousKey
+	if effectivePreviousKey == "" {
+		effectivePreviousKey = currentAPIKey
+	}
+	if strings.TrimSpace(input.APIKey) != "" &&
+		effectivePreviousKey != "" &&
+		apiKey != effectivePreviousKey &&
+		strings.TrimSpace(input.SharedSecret) == "" {
+		return AppConfig{}, fmt.Errorf("%w: shared secret is required when changing the API key", ErrInvalidConfig)
+	}
 	if apiKey == "" || sharedSecret == "" {
 		return AppConfig{}, ErrInvalidConfig
+	}
+	httpClient := s.httpClient
+	if httpClient == nil {
+		httpClient = &http.Client{Timeout: 15 * time.Second}
+	}
+	client := NewClient(apiKey, sharedSecret, httpClient)
+	if _, err := client.GetToken(ctx); err != nil {
+		if errors.Is(err, ErrInvalidSignature) {
+			return AppConfig{}, fmt.Errorf("%w: verify the shared secret matches the API key in your Last.fm application settings", ErrInvalidConfig)
+		}
+		return AppConfig{}, fmt.Errorf("last.fm credentials rejected: %w", err)
 	}
 	if _, err := saveAppConfig(ctx, s.db, true, apiKey, sharedSecret); err != nil {
 		return AppConfig{}, err
@@ -164,6 +187,22 @@ func (s *Service) activeClient() (*Client, bool) {
 	client := s.client
 	s.mu.RUnlock()
 	return client, client != nil && client.Enabled()
+}
+
+func (s *Service) reloadClient(ctx context.Context) error {
+	return s.LoadConfig(ctx)
+}
+
+// ActiveClient exposes the configured Last.fm client for read-only API calls
+// such as artist.getInfo. Scrobbling still requires Enabled().
+func (s *Service) ActiveClient() (*Client, bool) {
+	if s == nil || s.db == nil {
+		return nil, false
+	}
+	s.mu.RLock()
+	client := s.client
+	s.mu.RUnlock()
+	return client, client != nil && client.APIKeyConfigured()
 }
 
 func (s *Service) currentCredentials() (apiKey, sharedSecret string) {
@@ -198,6 +237,9 @@ func (s *Service) Status(ctx context.Context, userID string) (Status, error) {
 }
 
 func (s *Service) BeginAuth(ctx context.Context) (AuthBeginResponse, error) {
+	if err := s.reloadClient(ctx); err != nil {
+		return AuthBeginResponse{}, err
+	}
 	client, ok := s.activeClient()
 	if !ok {
 		return AuthBeginResponse{}, ErrDisabled
@@ -213,6 +255,9 @@ func (s *Service) BeginAuth(ctx context.Context) (AuthBeginResponse, error) {
 }
 
 func (s *Service) CompleteAuth(ctx context.Context, userID, token string) (AuthCompleteResponse, error) {
+	if err := s.reloadClient(ctx); err != nil {
+		return AuthCompleteResponse{}, err
+	}
 	client, ok := s.activeClient()
 	if !ok {
 		return AuthCompleteResponse{}, ErrDisabled

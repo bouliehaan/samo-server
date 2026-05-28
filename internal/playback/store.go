@@ -118,6 +118,9 @@ func applyPatch(current State, patch PatchInput) State {
 	}
 	if patch.Favorite != nil {
 		current.Favorite = *patch.Favorite
+		// Keep starred in sync with favorite so Subsonic star and Samo fav
+		// represent one concept in the UI.
+		current.Starred = *patch.Favorite
 	}
 	if patch.ProgressSeconds != nil {
 		current.ProgressSeconds = *patch.ProgressSeconds

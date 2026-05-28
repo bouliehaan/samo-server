@@ -2,12 +2,56 @@ package scanner
 
 import (
 	"encoding/xml"
+	"fmt"
+	"log"
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/bouliehaan/samo-server/internal/catalog"
 )
+
+const sidecarReadDirTimeout = 15 * time.Second
+
+// readDirWithTimeout guards NFS/SMB album folders where os.ReadDir can block
+// indefinitely even though direct os.Stat on known sidecar names works.
+func readDirWithTimeout(dir string, timeout time.Duration) ([]os.DirEntry, error) {
+	type result struct {
+		entries []os.DirEntry
+		err     error
+	}
+	ch := make(chan result, 1)
+	go func() {
+		entries, err := os.ReadDir(dir)
+		ch <- result{entries, err}
+	}()
+	select {
+	case r := <-ch:
+		return r.entries, r.err
+	case <-time.After(timeout):
+		log.Printf("scanner: readdir %q timed out after %s", dir, timeout)
+		return nil, fmt.Errorf("readdir %q: timed out", dir)
+	}
+}
+
+func findSidecarImageByStat(dir string, stems []string) *catalog.Image {
+	exts := []string{".jpg", ".jpeg", ".png", ".webp"}
+	for _, stem := range stems {
+		for _, ext := range exts {
+			for _, name := range []string{stem + ext, strings.ToUpper(stem[:1]) + stem[1:] + ext} {
+				path := filepath.Join(dir, name)
+				info, err := os.Stat(path)
+				if err != nil || info.IsDir() || info.Size() == 0 {
+					continue
+				}
+				ext = strings.ToLower(filepath.Ext(path))
+				return &catalog.Image{ID: stableID("image", path), Path: path, MimeType: imageMimeType(ext)}
+			}
+		}
+	}
+	return nil
+}
 
 type bookSidecar struct {
 	Title         string
@@ -224,7 +268,7 @@ func readFirstTextFile(dir string, names ...string) string {
 }
 
 func firstMatchingFile(dir string, ext string) string {
-	entries, err := os.ReadDir(dir)
+	entries, err := readDirWithTimeout(dir, sidecarReadDirTimeout)
 	if err != nil {
 		return ""
 	}
@@ -236,8 +280,39 @@ func firstMatchingFile(dir string, ext string) string {
 	return ""
 }
 
+func findArtistImage(dir string) *catalog.Image {
+	if image := findSidecarImageByStat(dir, []string{"artist", "photo", "poster", "avatar"}); image != nil {
+		return image
+	}
+	entries, err := readDirWithTimeout(dir, sidecarReadDirTimeout)
+	if err != nil {
+		return nil
+	}
+	preferred := []string{"artist", "photo", "poster", "avatar"}
+	for _, stem := range preferred {
+		for _, entry := range entries {
+			if entry.IsDir() {
+				continue
+			}
+			ext := strings.ToLower(filepath.Ext(entry.Name()))
+			if !isImageExt(ext) {
+				continue
+			}
+			name := strings.ToLower(strings.TrimSuffix(entry.Name(), ext))
+			if name == stem {
+				path := filepath.Join(dir, entry.Name())
+				return &catalog.Image{ID: stableID("image", path), Path: path, MimeType: imageMimeType(ext)}
+			}
+		}
+	}
+	return nil
+}
+
 func findCoverImage(dir string) *catalog.Image {
-	entries, err := os.ReadDir(dir)
+	if image := findSidecarImageByStat(dir, []string{"cover", "folder", "front", "artwork", "album"}); image != nil {
+		return image
+	}
+	entries, err := readDirWithTimeout(dir, sidecarReadDirTimeout)
 	if err != nil {
 		return nil
 	}

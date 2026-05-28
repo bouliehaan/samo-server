@@ -1,6 +1,7 @@
 package subsonic
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -11,6 +12,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/bouliehaan/samo-server/internal/artistimages"
 	"github.com/bouliehaan/samo-server/internal/catalog"
 	"github.com/bouliehaan/samo-server/internal/files"
 	"github.com/bouliehaan/samo-server/internal/lastfm"
@@ -33,6 +35,7 @@ type Options struct {
 	Files         *files.Service
 	Playback      *playback.Service
 	LastFM        *lastfm.Service
+	ArtistImages  *artistimages.Service
 	Users         *users.Service
 	APIToken      string
 	ServerVersion string
@@ -45,6 +48,7 @@ type Server struct {
 	files         *files.Service
 	playback      *playback.Service
 	lastfm        *lastfm.Service
+	artistImages  *artistimages.Service
 	users         *users.Service
 	apiToken      string
 	serverVersion string
@@ -62,6 +66,7 @@ func New(options Options) *Server {
 		files:         options.Files,
 		playback:      options.Playback,
 		lastfm:        options.LastFM,
+		artistImages:  options.ArtistImages,
 		users:         options.Users,
 		apiToken:      strings.TrimSpace(options.APIToken),
 		serverVersion: version,
@@ -255,8 +260,8 @@ func (s *Server) getAlbum(w http.ResponseWriter, r *http.Request) {
 	s.writeOK(w, responseBody{Album: &albumDetail{
 		ID:        album.ID,
 		Name:      album.Title,
-		Artist:    displayArtist(album.DisplayArtist, album.ArtistNames, album.AlbumArtistNames),
-		ArtistID:  firstID(album.ArtistIDs, album.AlbumArtistIDs),
+		Artist:    displayArtist(album.DisplayArtist, album.AlbumArtistNames),
+		ArtistID:  firstID(album.AlbumArtistIDs),
 		CoverArt:  album.ID,
 		SongCount: len(songs),
 		Duration:  album.DurationSeconds,
@@ -501,15 +506,35 @@ func (s *Server) coverArt(w http.ResponseWriter, r *http.Request) {
 		s.writeFailed(w, 10, "required parameter id is missing")
 		return
 	}
-	_, images := s.catalog.ResolveMusicCoverArtID(id)
+	images := s.resolveCoverArtImages(r.Context(), id)
 	path := firstImagePath(images)
 	if path == "" {
 		s.writeFailed(w, 70, "cover art not found")
 		return
 	}
+	w.Header().Set("Cache-Control", "public, max-age=31536000, immutable")
 	if err := s.files.ServeLocalPath(r.Context(), path, w, r); err != nil {
 		s.writeFilesFailed(w, err)
 	}
+}
+
+func (s *Server) resolveCoverArtImages(ctx context.Context, id string) []catalog.Image {
+	_, images := s.catalog.ResolveMusicCoverArtID(id)
+	if len(images) > 0 {
+		return images
+	}
+	if s.artistImages == nil {
+		return nil
+	}
+	artist, err := s.catalog.MusicArtist(id)
+	if err != nil {
+		return nil
+	}
+	resolved, ok := s.artistImages.ResolveMusicArtistCover(ctx, artist)
+	if !ok {
+		return nil
+	}
+	return resolved
 }
 
 func (s *Server) scrobble(w http.ResponseWriter, r *http.Request) {

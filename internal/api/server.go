@@ -2,6 +2,7 @@ package api
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -12,8 +13,10 @@ import (
 	"strings"
 	"time"
 
+	"github.com/bouliehaan/samo-server/internal/artistimages"
 	"github.com/bouliehaan/samo-server/internal/bookmarks"
 	"github.com/bouliehaan/samo-server/internal/catalog"
+	"github.com/bouliehaan/samo-server/internal/channels"
 	"github.com/bouliehaan/samo-server/internal/covers"
 	"github.com/bouliehaan/samo-server/internal/files"
 	"github.com/bouliehaan/samo-server/internal/lastfm"
@@ -31,6 +34,7 @@ import (
 )
 
 type ServerOptions struct {
+	DB            *sql.DB
 	APIToken      string
 	Catalog       *catalog.Service
 	Libraries     *libraries.Service
@@ -47,30 +51,41 @@ type ServerOptions struct {
 	Radio         *radio.Service
 	Sources       *sources.Service
 	LastFM        *lastfm.Service
+	ArtistImages  *artistimages.Service
 	Users         *users.Service
+	Channels      *channels.Service
 	ReloadCatalog func(context.Context) error
+	// DisableInitialInternetRadioProbe turns off the fire-and-forget
+	// post-create probe. Useful for tests that close DB/tempdirs immediately.
+	DisableInitialInternetRadioProbe bool
+	StartedAt                        time.Time
 }
 
 type Server struct {
-	apiToken      string
-	catalog       *catalog.Service
-	libraries     *libraries.Service
-	playback      *playback.Service
-	covers        *covers.Service
-	files         *files.Service
-	metadata      *metadata.Service
-	metadataApply *metadata.MetadataApplyService
-	playlists     *playlists.Service
-	podcastStream *podcaststream.Service
-	podcastCache  *podcastcache.Service
-	search        *search.Service
-	bookmarks     *bookmarks.Service
-	mux           *http.ServeMux
-	radio         *radio.Service
-	sources       *sources.Service
-	lastfm        *lastfm.Service
-	users         *users.Service
-	reloadCatalog func(context.Context) error
+	db                               *sql.DB
+	apiToken                         string
+	catalog                          *catalog.Service
+	libraries                        *libraries.Service
+	playback                         *playback.Service
+	covers                           *covers.Service
+	files                            *files.Service
+	metadata                         *metadata.Service
+	metadataApply                    *metadata.MetadataApplyService
+	playlists                        *playlists.Service
+	podcastStream                    *podcaststream.Service
+	podcastCache                     *podcastcache.Service
+	search                           *search.Service
+	bookmarks                        *bookmarks.Service
+	mux                              *http.ServeMux
+	radio                            *radio.Service
+	sources                          *sources.Service
+	lastfm                           *lastfm.Service
+	artistImages                     *artistimages.Service
+	users                            *users.Service
+	channels                         *channels.Service
+	reloadCatalog                    func(context.Context) error
+	disableInitialInternetRadioProbe bool
+	startedAt                        time.Time
 }
 
 func NewServer(options ServerOptions) http.Handler {
@@ -97,28 +112,36 @@ func NewServer(options ServerOptions) http.Handler {
 	}
 
 	server := &Server{
-		apiToken:      strings.TrimSpace(options.APIToken),
-		catalog:       catalogService,
-		libraries:     options.Libraries,
-		playback:      options.Playback,
-		covers:        options.Covers,
-		files:         options.Files,
-		metadata:      metadataService,
-		metadataApply: options.MetadataApply,
-		playlists:     options.Playlists,
-		podcastStream: podcastStreamService,
-		podcastCache:  options.PodcastCache,
-		search:        searchService,
-		bookmarks:     options.Bookmarks,
-		mux:           http.NewServeMux(),
-		radio:         radioService,
-		sources:       options.Sources,
-		lastfm:        options.LastFM,
-		users:         options.Users,
-		reloadCatalog: options.ReloadCatalog,
+		db:                               options.DB,
+		apiToken:                         strings.TrimSpace(options.APIToken),
+		catalog:                          catalogService,
+		libraries:                        options.Libraries,
+		playback:                         options.Playback,
+		covers:                           options.Covers,
+		files:                            options.Files,
+		metadata:                         metadataService,
+		metadataApply:                    options.MetadataApply,
+		playlists:                        options.Playlists,
+		podcastStream:                    podcastStreamService,
+		podcastCache:                     options.PodcastCache,
+		search:                           searchService,
+		bookmarks:                        options.Bookmarks,
+		mux:                              http.NewServeMux(),
+		radio:                            radioService,
+		sources:                          options.Sources,
+		lastfm:                           options.LastFM,
+		artistImages:                     options.ArtistImages,
+		users:                            options.Users,
+		channels:                         options.Channels,
+		reloadCatalog:                    options.ReloadCatalog,
+		disableInitialInternetRadioProbe: options.DisableInitialInternetRadioProbe,
+		startedAt:                        options.StartedAt,
+	}
+	if server.startedAt.IsZero() {
+		server.startedAt = time.Now()
 	}
 	server.routes()
-	return server
+	return WithCORS(server)
 }
 
 func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -170,6 +193,9 @@ func (s *Server) routes() {
 	s.handleAPI("DELETE /api/v1/radio/admin/items/{itemId}", s.deleteRadioStationItem)
 
 	s.handleAPI("GET /api/v1/catalog/overview", s.catalogOverview)
+	s.handleAPI("GET /api/v1/catalog/recently-added", s.catalogRecentlyAdded)
+	s.handleAPI("GET /api/v1/server/activity", s.serverActivity)
+	s.handleAPI("POST /api/v1/catalog/reload", s.postCatalogReload)
 	s.handleAPI("GET /api/v1/catalog/manifest", s.catalogManifest)
 
 	s.handleAPI("GET /api/v1/libraries", s.listLibraries)
@@ -181,6 +207,11 @@ func (s *Server) routes() {
 	s.handleAPI("POST /api/v1/scan", s.scanAllLibraries)
 	s.handleAPI("GET /api/v1/scan/jobs", s.listScanJobs)
 	s.handleAPI("GET /api/v1/scan/jobs/{id}", s.getScanJob)
+	s.handleAPI("POST /api/v1/scan/jobs/{id}/cancel", s.cancelScanJob)
+	s.handleAPI("POST /api/v1/scan/cancel", s.cancelActiveScan)
+	s.handleAPI("GET /api/v1/missing-files", s.listMissingFiles)
+	s.handleAPI("DELETE /api/v1/missing-files", s.removeAllMissingFiles)
+	s.handleAPI("DELETE /api/v1/missing-files/{id}", s.removeMissingFile)
 
 	s.handleAPI("GET /api/v1/playback/{kind}/{id}", s.getPlayback)
 	s.handleAPI("PUT /api/v1/playback/{kind}/{id}", s.putPlayback)
@@ -201,6 +232,7 @@ func (s *Server) routes() {
 
 	s.handleAPI("GET /api/v1/media/covers/{id}", s.getExtractedCover)
 	s.handleAPI("GET /api/v1/media/covers/{id}/image", s.serveExtractedCover)
+	s.handleAPI("GET /api/v1/media/images/{id}/image", s.serveMetadataImage)
 
 	s.handleAPI("GET /api/v1/media/files/{id}", s.getMediaFile)
 	s.handleAPI("GET /api/v1/media/files/{id}/stream", s.streamMediaFile)
@@ -214,8 +246,13 @@ func (s *Server) routes() {
 	// + stream sit under /shows/ so each podcast verb has an unambiguous
 	// path.
 	s.handleAPI("GET /api/v1/podcasts/shows/{id}/cover", s.servePodcastCover)
+	s.handleAPI("POST /api/v1/podcasts/shows/{id}/cover", s.uploadPodcastCover)
+	s.handleAPI("DELETE /api/v1/podcasts/shows/{id}", s.deletePodcastShow)
 	s.handleAPI("GET /api/v1/podcasts/shows/{id}/episodes", s.listPodcastShowEpisodes)
 	s.handleAPI("GET /api/v1/podcasts/episodes/{id}/stream", s.streamPodcastEpisode)
+	s.handleAPI("GET /api/v1/podcasts/episodes/{id}/cache", s.getPodcastEpisodeCache)
+	s.handleAPI("POST /api/v1/podcasts/episodes/{id}/cache", s.cachePodcastEpisode)
+	s.handleAPI("DELETE /api/v1/podcasts/episodes/{id}/cache", s.deletePodcastEpisodeCache)
 
 	s.handleAPI("GET /api/v1/metadata/providers", s.listMetadataProviders)
 	s.handleAPI("GET /api/v1/metadata/search", s.searchMetadata)
@@ -228,14 +265,22 @@ func (s *Server) routes() {
 	s.handleAPI("GET /api/v1/music/artists", s.listMusicArtists)
 	s.handleAPI("GET /api/v1/music/artists/{id}", s.getMusicArtist)
 	s.handleAPI("GET /api/v1/music/artists/{id}/albums", s.listMusicArtistAlbums)
+	s.handleAPI("GET /api/v1/music/artists/{id}/cover", s.serveMusicArtistCover)
+	s.handleAPI("POST /api/v1/music/artists/images/backfill", s.startArtistImageBackfill)
+	s.handleAPI("GET /api/v1/music/artists/images/backfill", s.getArtistImageBackfill)
+	s.handleAPI("POST /api/v1/music/artists/images/backfill/cancel", s.cancelArtistImageBackfill)
 	s.handleAPI("GET /api/v1/music/albums", s.listMusicAlbums)
 	s.handleAPI("GET /api/v1/music/albums/{id}", s.getMusicAlbum)
+	s.handleAPI("GET /api/v1/music/albums/{id}/tracks", s.listMusicAlbumTracks)
+	s.handleAPI("DELETE /api/v1/music/albums/{id}", s.deleteMusicAlbum)
 	s.handleAPI("GET /api/v1/music/tracks", s.listMusicTracks)
 	s.handleAPI("GET /api/v1/music/tracks/{id}", s.getMusicTrack)
 	s.handleAPI("GET /api/v1/music/genres", s.listMusicGenres)
 	s.handleAPI("GET /api/v1/music/playlists", s.listMusicPlaylists)
 	s.handleAPI("GET /api/v1/music/playlists/{id}", s.getMusicPlaylist)
 	s.handleAPI("GET /api/v1/music/playlists/{id}/tracks", s.listMusicPlaylistTracks)
+	s.handleAPI("GET /api/v1/music/playlists/{id}/cover", s.serveMusicPlaylistCover)
+	s.handleAPI("POST /api/v1/music/playlists/{id}/cover", s.uploadMusicPlaylistCover)
 	s.handleAPI("POST /api/v1/music/playlists", s.createMusicPlaylist)
 	s.handleAPI("POST /api/v1/music/playlists/import", s.importMusicPlaylist)
 	s.handleAPI("PATCH /api/v1/music/playlists/{id}", s.updateMusicPlaylist)
@@ -250,6 +295,7 @@ func (s *Server) routes() {
 	// independent product domains in Samo. Their URL namespaces match.
 	s.handleAPI("GET /api/v1/audiobooks", s.listAudiobooks)
 	s.handleAPI("GET /api/v1/audiobooks/{id}", s.getAudiobook)
+	s.handleAPI("DELETE /api/v1/audiobooks/{id}", s.deleteAudiobook)
 	s.handleAPI("GET /api/v1/audiobooks/{id}/bookmarks", s.listAudiobookBookmarks)
 	s.handleAPI("POST /api/v1/audiobooks/{id}/bookmarks", s.createAudiobookBookmark)
 	s.handleAPI("GET /api/v1/audiobooks/{id}/sessions", s.listAudiobookSessions)
@@ -292,12 +338,38 @@ func (s *Server) routes() {
 	s.handleAPI("PATCH /api/v1/internet-radio/stations/{id}", s.updateInternetRadioStation)
 	s.handleAPI("DELETE /api/v1/internet-radio/stations/{id}", s.deleteInternetRadioStation)
 	s.handleAPI("POST /api/v1/internet-radio/stations/{id}/probe", s.probeInternetRadioStation)
+	s.handleAPI("POST /api/v1/internet-radio/stations/{id}/cover", s.uploadInternetRadioCover)
 	s.handleAPI("POST /api/v1/internet-radio/stations/probe", s.runInternetRadioProbeCycle)
 
 	s.mux.HandleFunc("GET /radio/{id}/playlist.m3u", s.playlist)
 	s.mux.HandleFunc("GET /radio/{id}/stream", s.stream)
 	s.mux.HandleFunc("GET /internet-radio/{id}/playlist.m3u", s.internetRadioPlaylist)
 	s.mux.HandleFunc("GET /internet-radio/{id}/stream", s.internetRadioStream)
+
+	// Channels: Samo-native 24/7 programmed radio. Admin CRUD lives
+	// under /api/v1/channels/*; public stream + M3U live at /channels/*
+	// so HLS/podcast-app/m3u-friendly tools can subscribe directly.
+	s.handleAPI("GET /api/v1/channels", s.listChannels)
+	s.handleAPI("POST /api/v1/channels", s.createChannel)
+	s.handleAPI("GET /api/v1/channels/{id}", s.getChannel)
+	s.handleAPI("PATCH /api/v1/channels/{id}", s.updateChannel)
+	s.handleAPI("DELETE /api/v1/channels/{id}", s.deleteChannel)
+	s.handleAPI("GET /api/v1/channels/{id}/sources", s.listChannelSources)
+	s.handleAPI("POST /api/v1/channels/{id}/sources", s.createChannelSource)
+	s.handleAPI("PATCH /api/v1/channels/{id}/sources/{sourceId}", s.updateChannelSource)
+	s.handleAPI("DELETE /api/v1/channels/{id}/sources/{sourceId}", s.deleteChannelSource)
+	s.handleAPI("GET /api/v1/channels/{id}/schedule", s.listChannelScheduleRules)
+	s.handleAPI("POST /api/v1/channels/{id}/schedule", s.createChannelScheduleRule)
+	s.handleAPI("DELETE /api/v1/channels/{id}/schedule/{ruleId}", s.deleteChannelScheduleRule)
+	s.handleAPI("GET /api/v1/channels/{id}/now", s.channelNowPlaying)
+	s.handleAPI("GET /api/v1/channels/{id}/recent", s.channelRecentPlays)
+	s.handleAPI("POST /api/v1/channels/{id}/preview", s.channelPreviewNext)
+	// Channel playlist and stream go through requireUser so a
+	// stream_token query param works for <audio src=...> in browsers
+	// without forcing every listener URL to carry a real Authorization
+	// header. Same pattern as /api/v1/music/tracks/{id}/stream.
+	s.mux.HandleFunc("GET /channels/{id}/playlist.m3u", s.requireUser(s.channelPlaylist))
+	s.mux.HandleFunc("GET /channels/{id}/stream", s.requireUser(s.channelStream))
 
 	subsonicHandler := subsonic.New(subsonic.Options{
 		Catalog:       s.catalog,
@@ -306,6 +378,7 @@ func (s *Server) routes() {
 		Files:         s.files,
 		Playback:      s.playback,
 		LastFM:        s.lastfm,
+		ArtistImages:  s.artistImages,
 		Users:         s.users,
 		APIToken:      s.apiToken,
 		ServerVersion: "0.1.0",

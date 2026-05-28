@@ -88,15 +88,28 @@ func (s *Service) musicBrowse(
 	var matches musicBrowseSnapshot
 	switch view {
 	case MusicBrowseFavorites:
-		matches = filterMusicBrowse(snapshot, func(playback PlaybackState) bool { return playback.Favorite })
+		matches = filterMusicBrowse(snapshot, func(playback PlaybackState) bool {
+			return playback.Favorite || playback.Starred
+		})
 	case MusicBrowseStarred:
 		matches = filterMusicBrowse(snapshot, func(playback PlaybackState) bool { return playback.Starred })
 	case MusicBrowseRecentlyPlayed:
 		matches = filterMusicBrowse(snapshot, func(playback PlaybackState) bool { return playback.LastPlayedAt != nil })
 		sortMusicBrowseByLastPlayed(&matches)
 	case MusicBrowseRecentlyAdded:
-		matches = snapshot
-		sortMusicBrowseByAddedAt(&matches)
+		albums := append([]MusicAlbum(nil), snapshot.albums...)
+		sort.SliceStable(albums, func(i, j int) bool {
+			return addedAtAfter(albums[i].AddedAt, albums[j].AddedAt)
+		})
+		page = normalizePage(page)
+		paged := paginate(albums, page)
+		return MusicBrowseResults{
+			View:   view,
+			Albums: paged.Items,
+			Total:  len(albums),
+			Limit:  page.Limit,
+			Offset: page.Offset,
+		}
 	default:
 		return MusicBrowseResults{View: view}
 	}

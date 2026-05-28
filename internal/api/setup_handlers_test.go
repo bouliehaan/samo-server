@@ -187,7 +187,7 @@ func TestSetupPageRedirectsAfterCompletion(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := libraryService.ScanAll(ctx, libraries.TriggerStartup); err != nil {
+	if _, err := libraryService.ScanAll(ctx, libraries.TriggerStartup, ""); err != nil {
 		t.Fatal(err)
 	}
 	handler := NewServer(ServerOptions{

@@ -7,7 +7,7 @@ Samo has an optional external metadata lookup subsystem for user-initiated searc
 No provider is enabled unless `SAMO_METADATA_PROVIDERS` is set. With the default empty provider list, metadata search routes perform no outbound network calls and return no candidates.
 
 ```sh
-SAMO_METADATA_PROVIDERS=openlibrary,googlebooks,itunes,musicbrainz
+SAMO_METADATA_PROVIDERS=audible,openlibrary,googlebooks,itunes,musicbrainz
 SAMO_METADATA_USER_AGENT="SamoServer/0.1 (you@example.com)"
 ```
 
@@ -15,6 +15,7 @@ SAMO_METADATA_USER_AGENT="SamoServer/0.1 (you@example.com)"
 
 ## Providers
 
+- `audible`: searches Audible by title/author (or ASIN), then loads square cover art and audiobook metadata from Audnexus.
 - `openlibrary`: searches Open Library for audiobook/book metadata candidates.
 - `googlebooks`: searches Google Books volumes for audiobook/book metadata candidates.
 - `itunes`: searches Apple's iTunes Search API for podcast metadata candidates.
@@ -28,7 +29,7 @@ SAMO_METADATA_USER_AGENT="SamoServer/0.1 (you@example.com)"
 Examples:
 
 ```text
-GET /api/v1/metadata/search?kind=audiobook&title=Signal+Manual&author=Ada+Archive
+GET /api/v1/metadata/search?kind=audiobook&title=Signal+Manual&author=Ada+Archive&audibleAsin=B000SAMO
 GET /api/v1/metadata/search?kind=audiobook&isbn=9780000000001&provider=openlibrary
 GET /api/v1/metadata/search?kind=podcast&q=Night+Signals&provider=itunes
 GET /api/v1/metadata/search?kind=music&musicType=artist&artist=The+Static&provider=musicbrainz

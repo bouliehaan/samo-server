@@ -43,9 +43,11 @@ func (s *Server) applyMetadata(w http.ResponseWriter, r *http.Request) {
 		writeMetadataApplyError(w, err)
 		return
 	}
-	if err := s.reloadCatalogProjection(r); err != nil {
-		writeError(w, http.StatusInternalServerError, err.Error())
-		return
+	if !request.DeferCatalogReload {
+		if err := s.reloadCatalogProjection(r); err != nil {
+			writeError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
 	}
 	writeJSON(w, http.StatusOK, result)
 }
@@ -113,16 +115,18 @@ func (s *Server) searchMetadata(w http.ResponseWriter, r *http.Request) {
 func readMetadataSearchRequest(r *http.Request) (metadata.SearchRequest, error) {
 	query := r.URL.Query()
 	request := metadata.SearchRequest{
-		Kind:      metadata.Kind(query.Get("kind")),
-		Query:     strings.TrimSpace(query.Get("q")),
-		Provider:  strings.TrimSpace(query.Get("provider")),
-		Title:     strings.TrimSpace(query.Get("title")),
-		Author:    strings.TrimSpace(query.Get("author")),
-		ISBN:      strings.TrimSpace(query.Get("isbn")),
-		Artist:    strings.TrimSpace(query.Get("artist")),
-		Album:     strings.TrimSpace(query.Get("album")),
-		Track:     strings.TrimSpace(query.Get("track")),
-		MusicType: metadata.MusicSearchType(query.Get("musicType")),
+		Kind:        metadata.Kind(query.Get("kind")),
+		Query:       strings.TrimSpace(query.Get("q")),
+		Provider:    strings.TrimSpace(query.Get("provider")),
+		Title:       strings.TrimSpace(query.Get("title")),
+		Author:      strings.TrimSpace(query.Get("author")),
+		ISBN:        strings.TrimSpace(query.Get("isbn")),
+		ASIN:        strings.TrimSpace(query.Get("asin")),
+		AudibleASIN: strings.TrimSpace(query.Get("audibleAsin")),
+		Artist:      strings.TrimSpace(query.Get("artist")),
+		Album:       strings.TrimSpace(query.Get("album")),
+		Track:       strings.TrimSpace(query.Get("track")),
+		MusicType:   metadata.MusicSearchType(query.Get("musicType")),
 	}
 	if rawLimit := strings.TrimSpace(query.Get("limit")); rawLimit != "" {
 		limit, err := strconv.Atoi(rawLimit)

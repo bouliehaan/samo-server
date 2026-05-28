@@ -136,7 +136,7 @@ func (s *Server) runSetupScan(w http.ResponseWriter, r *http.Request) {
 	if !s.allowSetupOrAdmin(w, r) {
 		return
 	}
-	result, err := s.libraries.ScanAll(r.Context(), libraries.TriggerAPI)
+	result, err := s.libraries.ScanAll(r.Context(), libraries.TriggerAPI, "")
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return

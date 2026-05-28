@@ -8,8 +8,10 @@ import (
 	"log"
 	"net/http"
 	"net/url"
+	"strings"
 	"time"
 
+	"github.com/bouliehaan/samo-server/internal/covers"
 	"github.com/bouliehaan/samo-server/internal/sources"
 )
 
@@ -17,6 +19,7 @@ type internetRadioStationResponse struct {
 	sources.InternetRadioStation
 	PublicStreamURL string `json:"publicStreamUrl"`
 	PlaylistURL     string `json:"playlistUrl"`
+	CoverURL        string `json:"coverUrl,omitempty"`
 }
 
 func (s *Server) listPodcastFeeds(w http.ResponseWriter, r *http.Request) {
@@ -169,18 +172,20 @@ func (s *Server) createInternetRadioStation(w http.ResponseWriter, r *http.Reque
 		writeSourceError(w, err)
 		return
 	}
-	// Fire a probe in the background so the first metadata (icy-name, codec,
-	// bitrate, current track) lands without the user clicking PROBE. We
-	// detach from the request context so the probe survives the response
-	// returning. The probe records its own success/failure into probe
-	// scheduling columns, so silent failure is acceptable here.
-	go func(id string) {
-		ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
-		defer cancel()
-		if _, err := s.sourcesService().ProbeInternetRadioStation(ctx, id); err != nil {
-			log.Printf("initial probe for internet radio %s failed: %v", id, err)
-		}
-	}(station.ID)
+	if !s.disableInitialInternetRadioProbe {
+		// Fire a probe in the background so the first metadata (icy-name, codec,
+		// bitrate, current track) lands without the user clicking PROBE. We
+		// detach from the request context so the probe survives the response
+		// returning. The probe records its own success/failure into probe
+		// scheduling columns, so silent failure is acceptable here.
+		go func(id string) {
+			ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+			defer cancel()
+			if _, err := s.sourcesService().ProbeInternetRadioStation(ctx, id); err != nil {
+				log.Printf("initial probe for internet radio %s failed: %v", id, err)
+			}
+		}(station.ID)
+	}
 	writeJSON(w, http.StatusCreated, s.internetRadioResponse(r, station))
 }
 
@@ -244,6 +249,45 @@ func (s *Server) deleteInternetRadioStation(w http.ResponseWriter, r *http.Reque
 	w.WriteHeader(http.StatusNoContent)
 }
 
+func (s *Server) uploadInternetRadioCover(w http.ResponseWriter, r *http.Request) {
+	if _, ok := s.requireAdmin(w, r); !ok {
+		return
+	}
+	id := strings.TrimSpace(r.PathValue("id"))
+	if id == "" {
+		writeError(w, http.StatusBadRequest, "station id is required")
+		return
+	}
+
+	r.Body = http.MaxBytesReader(w, r.Body, 6<<20)
+	if err := r.ParseMultipartForm(6 << 20); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid multipart form")
+		return
+	}
+	file, header, err := r.FormFile("cover")
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "cover file is required")
+		return
+	}
+	defer file.Close()
+
+	contentType := ""
+	if header != nil {
+		contentType = header.Header.Get("Content-Type")
+	}
+	image, err := s.coversService().StoreFromUpload(r.Context(), "internet-radio:"+id, contentType, file)
+	if err != nil {
+		writeCoverUploadError(w, err)
+		return
+	}
+	station, err := s.sourcesService().SetInternetRadioCover(r.Context(), id, image.ID)
+	if err != nil {
+		writeSourceError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, s.internetRadioResponse(r, station))
+}
+
 func (s *Server) internetRadioPlaylist(w http.ResponseWriter, r *http.Request) {
 	station, err := s.sourcesService().GetInternetRadioStation(r.Context(), r.PathValue("id"))
 	if err != nil {
@@ -271,11 +315,15 @@ func (s *Server) internetRadioStream(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) internetRadioResponse(r *http.Request, station sources.InternetRadioStation) internetRadioStationResponse {
 	id := url.PathEscape(station.ID)
-	return internetRadioStationResponse{
+	resp := internetRadioStationResponse{
 		InternetRadioStation: station,
 		PublicStreamURL:      publicURL(r, "/internet-radio/"+id+"/stream"),
 		PlaylistURL:          publicURL(r, "/internet-radio/"+id+"/playlist.m3u"),
 	}
+	if strings.TrimSpace(station.CoverID) != "" {
+		resp.CoverURL = publicURL(r, "/api/v1/media/covers/"+url.PathEscape(station.CoverID)+"/image")
+	}
+	return resp
 }
 
 func (s *Server) sourcesService() *sources.Service {
@@ -316,6 +364,21 @@ func writeSourceError(w http.ResponseWriter, err error) {
 		writeError(w, http.StatusBadRequest, err.Error())
 	case errors.Is(err, sources.ErrInvalidProbeInterval):
 		writeError(w, http.StatusBadRequest, err.Error())
+	default:
+		writeError(w, http.StatusInternalServerError, err.Error())
+	}
+}
+
+func writeCoverUploadError(w http.ResponseWriter, err error) {
+	switch {
+	case errors.Is(err, covers.ErrDisabled):
+		writeError(w, http.StatusServiceUnavailable, "cover service is not configured")
+	case errors.Is(err, covers.ErrUnsupportedType):
+		writeError(w, http.StatusBadRequest, "cover must be an image file")
+	case errors.Is(err, covers.ErrTooLarge):
+		writeError(w, http.StatusBadRequest, "cover exceeds maximum size")
+	case errors.Is(err, covers.ErrInvalidPath):
+		writeError(w, http.StatusBadRequest, "invalid cover upload")
 	default:
 		writeError(w, http.StatusInternalServerError, err.Error())
 	}
