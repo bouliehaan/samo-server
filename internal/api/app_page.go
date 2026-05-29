@@ -1534,10 +1534,19 @@ const appJS = `
     return currentUser && currentUser.role === "admin";
   }
 
-  function isFilesystemPodcast(item) {
+  function isLibraryFolderPodcast(item) {
     const path = String((item && item.path) || "");
-    if (!path || path.startsWith("samo://")) return false;
-    return !(item && item.podcast && item.podcast.feedUrl);
+    return Boolean(path && !path.startsWith("samo://"));
+  }
+
+  function podcastHasLinkedFeed(item) {
+    return Boolean(item && item.rssFeed && item.rssFeed.id);
+  }
+
+  async function findPodcastLinkedFeed(podcastId) {
+    const data = await api("/api/v1/podcasts/feeds?limit=500").catch(() => ({ items: [] }));
+    const items = (data && data.items) || [];
+    return items.find((feed) => feed.podcastId === podcastId) || null;
   }
 
   function adminDeleteButton(action, id, name, label) {
@@ -1555,6 +1564,8 @@ const appJS = `
   }
   let activeTab = "";
   let musicMode = "recent";
+  let playlistTracksBulkEditId = "";
+  const playlistTracksBulkSelected = new Set();
   let musicSort = "recent";
   let musicDirection = "desc";
   const MUSIC_PAGE_SIZE = 80;
@@ -2458,12 +2469,18 @@ const appJS = `
     const cover = (candidate.cover && candidate.cover.url) || "";
     const coverStyle = cover ? 'style="background-image:url(&quot;' + attr(cover) + '&quot;)"' : "";
     const authors = (candidate.authors || []).map((person) => person.name).join(", ");
+    const feedURL = identifyContext && identifyContext.kind === "podcast" ? candidateFeedURL(candidate) : "";
     const metaParts = [candidate.provider || "", authors, candidate.publishedYear || candidate.publishedDate || ""].filter(Boolean);
+    if (feedURL) metaParts.push("RSS");
     return '<div class="identify-result">' +
       '<div class="cover" ' + coverStyle + '></div>' +
       '<div><div class="title">' + escapeHTML(candidate.title || "Untitled") + '</div>' +
-        '<div class="meta">' + escapeHTML(metaParts.join(" · ")) + '</div></div>' +
-      '<button class="btn primary btn-mini" data-action="identify-apply" data-kind="' + attr(identifyContext ? identifyContext.kind : "audiobook") + '" data-id="' + attr(identifyContext ? identifyContext.id : "") + '" data-idx="' + idx + '">APPLY</button>' +
+        '<div class="meta">' + escapeHTML(metaParts.join(" · ")) + '</div>' +
+        (feedURL ? '<div class="meta">' + escapeHTML(feedURL) + '</div>' : "") +
+        '</div>' +
+      '<button class="btn primary btn-mini" data-action="identify-apply" data-kind="' + attr(identifyContext ? identifyContext.kind : "audiobook") + '" data-id="' + attr(identifyContext ? identifyContext.id : "") + '" data-idx="' + idx + '">' +
+        (feedURL && identifyContext && identifyContext.kind === "podcast" ? "APPLY + LINK RSS" : "APPLY") +
+      '</button>' +
     '</div>';
   }
 
@@ -2525,6 +2542,23 @@ const appJS = `
     }
   }
 
+  function candidateFeedURL(candidate) {
+    if (!candidate) return "";
+    for (const raw of (candidate.externalIds && candidate.externalIds.urls) || []) {
+      const trimmed = String(raw || "").trim();
+      if (!trimmed) continue;
+      const lower = trimmed.toLowerCase();
+      if (lower.endsWith(".xml") || lower.includes("/feed") || lower.includes("rss")) {
+        return trimmed;
+      }
+    }
+    for (const link of candidate.links || []) {
+      const label = String((link && link.label) || "").toLowerCase();
+      if (label.includes("rss") && link.url) return String(link.url).trim();
+    }
+    return "";
+  }
+
   async function applyIdentifyCandidate(kind, id, candidate) {
     if (!candidate) {
       identifyResults.innerHTML = '<div class="empty-state">// choose a match first</div>';
@@ -2535,10 +2569,15 @@ const appJS = `
     // for the target — most users hitting FIND MATCH want a wholesale
     // adoption of the chosen candidate, not field-by-field cherry-picking.
     const fields = [];
+    const body = { targetKind: targetKind, targetId: id, candidate: candidate, fields: fields };
+    if (targetKind === "podcast" && candidateFeedURL(candidate)) {
+      body.linkFeed = true;
+      body.syncEpisodeMetadata = true;
+    }
     try {
       await api("/api/v1/metadata/apply", {
         method: "POST",
-        body: { targetKind: targetKind, targetId: id, candidate: candidate, fields: fields },
+        body: body,
       });
       closeIdentifyModal();
       // Reload the detail page so the new metadata shows immediately.
@@ -3003,14 +3042,17 @@ const appJS = `
     }).join("") + '</div>';
   }
 
-  function playlistTrackList(playlistID, items, canEdit) {
+  function playlistTrackList(playlistID, items, canEdit, bulkMode) {
     if (!items || items.length === 0) return '<div class="empty-state">// no tracks in this playlist yet</div>';
     return '<div class="list">' + items.map((track, idx) => {
       const artist = track.displayArtist || (track.artistNames || []).join(", ");
       const meta = [artist, track.albumTitle, formatDuration(track.durationSeconds)].filter(Boolean).join(" · ");
-      const removeButton = canEdit ? '<button class="btn danger btn-mini" data-action="remove-playlist-track" data-playlist-id="' + attr(playlistID) + '" data-track-id="' + attr(track.id) + '">REMOVE</button>' : "";
+      const removeButton = canEdit && !bulkMode ? '<button class="btn danger btn-mini" data-action="remove-playlist-track" data-playlist-id="' + attr(playlistID) + '" data-track-id="' + attr(track.id) + '">REMOVE</button>' : "";
+      const indexCell = bulkMode && canEdit ?
+        '<label class="track-select"><input type="checkbox" data-action="playlist-track-select" data-playlist-id="' + attr(playlistID) + '" data-track-id="' + attr(track.id) + '"' + (playlistTracksBulkSelected.has(track.id) ? " checked" : "") + '></label>' :
+        '<div class="num">' + String(idx + 1).padStart(2, "0") + '</div>';
       return '<div class="list-row">' +
-        '<div class="num">' + String(idx + 1).padStart(2, "0") + '</div>' +
+        indexCell +
         '<div class="main">' +
           '<div class="name">' + escapeHTML(track.title || "Untitled") + '</div>' +
           '<div class="meta">' + escapeHTML(meta) + '</div>' +
@@ -3220,9 +3262,22 @@ const appJS = `
       ]);
       const tracks = (tracksPage && tracksPage.items) || [];
       const canEdit = playlistOwnedByCurrentUser(playlist);
+      const bulkMode = canEdit && playlistTracksBulkEditId === playlist.id;
+      if (playlistTracksBulkEditId && playlistTracksBulkEditId !== playlist.id) {
+        playlistTracksBulkEditId = "";
+        playlistTracksBulkSelected.clear();
+      }
       const ownerActions = canEdit ?
+        '<button class="btn primary btn-small" data-action="composer-toggle" data-composer="playlist-edit">EDIT PLAYLIST</button>' +
+        '<button class="btn ghost btn-small" data-action="playlist-tracks-edit-toggle" data-id="' + attr(playlist.id) + '">' + (bulkMode ? "DONE EDITING TRACKS" : "EDIT TRACKS") + '</button>' +
         '<button class="btn ghost btn-small" data-action="toggle-playlist-public" data-id="' + attr(playlist.id) + '" data-public="' + (!playlist.public) + '">' + (playlist.public ? "MAKE PRIVATE" : "MAKE PUBLIC") + '</button>' +
         '<button class="btn danger btn-small" data-action="delete-playlist" data-id="' + attr(playlist.id) + '" data-name="' + attr(playlist.name || "playlist") + '">DELETE</button>' :
+        "";
+      const bulkToolbar = bulkMode ?
+        '<div class="view-actions" style="margin-bottom:0.75rem">' +
+          '<button class="btn danger btn-small" data-action="remove-playlist-tracks-bulk" data-id="' + attr(playlist.id) + '">REMOVE SELECTED (' + playlistTracksBulkSelected.size + ')</button>' +
+          '<button class="btn ghost btn-small" data-action="playlist-tracks-edit-done" data-id="' + attr(playlist.id) + '">CANCEL</button>' +
+        '</div>' :
         "";
       let html = '<section class="view">' +
         '<div class="view-head"><h1>MUSIC</h1><div class="view-actions">' +
@@ -3238,8 +3293,19 @@ const appJS = `
             '<div class="stats"><span>' + (playlist.trackCount || tracks.length || 0) + ' TRACKS</span><span>' + formatDuration(playlist.durationSeconds || 0) + '</span><span>' + (playlist.public ? "PUBLIC" : "PRIVATE") + '</span></div>' +
           '</div>' +
         '</div>' +
-        '<div class="section-row"><div class="section-label">// tracks</div>' + playlistTrackList(playlist.id, tracks, canEdit) + '</div>' +
+        composerPlaylistEdit(playlist) +
+        '<div class="section-row"><div class="section-label">// tracks</div>' + bulkToolbar + playlistTrackList(playlist.id, tracks, canEdit, bulkMode) + '</div>' +
       '</section>';
+      if (canEdit) {
+        const editName = document.getElementById("composerPlaylistEditName");
+        if (editName) editName.value = playlist.name || "";
+        const editDesc = document.getElementById("composerPlaylistEditDescription");
+        if (editDesc) editDesc.value = playlist.description || "";
+        const editPublic = document.getElementById("composerPlaylistEditPublic");
+        if (editPublic) editPublic.checked = Boolean(playlist.public);
+        const editID = document.getElementById("composerPlaylistEditId");
+        if (editID) editID.value = playlist.id || "";
+      }
       main.innerHTML = html;
     } catch (err) { renderError(err.message); }
   }
@@ -3461,11 +3527,25 @@ const appJS = `
       const sub = podcastSub(item);
       const cover = podcastCoverURL(id, coverBust);
       const items = (episodes && episodes.items) || [];
+      const folderPodcast = isLibraryFolderPodcast(item);
+      const linkedFeed = podcastHasLinkedFeed(item) ? item.rssFeed : await findPodcastLinkedFeed(id);
+      const suggestedFeedURL = (item.podcast && item.podcast.feedUrl) || (linkedFeed && linkedFeed.feedUrl) || "";
+      const feedActions = linkedFeed ?
+        '<button class="btn ghost btn-small" data-action="refresh-feed" data-id="' + attr(linkedFeed.id) + '" data-show-id="' + attr(id) + '">REFRESH RSS</button>' :
+        (folderPodcast ?
+          '<button class="btn primary btn-small" data-action="composer-toggle" data-composer="podcast-attach-feed">LINK RSS FEED</button>' :
+          "");
+      const feedStatus = linkedFeed ?
+        '<div class="stats" style="margin-top:10px"><span>RSS LINKED</span><span>' + escapeHTML(linkedFeed.feedUrl || linkedFeed.id) + '</span></div>' :
+        (folderPodcast ?
+          '<p class="lede" style="margin-top:14px; color: var(--text-dim)">// library folder podcast — link an RSS feed to fix episode dates and pull new releases while keeping your files</p>' :
+          "");
       let html = '<section class="view">' +
         '<div class="view-head"><h1>PODCASTS</h1><div class="view-actions">' +
           '<button class="btn ghost btn-small" data-action="back-tab" data-tab="podcasts">BACK</button>' +
+          feedActions +
           '<button class="btn ghost btn-small" data-action="identify" data-kind="podcast" data-id="' + attr(id) + '" data-title="' + attr(title) + '" data-author="' + attr(sub) + '">FIND MATCH</button>' +
-          (isFilesystemPodcast(item) ? adminDeleteButton("delete-podcast-show", id, title) : "") +
+          (folderPodcast ? adminDeleteButton("delete-podcast-show", id, title) : "") +
         '</div></div>' +
         '<div class="detail-shell">' +
           podcastCoverBlock(id, cover) +
@@ -3473,13 +3553,19 @@ const appJS = `
             '<h2>' + escapeHTML(title) + '</h2>' +
             '<div class="artist">' + escapeHTML(sub) + '</div>' +
             '<div class="stats"><span>PODCAST</span><span>' + items.length + ' EPISODES</span></div>' +
+            feedStatus +
             (item.podcast && item.podcast.description ? '<p class="lede" style="margin-top:14px; color: var(--text-dim)">' + escapeHTML(item.podcast.description) + '</p>' : "") +
             tagsLine((item.podcast && item.podcast.categories) || item.genres || []) +
           '</div>' +
         '</div>' +
+        (folderPodcast && !linkedFeed ? composerPodcastAttachFeed(id, suggestedFeedURL) : "") +
         '<div class="section-row"><div class="section-label">// episodes</div>' + episodeList(items, id) + '</div>' +
       '</section>';
       main.innerHTML = html;
+      if (folderPodcast && !linkedFeed) {
+        const urlInput = document.getElementById("composerPodcastAttachURL");
+        if (urlInput && suggestedFeedURL && !urlInput.value) urlInput.value = suggestedFeedURL;
+      }
     } catch (err) { renderError(err.message); }
   }
 
@@ -4514,6 +4600,23 @@ const appJS = `
       "// the title field is optional — Samo will read it from the RSS feed");
   }
 
+  function composerPodcastAttachFeed(podcastID, suggestedURL) {
+    const body =
+      '<input type="hidden" id="composerPodcastAttachShowId" value="' + attr(podcastID || "") + '">' +
+      '<div class="composer-row">' +
+        fieldHTML("composerPodcastAttachURL", "RSS feed URL", "https://feeds.example.com/podcast.xml", "url", suggestedURL || "", "full") +
+      '</div>' +
+      '<div class="composer-row">' +
+        '<label class="field checkbox full"><input id="composerPodcastAttachAutoDownload" type="checkbox"><span>Auto-download new episodes</span></label>' +
+      '</div>' +
+      '<div class="composer-actions">' +
+        '<button class="btn primary" data-action="composer-submit" data-composer="podcast-attach-feed">LINK RSS FEED</button>' +
+        '<button class="btn ghost" data-action="composer-toggle" data-composer="podcast-attach-feed">CANCEL</button>' +
+      '</div>';
+    return composerHTML("podcast-attach-feed", "LINK RSS TO LIBRARY PODCAST", body,
+      "// keeps your downloaded files · matches RSS episodes to local files · fixes release dates from the feed");
+  }
+
   function composerPlaylist() {
     const body =
       '<div class="composer-row">' +
@@ -4529,6 +4632,24 @@ const appJS = `
       '</div>';
     return composerHTML("playlist", "NEW SERVER PLAYLIST", body,
       "// create an empty playlist here, then import or patch track IDs through the API");
+  }
+
+  function composerPlaylistEdit(playlist) {
+    const body =
+      '<input type="hidden" id="composerPlaylistEditId" value="' + attr(playlist.id || "") + '">' +
+      '<div class="composer-row">' +
+        fieldHTML("composerPlaylistEditName", "Name", "Road mix", "text", playlist.name || "") +
+        '<label class="field checkbox"><input id="composerPlaylistEditPublic" type="checkbox"' + (playlist.public ? " checked" : "") + '><span>Public</span></label>' +
+      '</div>' +
+      '<div class="composer-row">' +
+        textAreaHTML("composerPlaylistEditDescription", "Description", "optional", playlist.description || "", "full") +
+      '</div>' +
+      '<div class="composer-actions">' +
+        '<button class="btn primary" data-action="composer-submit" data-composer="playlist-edit">SAVE PLAYLIST</button>' +
+        '<button class="btn ghost" data-action="composer-toggle" data-composer="playlist-edit">CANCEL</button>' +
+      '</div>';
+    return composerHTML("playlist-edit", "EDIT PLAYLIST", body,
+      "// rename, set description, and upload a cover from the artwork slot above");
   }
 
   function composerPlaylistImport() {
@@ -4615,6 +4736,21 @@ const appJS = `
       });
       composerClose(name);
       await viewPodcasts();
+    } else if (name === "podcast-attach-feed") {
+      const showID = document.getElementById("composerPodcastAttachShowId").value.trim();
+      const url = document.getElementById("composerPodcastAttachURL").value.trim();
+      if (!showID) return composerMessage(name, "podcast id is required", true);
+      if (!url) return composerMessage(name, "feed URL is required", true);
+      const autoDownload = document.getElementById("composerPodcastAttachAutoDownload");
+      await api("/api/v1/podcasts/shows/" + encodeURIComponent(showID) + "/feeds", {
+        method: "POST",
+        body: {
+          url: url,
+          autoDownloadEnabled: autoDownload ? autoDownload.checked : false,
+        },
+      });
+      composerClose(name);
+      await openPodcast(showID);
     } else if (name === "library") {
       const path = document.getElementById("composerLibPath").value.trim();
       if (!path) return composerMessage(name, "path is required", true);
@@ -4639,6 +4775,21 @@ const appJS = `
       });
       composerClose(name);
       navigateTo("music/playlist/" + encodeURIComponent(playlist.id));
+    } else if (name === "playlist-edit") {
+      const playlistID = document.getElementById("composerPlaylistEditId").value.trim();
+      const playlistName = document.getElementById("composerPlaylistEditName").value.trim();
+      if (!playlistID) return composerMessage(name, "playlist id is required", true);
+      if (!playlistName) return composerMessage(name, "playlist name is required", true);
+      await api("/api/v1/music/playlists/" + encodeURIComponent(playlistID), {
+        method: "PATCH",
+        body: {
+          name: playlistName,
+          description: document.getElementById("composerPlaylistEditDescription").value.trim(),
+          public: document.getElementById("composerPlaylistEditPublic").checked,
+        },
+      });
+      composerClose(name);
+      navigateTo("music/playlist/" + encodeURIComponent(playlistID));
     } else if (name === "channel") {
       const channelName = document.getElementById("composerChannelName").value.trim();
       if (!channelName) return composerMessage(name, "channel name is required", true);
@@ -4909,6 +5060,13 @@ const appJS = `
 
   main.addEventListener("change", async (event) => {
     const el = event.target;
+    if (el && el.dataset && el.dataset.action === "playlist-track-select") {
+      const trackID = el.dataset.trackId || "";
+      if (!trackID) return;
+      if (el.checked) playlistTracksBulkSelected.add(trackID);
+      else playlistTracksBulkSelected.delete(trackID);
+      return;
+    }
     if (!el || !el.classList || !el.classList.contains("radio-cover-input")) return;
     const file = el.files && el.files[0];
     if (!file) return;
@@ -5179,7 +5337,9 @@ const appJS = `
       } else if (action === "refresh-feed") {
         await withButton(el, "REFRESHING...", async () => {
           await api("/api/v1/podcasts/feeds/" + encodeURIComponent(el.dataset.id) + "/refresh", { method: "POST" });
-          if (activeTab === "podcasts") await viewPodcasts();
+          const showID = el.dataset.showId || "";
+          if (showID) await openPodcast(showID, Date.now());
+          else if (activeTab === "podcasts") await viewPodcasts();
           else await viewSettings();
         });
       } else if (action === "delete-feed") {
@@ -5240,6 +5400,32 @@ const appJS = `
         const playlist = await api("/api/v1/music/playlists/" + encodeURIComponent(playlistID));
         const trackIDs = (playlist.trackIds || []).filter((id) => id !== trackID);
         await api("/api/v1/music/playlists/" + encodeURIComponent(playlistID), { method: "PATCH", body: { trackIds: trackIDs } });
+        navigateTo("music/playlist/" + encodeURIComponent(playlistID));
+      } else if (action === "playlist-tracks-edit-toggle") {
+        event.preventDefault();
+        const playlistID = el.dataset.id || "";
+        if (playlistTracksBulkEditId === playlistID) {
+          playlistTracksBulkEditId = "";
+          playlistTracksBulkSelected.clear();
+        } else {
+          playlistTracksBulkEditId = playlistID;
+          playlistTracksBulkSelected.clear();
+        }
+        await openPlaylist(playlistID);
+      } else if (action === "playlist-tracks-edit-done") {
+        event.preventDefault();
+        playlistTracksBulkEditId = "";
+        playlistTracksBulkSelected.clear();
+        await openPlaylist(el.dataset.id || "");
+      } else if (action === "remove-playlist-tracks-bulk") {
+        event.preventDefault();
+        const playlistID = el.dataset.id || "";
+        if (!playlistID || playlistTracksBulkSelected.size === 0) return;
+        const playlist = await api("/api/v1/music/playlists/" + encodeURIComponent(playlistID));
+        const trackIDs = (playlist.trackIds || []).filter((id) => !playlistTracksBulkSelected.has(id));
+        await api("/api/v1/music/playlists/" + encodeURIComponent(playlistID), { method: "PATCH", body: { trackIds: trackIDs } });
+        playlistTracksBulkEditId = "";
+        playlistTracksBulkSelected.clear();
         navigateTo("music/playlist/" + encodeURIComponent(playlistID));
       } else if (action === "revoke-token") {
         if (!confirm("Revoke this token?")) return;

@@ -23,6 +23,14 @@ func (s *Server) browseMusicRecentlyAdded(w http.ResponseWriter, r *http.Request
 	s.writeMusicBrowse(w, r, catalog.MusicBrowseRecentlyAdded)
 }
 
+func (s *Server) browseMusicUnplayed(w http.ResponseWriter, r *http.Request) {
+	s.writeMusicBrowse(w, r, catalog.MusicBrowseUnplayed)
+}
+
+func (s *Server) browseMusicDiscovery(w http.ResponseWriter, r *http.Request) {
+	s.writeMusicBrowse(w, r, catalog.MusicBrowseDiscovery)
+}
+
 func (s *Server) writeMusicBrowse(w http.ResponseWriter, r *http.Request, view catalog.MusicBrowseView) {
 	principal, ok := s.currentUser(r)
 	if !ok {

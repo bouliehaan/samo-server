@@ -16,7 +16,7 @@ func allowedFieldsForTarget(kind ApplyTargetKind) []string {
 		}
 	case ApplyTargetPodcast:
 		return []string{
-			"title", "description", "author", "siteUrl", "language", "genres", "categories",
+			"title", "description", "author", "siteUrl", "feedUrl", "language", "genres", "categories",
 			"explicit", "cover", "externalIds",
 		}
 	case ApplyTargetPodcastEpisode:

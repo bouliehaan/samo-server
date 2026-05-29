@@ -55,12 +55,27 @@ func (s *Server) putPlayback(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if kind == playback.TargetMusicTrack {
+		rollupPatch := playback.PatchInput{
+			IncrementPlayCount: updated.PlayCount > before.PlayCount,
+			TouchLastPlayedAt:  playbackLastPlayedAdvanced(before, updated),
+		}
+		s.rollupMusicTrackPlayback(r.Context(), principal.User.ID, id, rollupPatch)
 		s.notifyMusicTrackLastFM(r.Context(), principal.User.ID, id, before, updated, nil, "playback-put", 0)
 	}
 	if kind == playback.TargetAudiobook {
 		s.recordAudiobookListeningSession(r.Context(), principal.User.ID, id, before, updated, nil)
 	}
 	writeJSON(w, http.StatusOK, updated)
+}
+
+func playbackLastPlayedAdvanced(before, after catalog.PlaybackState) bool {
+	if after.LastPlayedAt == nil {
+		return false
+	}
+	if before.LastPlayedAt == nil {
+		return true
+	}
+	return after.LastPlayedAt.After(*before.LastPlayedAt)
 }
 
 func (s *Server) patchPlayback(w http.ResponseWriter, r *http.Request) {
@@ -91,6 +106,7 @@ func (s *Server) patchPlayback(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if kind == playback.TargetMusicTrack {
+		s.rollupMusicTrackPlayback(r.Context(), principal.User.ID, id, patch)
 		s.notifyMusicTrackLastFM(r.Context(), principal.User.ID, id, before, updated, &patch, "playback-patch", 0)
 	}
 	if kind == playback.TargetAudiobook {

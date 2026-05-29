@@ -51,6 +51,100 @@ func TestMusicListSortsByRecentAndTitle(t *testing.T) {
 	}
 }
 
+func TestMusicArtistListSortsByPlayCountWithOverlay(t *testing.T) {
+	service := NewService(Seed{
+		MusicArtists: []MusicArtist{
+			{ID: "low", Name: "Alpha"},
+			{ID: "high", Name: "Zeta"},
+		},
+	})
+
+	page := service.ListMusicArtistsSorted(MusicListOptions{
+		Page:      PageRequest{Limit: 10},
+		Sort:      MusicListSortPlayCount,
+		Direction: SortDirectionDesc,
+		Playback: MusicListPlaybackOverlay{
+			ArtistStates: map[string]PlaybackState{
+				"low":  {PlayCount: 1},
+				"high": {PlayCount: 99},
+			},
+		},
+	})
+	if page.Items[0].ID != "high" {
+		t.Fatalf("top artist = %s, want high", page.Items[0].ID)
+	}
+}
+
+func TestRollupTrackPlaybackToParentsAggregatesArtistPlays(t *testing.T) {
+	playedAt := time.Now().UTC()
+	tracks := []MusicTrack{{ID: "track-1", Title: "Hit", ArtistIDs: []string{"popular"}}}
+	artistRollup, _ := rollupTrackPlaybackToParents(tracks, map[string]PlaybackState{
+		"track-1": {PlayCount: 12, LastPlayedAt: &playedAt},
+	})
+	if artistRollup["popular"].PlayCount != 12 {
+		t.Fatalf("rollup play count = %d, want 12", artistRollup["popular"].PlayCount)
+	}
+}
+
+func TestArtistSortAfterTrackPlaybackOverlay(t *testing.T) {
+	playedAt := time.Now().UTC()
+	items := []MusicArtist{
+		{ID: "quiet", Name: "Quiet"},
+		{ID: "popular", Name: "Popular"},
+	}
+	tracks := []MusicTrack{{ID: "track-1", Title: "Hit", ArtistIDs: []string{"popular"}}}
+	applyArtistPlaybackOverlay(items, nil, tracks, map[string]PlaybackState{
+		"track-1": {PlayCount: 12, LastPlayedAt: &playedAt},
+	})
+	sortMusicArtistList(items, MusicListOptions{
+		Sort:      MusicListSortPlayCount,
+		Direction: SortDirectionDesc,
+	})
+	if items[0].ID != "popular" {
+		t.Fatalf("sorted order = %#v", items)
+	}
+}
+
+func TestMusicArtistListSortsByRolledUpTrackPlayCount(t *testing.T) {
+	playedAt := time.Now().UTC()
+	service := NewService(Seed{
+		MusicArtists: []MusicArtist{
+			{ID: "popular", Name: "Popular"},
+			{ID: "quiet", Name: "Quiet"},
+		},
+		MusicTracks: []MusicTrack{
+			{ID: "track-1", Title: "Hit", ArtistIDs: []string{"popular"}},
+		},
+	})
+
+	page := service.ListMusicArtistsSorted(MusicListOptions{
+		Page:      PageRequest{Limit: 10},
+		Sort:      MusicListSortPlayCount,
+		Direction: SortDirectionDesc,
+		Playback: MusicListPlaybackOverlay{
+			TrackStates: map[string]PlaybackState{
+				"track-1": {PlayCount: 12, LastPlayedAt: &playedAt},
+			},
+		},
+	})
+	var popularItem *MusicArtist
+	for index := range page.Items {
+		if page.Items[index].ID == "popular" {
+			popularItem = &page.Items[index]
+			break
+		}
+	}
+	if popularItem == nil {
+		t.Fatalf("popular missing from %#v", page.Items)
+	}
+	if popularItem.Playback.PlayCount != 12 {
+		t.Fatalf("popular playCount = %d, want 12", popularItem.Playback.PlayCount)
+	}
+	if page.Items[0].ID != "popular" {
+		t.Fatalf("top artist = %s (playCount=%d), want popular (12); items=%#v", page.Items[0].ID, page.Items[0].Playback.PlayCount, page.Items)
+	}
+}
+
 func TestMusicAlbumListSortsByReleaseDate(t *testing.T) {
 	service := NewService(Seed{
 		MusicAlbums: []MusicAlbum{

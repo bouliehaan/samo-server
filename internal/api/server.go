@@ -289,6 +289,8 @@ func (s *Server) routes() {
 	s.handleAPI("GET /api/v1/music/browse/starred", s.browseMusicStarred)
 	s.handleAPI("GET /api/v1/music/browse/recently-played", s.browseMusicRecentlyPlayed)
 	s.handleAPI("GET /api/v1/music/browse/recently-added", s.browseMusicRecentlyAdded)
+	s.handleAPI("GET /api/v1/music/browse/unplayed", s.browseMusicUnplayed)
+	s.handleAPI("GET /api/v1/music/browse/discovery", s.browseMusicDiscovery)
 	s.handleAPI("GET /api/v1/music/search", s.searchMusic)
 
 	// Audiobook domain. Music, audiobooks, podcasts, and radio are all
@@ -326,6 +328,7 @@ func (s *Server) routes() {
 	s.handleAPI("GET /api/v1/podcasts/search", s.searchPodcasts)
 	s.handleAPI("GET /api/v1/podcasts/feeds", s.listPodcastFeeds)
 	s.handleAPI("POST /api/v1/podcasts/feeds", s.createPodcastFeed)
+	s.handleAPI("POST /api/v1/podcasts/shows/{id}/feeds", s.attachPodcastShowFeed)
 	s.handleAPI("GET /api/v1/podcasts/feeds/{id}", s.getPodcastFeed)
 	s.handleAPI("PATCH /api/v1/podcasts/feeds/{id}", s.updatePodcastFeed)
 	s.handleAPI("POST /api/v1/podcasts/feeds/poll", s.runPodcastPollCycle)

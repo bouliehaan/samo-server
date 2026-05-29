@@ -92,12 +92,90 @@ func (s *Service) AddPodcastFeed(ctx context.Context, input AddPodcastFeedInput)
 		parsed.Title = resolvedFeedURL
 	}
 
+	attachPodcastID := strings.TrimSpace(input.PodcastID)
+	if attachPodcastID != "" {
+		if _, err := s.loadPodcastShowRow(ctx, attachPodcastID); err != nil {
+			return PodcastFeed{}, err
+		}
+		hasFeed, err := s.podcastHasFeed(ctx, attachPodcastID)
+		if err != nil {
+			return PodcastFeed{}, err
+		}
+		if hasFeed {
+			return PodcastFeed{}, ErrPodcastAlreadyHasFeed
+		}
+		if existingPodcastID, ok, err := s.feedURLPodcastID(ctx, resolvedFeedURL); err != nil {
+			return PodcastFeed{}, err
+		} else if ok && existingPodcastID != attachPodcastID {
+			return PodcastFeed{}, ErrFeedURLInUse
+		}
+	} else if existingPodcastID, ok, err := s.feedURLPodcastID(ctx, resolvedFeedURL); err != nil {
+		return PodcastFeed{}, err
+	} else if ok {
+		if _, err := s.loadPodcastShowRow(ctx, existingPodcastID); err == nil {
+			attachPodcastID = existingPodcastID
+		}
+	}
+
 	if err := s.savePodcastFeed(ctx, resolvedFeedURL, parsed, feedSaveOptions{
 		autoDownloadOnInsert: s.resolveAutoDownload(input.AutoDownloadEnabled),
+		attachPodcastID:      attachPodcastID,
 	}); err != nil {
 		return PodcastFeed{}, err
 	}
 	return s.GetPodcastFeed(ctx, podcastFeedID(resolvedFeedURL))
+}
+
+// LinkOrRefreshPodcastFeedForShow attaches an RSS feed to a filesystem podcast
+// show, or re-fetches the existing feed to merge episode metadata (e.g. dates).
+func (s *Service) LinkOrRefreshPodcastFeedForShow(ctx context.Context, podcastID, feedURL string) error {
+	if s == nil || s.db == nil {
+		return ErrDisabled
+	}
+	podcastID = strings.TrimSpace(podcastID)
+	feedURL = strings.TrimSpace(feedURL)
+	if podcastID == "" || feedURL == "" {
+		return nil
+	}
+	hasFeed, err := s.podcastHasFeed(ctx, podcastID)
+	if err != nil {
+		return err
+	}
+	if hasFeed {
+		var feedID string
+		if err := s.db.QueryRowContext(ctx, `
+			SELECT id FROM podcast_feeds WHERE podcast_id = ? LIMIT 1`, podcastID).
+			Scan(&feedID); err != nil {
+			return fmt.Errorf("load podcast feed: %w", err)
+		}
+		_, err := s.RefreshPodcastFeed(ctx, feedID)
+		return err
+	}
+	_, err = s.AddPodcastFeed(ctx, AddPodcastFeedInput{
+		PodcastID: podcastID,
+		URL:       feedURL,
+	})
+	return err
+}
+
+func (s *Service) PodcastFeedForShow(ctx context.Context, podcastID string) (PodcastFeed, error) {
+	if s == nil || s.db == nil {
+		return PodcastFeed{}, ErrDisabled
+	}
+	podcastID = strings.TrimSpace(podcastID)
+	if podcastID == "" {
+		return PodcastFeed{}, ErrNotFound
+	}
+	var feedID string
+	err := s.db.QueryRowContext(ctx, `
+		SELECT id FROM podcast_feeds WHERE podcast_id = ? LIMIT 1`, podcastID).Scan(&feedID)
+	if errors.Is(err, sql.ErrNoRows) {
+		return PodcastFeed{}, ErrNotFound
+	}
+	if err != nil {
+		return PodcastFeed{}, fmt.Errorf("find podcast feed: %w", err)
+	}
+	return s.GetPodcastFeed(ctx, feedID)
 }
 
 func (s *Service) RefreshPodcastFeed(ctx context.Context, id string) (PodcastFeed, error) {
@@ -196,16 +274,35 @@ func (s *Service) DeletePodcastFeed(ctx context.Context, id string) error {
 		}
 		return fmt.Errorf("find podcast feed: %w", err)
 	}
-	if _, err := tx.ExecContext(ctx, `DELETE FROM podcasts WHERE id = ?`, podcastID); err != nil {
-		return fmt.Errorf("delete podcast feed item: %w", err)
+	isHybrid, err := s.isFilesystemPodcast(ctx, podcastID)
+	if err != nil {
+		return err
+	}
+	if isHybrid {
+		if _, err := tx.ExecContext(ctx, `
+			DELETE FROM podcast_episodes
+			WHERE podcast_id = ?
+			  AND id NOT IN (
+			    SELECT DISTINCT episode_id FROM media_files
+			    WHERE episode_id IS NOT NULL AND TRIM(episode_id) != ''
+			  )`, podcastID); err != nil {
+			return fmt.Errorf("delete hybrid rss episodes: %w", err)
+		}
+		if _, err := tx.ExecContext(ctx, `DELETE FROM podcast_feeds WHERE id = ?`, strings.TrimSpace(id)); err != nil {
+			return fmt.Errorf("delete hybrid podcast feed: %w", err)
+		}
+	} else {
+		if _, err := tx.ExecContext(ctx, `DELETE FROM podcasts WHERE id = ?`, podcastID); err != nil {
+			return fmt.Errorf("delete podcast feed item: %w", err)
+		}
+		if err := refreshRemotePodcastLibraryStats(ctx, tx); err != nil {
+			return err
+		}
 	}
 	if _, err := tx.ExecContext(ctx, `
 		DELETE FROM metadata_overrides
 		WHERE target_kind = ? AND target_id = ?`, catalog.OverrideKindPodcastFeed, strings.TrimSpace(id)); err != nil {
 		return fmt.Errorf("delete podcast feed override: %w", err)
-	}
-	if err := refreshRemotePodcastLibraryStats(ctx, tx); err != nil {
-		return err
 	}
 	return tx.Commit()
 }
@@ -403,6 +500,7 @@ func (s *Service) resolveAutoDownload(input *bool) bool {
 
 type feedSaveOptions struct {
 	autoDownloadOnInsert bool
+	attachPodcastID      string
 }
 
 func (s *Service) savePodcastFeed(ctx context.Context, feedURL string, parsed parsedPodcastFeed, opts ...feedSaveOptions) error {
@@ -413,18 +511,59 @@ func (s *Service) savePodcastFeed(ctx context.Context, feedURL string, parsed pa
 
 	feedID := podcastFeedID(feedURL)
 	podcastID := podcastItemID(feedURL)
-	parsed, err = s.guardPodcastFeedSave(ctx, idx, feedID, podcastID, parsed)
-	if err != nil {
-		return err
-	}
-	guardedEpisodes, err := s.guardPodcastEpisodesSave(ctx, idx, podcastID, parsed.Episodes)
-	if err != nil {
-		return err
-	}
+	hybrid := false
+	var hybridShow podcastShowRow
 
 	var saveOpts feedSaveOptions
 	if len(opts) > 0 {
 		saveOpts = opts[0]
+	}
+	if attachID := strings.TrimSpace(saveOpts.attachPodcastID); attachID != "" {
+		show, err := s.loadPodcastShowRow(ctx, attachID)
+		if err != nil {
+			return err
+		}
+		hybridShow = show
+		podcastID = show.ID
+		hybrid = true
+	} else if existingPodcastID, ok, err := s.feedURLPodcastID(ctx, feedURL); err != nil {
+		return err
+	} else if ok {
+		podcastID = existingPodcastID
+		if show, err := s.loadPodcastShowRow(ctx, podcastID); err == nil {
+			hybridShow = show
+			hybrid = true
+		}
+	}
+
+	parsed, err = s.guardPodcastFeedSave(ctx, idx, feedID, podcastID, parsed)
+	if err != nil {
+		return err
+	}
+
+	episodeLibraryID := remotePodcastLibraryID
+	var guardedEpisodes []catalog.PodcastEpisode
+	if hybrid {
+		episodeLibraryID = hybridShow.LibraryID
+		existing, err := s.loadExistingEpisodesForMatch(ctx, podcastID)
+		if err != nil {
+			return err
+		}
+		plans := buildHybridEpisodePlans(podcastID, episodeLibraryID, parsed.Episodes, existing)
+		guardedEpisodes = make([]catalog.PodcastEpisode, 0, len(plans))
+		for _, episode := range plans {
+			guarded, err := s.guardPodcastEpisodeSave(ctx, idx, episode)
+			if err != nil {
+				return err
+			}
+			guardedEpisodes = append(guardedEpisodes, guarded)
+		}
+	} else {
+		var err error
+		guardedEpisodes, err = s.guardPodcastEpisodesSave(ctx, idx, podcastID, episodeLibraryID, parsed.Episodes)
+		if err != nil {
+			return err
+		}
 	}
 
 	autoDownload := false
@@ -451,59 +590,79 @@ func (s *Service) savePodcastFeed(ctx context.Context, feedURL string, parsed pa
 	}
 	defer tx.Rollback()
 
-	if err := upsertRemotePodcastLibrary(ctx, tx); err != nil {
-		return err
+	if !hybrid {
+		if err := upsertRemotePodcastLibrary(ctx, tx); err != nil {
+			return err
+		}
 	}
 
-	episodeCount := len(parsed.Episodes)
+	episodeCount := len(guardedEpisodes)
 	categories := cleanStringSlice(parsed.Categories)
-	podcastMeta := catalog.PodcastMetadata{
-		Title:        parsed.Title,
-		Author:       parsed.Author,
-		Description:  parsed.Description,
-		FeedURL:      feedURL,
-		SiteURL:      parsed.SiteURL,
-		Language:     parsed.Language,
-		Explicit:     parsed.Explicit,
-		Categories:   categories,
-		OwnerName:    parsed.OwnerName,
-		OwnerEmail:   parsed.OwnerEmail,
-		EpisodeCount: episodeCount,
-		ExternalIDs: catalog.ExternalIDs{
-			FeedGUID: feedID,
-			URLs:     cleanStringSlice([]string{feedURL, parsed.SiteURL}),
-		},
-	}
 	coverJSON, err := s.resolvePodcastFeedCoverJSON(ctx, idx, podcastID, parsed.ImageURL)
 	if err != nil {
 		return err
 	}
 
 	durationSeconds := 0
-	for _, episode := range parsed.Episodes {
+	for _, episode := range guardedEpisodes {
 		durationSeconds += episode.DurationSeconds
 	}
 
-	if _, err := tx.ExecContext(ctx, `
-		INSERT INTO podcasts (
-		  id, library_id, path, folder_id, cover_json, tags_json, genres_json,
-		  duration_seconds, podcast_json, updated_at, last_scan_at
-		)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
-		ON CONFLICT(id) DO UPDATE SET
-		  library_id = excluded.library_id,
-		  path = excluded.path,
-		  folder_id = excluded.folder_id,
-		  cover_json = excluded.cover_json,
-		  tags_json = excluded.tags_json,
-		  genres_json = excluded.genres_json,
-		  duration_seconds = excluded.duration_seconds,
-		  podcast_json = excluded.podcast_json,
-		  updated_at = CURRENT_TIMESTAMP,
-		  last_scan_at = CURRENT_TIMESTAMP`,
-		podcastID, remotePodcastLibraryID, feedURL,
-		stableID("folder", feedURL), coverJSON, jsonText(categories), jsonText(categories), durationSeconds, jsonText(podcastMeta)); err != nil {
-		return fmt.Errorf("upsert podcast feed item: %w", err)
+	if hybrid {
+		podcastMeta := mergePodcastMetadataForHybrid(hybridShow.Podcast, feedURL, parsed)
+		podcastMeta.EpisodeCount = episodeCount
+		if _, err := tx.ExecContext(ctx, `
+			UPDATE podcasts
+			SET cover_json = CASE WHEN TRIM(?) != '' THEN ? ELSE cover_json END,
+			    genres_json = ?,
+			    duration_seconds = ?,
+			    podcast_json = ?,
+			    updated_at = CURRENT_TIMESTAMP
+			WHERE id = ?`,
+			coverJSON, coverJSON,
+			jsonText(categories),
+			durationSeconds, jsonText(podcastMeta), podcastID); err != nil {
+			return fmt.Errorf("update hybrid podcast: %w", err)
+		}
+	} else {
+		podcastMeta := catalog.PodcastMetadata{
+			Title:        parsed.Title,
+			Author:       parsed.Author,
+			Description:  parsed.Description,
+			FeedURL:      feedURL,
+			SiteURL:      parsed.SiteURL,
+			Language:     parsed.Language,
+			Explicit:     parsed.Explicit,
+			Categories:   categories,
+			OwnerName:    parsed.OwnerName,
+			OwnerEmail:   parsed.OwnerEmail,
+			EpisodeCount: episodeCount,
+			ExternalIDs: catalog.ExternalIDs{
+				FeedGUID: feedID,
+				URLs:     cleanStringSlice([]string{feedURL, parsed.SiteURL}),
+			},
+		}
+		if _, err := tx.ExecContext(ctx, `
+			INSERT INTO podcasts (
+			  id, library_id, path, folder_id, cover_json, tags_json, genres_json,
+			  duration_seconds, podcast_json, updated_at, last_scan_at
+			)
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+			ON CONFLICT(id) DO UPDATE SET
+			  library_id = excluded.library_id,
+			  path = excluded.path,
+			  folder_id = excluded.folder_id,
+			  cover_json = excluded.cover_json,
+			  tags_json = excluded.tags_json,
+			  genres_json = excluded.genres_json,
+			  duration_seconds = excluded.duration_seconds,
+			  podcast_json = excluded.podcast_json,
+			  updated_at = CURRENT_TIMESTAMP,
+			  last_scan_at = CURRENT_TIMESTAMP`,
+			podcastID, remotePodcastLibraryID, feedURL,
+			stableID("folder", feedURL), coverJSON, jsonText(categories), jsonText(categories), durationSeconds, jsonText(podcastMeta)); err != nil {
+			return fmt.Errorf("upsert podcast feed item: %w", err)
+		}
 	}
 
 	if _, err := tx.ExecContext(ctx, `
@@ -537,8 +696,7 @@ func (s *Service) savePodcastFeed(ctx context.Context, feedURL string, parsed pa
 		return fmt.Errorf("upsert podcast feed source: %w", err)
 	}
 
-	for index, parsedEpisode := range parsed.Episodes {
-		episode := guardedEpisodes[index]
+	for _, episode := range guardedEpisodes {
 		if _, err := tx.ExecContext(ctx, `
 			INSERT INTO podcast_episodes (
 			  id, library_id, podcast_id, title, subtitle, description, published_at, season, episode,
@@ -568,12 +726,14 @@ func (s *Service) savePodcastFeed(ctx context.Context, feedURL string, parsed pa
 			episode.Episode, episode.EpisodeType, episode.DurationSeconds,
 			boolInt(episode.Explicit), episode.EnclosureURL, episode.EnclosureType,
 			episode.EnclosureBytes, jsonText(episode.ExternalIDs)); err != nil {
-			return fmt.Errorf("upsert feed episode %q: %w", parsedEpisode.Title, err)
+			return fmt.Errorf("upsert feed episode %q: %w", episode.Title, err)
 		}
 	}
 
-	if err := refreshRemotePodcastLibraryStats(ctx, tx); err != nil {
-		return err
+	if !hybrid {
+		if err := refreshRemotePodcastLibraryStats(ctx, tx); err != nil {
+			return err
+		}
 	}
 	if err := tx.Commit(); err != nil {
 		return err

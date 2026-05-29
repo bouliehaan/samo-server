@@ -2,6 +2,7 @@ package sources
 
 import (
 	"context"
+	"strings"
 
 	"github.com/bouliehaan/samo-server/internal/catalog"
 )
@@ -87,8 +88,12 @@ func (s *Service) guardPodcastEpisodesSave(
 	ctx context.Context,
 	idx *catalog.OverrideIndex,
 	podcastID string,
+	libraryID string,
 	episodes []parsedPodcastEpisode,
 ) ([]catalog.PodcastEpisode, error) {
+	if strings.TrimSpace(libraryID) == "" {
+		libraryID = remotePodcastLibraryID
+	}
 	guarded := make([]catalog.PodcastEpisode, 0, len(episodes))
 	for _, parsedEpisode := range episodes {
 		episodeID := podcastEpisodeID(podcastID, parsedEpisode)
@@ -98,7 +103,7 @@ func (s *Service) guardPodcastEpisodesSave(
 		}
 		episode := catalog.PodcastEpisode{
 			ID:              episodeID,
-			LibraryID:       remotePodcastLibraryID,
+			LibraryID:       libraryID,
 			PodcastID:       podcastID,
 			Title:           parsedEpisode.Title,
 			Subtitle:        parsedEpisode.Subtitle,

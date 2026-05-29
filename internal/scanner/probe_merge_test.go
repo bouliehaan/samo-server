@@ -6,74 +6,26 @@ import (
 	"github.com/bouliehaan/samo-server/internal/catalog"
 )
 
-func TestProbeNeedsTechnicalSupplement(t *testing.T) {
-	if !probeNeedsTechnicalSupplement(probeInfo{AudioFile: catalog.AudioFile{}}) {
-		t.Fatal("expected supplement when duration missing")
-	}
-	if !probeNeedsTechnicalSupplement(probeInfo{AudioFile: catalog.AudioFile{
-		Path:            "/music/song.mp3",
-		DurationSeconds: 180,
-		Codec:           "mp3",
-	}}) {
-		t.Fatal("expected supplement when bitrate missing on lossy file")
-	}
-	if probeNeedsTechnicalSupplement(probeInfo{AudioFile: catalog.AudioFile{
-		Path:            "/music/song.mp3",
-		DurationSeconds: 180,
-		Codec:           "mp3",
-		Bitrate:         320000,
-		SampleRate:      44100,
-	}}) {
-		t.Fatal("expected no supplement when technical fields present")
-	}
-}
-
-func TestMergeProbeInfoKeepsNativeTags(t *testing.T) {
+func TestMergeProbeInfoPrefersFFprobeChaptersOverOverdrive(t *testing.T) {
 	native := probeInfo{
-		Tags: catalog.Tags{"title": []string{"Native Title"}},
-		AudioFile: catalog.AudioFile{
-			DurationSeconds: 0,
-			Codec:           "mp3",
+		Chapters: []catalog.AudioChapter{
+			{Index: 1, Title: "Overdrive", StartSeconds: 503, EndSeconds: 600},
 		},
 	}
 	ff := probeInfo{
-		Tags: catalog.Tags{"title": []string{"FF Title"}, "album": []string{"FF Album"}},
-		AudioFile: catalog.AudioFile{
-			DurationSeconds: 245,
-			Bitrate:         320000,
-			SampleRate:      44100,
+		Chapters: []catalog.AudioChapter{
+			{Index: 1, Title: "Embedded", StartSeconds: 528, EndSeconds: 600},
 		},
 	}
-	merged := mergeProbeInfo(native, ff, false)
-	if firstTag(merged.Tags, "title") != "Native Title" {
-		t.Fatalf("title = %q, want native", firstTag(merged.Tags, "title"))
-	}
-	if firstTag(merged.Tags, "album") != "FF Album" {
-		t.Fatalf("album = %q", firstTag(merged.Tags, "album"))
-	}
-	if merged.AudioFile.DurationSeconds != 245 {
-		t.Fatalf("duration = %d", merged.AudioFile.DurationSeconds)
-	}
-	if merged.AudioFile.Codec != "mp3" {
-		t.Fatalf("codec = %q, want native mp3", merged.AudioFile.Codec)
-	}
-}
 
-func TestMergeProbeInfoPrefersFFprobeCodec(t *testing.T) {
-	native := probeInfo{
-		AudioFile: catalog.AudioFile{
-			Path:  "/music/song.ogg",
-			Codec: "vorbis",
-		},
+	merged := mergeProbeInfo(native, ff, true)
+	if len(merged.Chapters) != 1 {
+		t.Fatalf("chapters = %d, want 1", len(merged.Chapters))
 	}
-	ff := probeInfo{
-		AudioFile: catalog.AudioFile{
-			Path:  "/music/song.ogg",
-			Codec: "flac",
-		},
+	if merged.Chapters[0].StartSeconds != 528 {
+		t.Fatalf("start = %d, want embedded 528", merged.Chapters[0].StartSeconds)
 	}
-	merged := mergeProbeInfo(native, ff, false)
-	if merged.AudioFile.Codec != "flac" {
-		t.Fatalf("codec = %q, want ffprobe flac", merged.AudioFile.Codec)
+	if merged.Chapters[0].Title != "Embedded" {
+		t.Fatalf("title = %q, want Embedded", merged.Chapters[0].Title)
 	}
 }

@@ -1,6 +1,20 @@
 package catalog
 
-import "testing"
+import (
+	"net/http/httptest"
+	"testing"
+)
+
+func TestStreamSelectQueryFromRequestHonorsExplicitZero(t *testing.T) {
+	req := httptest.NewRequest("GET", "/stream?progressSeconds=0", nil)
+	query := StreamSelectQueryFromRequest(req)
+	if !query.HasProgressSeconds {
+		t.Fatal("expected HasProgressSeconds for progressSeconds=0")
+	}
+	if query.ProgressSeconds != 0 {
+		t.Fatalf("progress = %d, want 0", query.ProgressSeconds)
+	}
+}
 
 func TestSelectStreamTargetUsesPlaybackProgressAcrossFiles(t *testing.T) {
 	files := []AudioFile{
@@ -18,6 +32,28 @@ func TestSelectStreamTargetUsesPlaybackProgressAcrossFiles(t *testing.T) {
 	}
 	if target.OffsetSeconds != 50 {
 		t.Fatalf("offset = %d, want 50", target.OffsetSeconds)
+	}
+}
+
+func TestSelectStreamTargetHonorsExplicitZeroProgress(t *testing.T) {
+	files := []AudioFile{
+		{ID: "file-1", RelativePath: "book.m4b", DurationSeconds: 3600},
+	}
+
+	target, err := SelectStreamTarget(
+		files,
+		PlaybackState{ProgressSeconds: 900},
+		StreamSelectQuery{ProgressSeconds: 0, HasProgressSeconds: true},
+		0,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if target.FileID != "file-1" {
+		t.Fatalf("file = %q, want file-1", target.FileID)
+	}
+	if target.OffsetSeconds != 0 {
+		t.Fatalf("offset = %d, want 0 (explicit restart)", target.OffsetSeconds)
 	}
 }
 

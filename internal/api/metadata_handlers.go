@@ -43,6 +43,12 @@ func (s *Server) applyMetadata(w http.ResponseWriter, r *http.Request) {
 		writeMetadataApplyError(w, err)
 		return
 	}
+	if request.LinkFeed || request.SyncEpisodeMetadata {
+		if err := s.linkPodcastFeedAfterApply(r, request); err != nil {
+			writeSourceError(w, err)
+			return
+		}
+	}
 	if !request.DeferCatalogReload {
 		if err := s.reloadCatalogProjection(r); err != nil {
 			writeError(w, http.StatusInternalServerError, err.Error())
@@ -136,6 +142,43 @@ func readMetadataSearchRequest(r *http.Request) (metadata.SearchRequest, error) 
 		request.Limit = limit
 	}
 	return request, nil
+}
+
+func (s *Server) linkPodcastFeedAfterApply(r *http.Request, request metadata.MetadataApplyRequest) error {
+	if strings.TrimSpace(request.TargetKind) != string(metadata.ApplyTargetPodcast) {
+		return nil
+	}
+	feedURL := firstMetadataFeedURL(request.Candidate)
+	if feedURL == "" {
+		return nil
+	}
+	return s.sourcesService().LinkOrRefreshPodcastFeedForShow(
+		r.Context(),
+		strings.TrimSpace(request.TargetID),
+		feedURL,
+	)
+}
+
+func firstMetadataFeedURL(candidate metadata.SearchResult) string {
+	for _, raw := range candidate.ExternalIDs.URLs {
+		trimmed := strings.TrimSpace(raw)
+		if trimmed == "" {
+			continue
+		}
+		lower := strings.ToLower(trimmed)
+		if strings.HasSuffix(lower, ".xml") || strings.Contains(lower, "/feed") || strings.Contains(lower, "rss") {
+			return trimmed
+		}
+	}
+	for _, link := range candidate.Links {
+		label := strings.ToLower(strings.TrimSpace(link.Label))
+		if label == "rss feed" || strings.Contains(label, "rss") {
+			if url := strings.TrimSpace(link.URL); url != "" {
+				return url
+			}
+		}
+	}
+	return ""
 }
 
 func (s *Server) metadataApplyService() *metadata.MetadataApplyService {

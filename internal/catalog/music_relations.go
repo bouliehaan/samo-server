@@ -23,6 +23,45 @@ func (s *Service) MusicAlbumsForArtist(artistID string) []MusicAlbum {
 	return items
 }
 
+func (s *Service) MusicTracksForArtist(artistID string) []MusicTrack {
+	artistID = strings.TrimSpace(artistID)
+	if artistID == "" {
+		return nil
+	}
+
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	items := make([]MusicTrack, 0)
+	for _, track := range s.musicTracks {
+		if musicTrackMatchesArtistLocked(s, track, artistID) {
+			items = append(items, track)
+		}
+	}
+	return items
+}
+
+func musicTrackMatchesArtistLocked(s *Service, track MusicTrack, artistID string) bool {
+	for _, id := range track.ArtistIDs {
+		if id == artistID {
+			return true
+		}
+	}
+	for _, id := range track.AlbumArtistIDs {
+		if id == artistID {
+			return true
+		}
+	}
+	if track.AlbumID == "" {
+		return false
+	}
+	album, ok := s.musicAlbumByID[track.AlbumID]
+	if !ok {
+		return false
+	}
+	return musicAlbumMatchesArtist(album, artistID)
+}
+
 func (s *Service) MusicTracksForAlbum(albumID string) []MusicTrack {
 	albumID = strings.TrimSpace(albumID)
 	if albumID == "" {

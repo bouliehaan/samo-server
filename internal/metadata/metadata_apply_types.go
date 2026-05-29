@@ -41,11 +41,13 @@ func ParseApplyTargetKind(raw string) (ApplyTargetKind, error) {
 
 // MetadataApplyRequest is the user-confirmed apply payload from a metadata search candidate.
 type MetadataApplyRequest struct {
-	TargetKind         string       `json:"targetKind"`
-	TargetID           string       `json:"targetId"`
-	Candidate          SearchResult `json:"candidate"`
-	Fields             []string     `json:"fields"`
-	DeferCatalogReload bool         `json:"deferCatalogReload,omitempty"`
+	TargetKind          string       `json:"targetKind"`
+	TargetID            string       `json:"targetId"`
+	Candidate           SearchResult `json:"candidate"`
+	Fields              []string     `json:"fields"`
+	DeferCatalogReload  bool         `json:"deferCatalogReload,omitempty"`
+	LinkFeed            bool         `json:"linkFeed,omitempty"`
+	SyncEpisodeMetadata bool         `json:"syncEpisodeMetadata,omitempty"`
 }
 
 type MetadataApplyPreview struct {

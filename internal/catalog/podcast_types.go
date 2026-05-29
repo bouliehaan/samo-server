@@ -22,11 +22,20 @@ type PodcastItem struct {
 	DurationSeconds int              `json:"durationSeconds"`
 	Progress        PlaybackState    `json:"progress"`
 	Podcast         *PodcastMetadata `json:"podcast,omitempty"`
-	AudioFiles      []AudioFile      `json:"audioFiles,omitempty"`
-	Episodes        []PodcastEpisode `json:"episodes,omitempty"`
-	AddedAt         *time.Time       `json:"addedAt,omitempty"`
-	UpdatedAt       *time.Time       `json:"updatedAt,omitempty"`
-	LastScanAt      *time.Time       `json:"lastScanAt,omitempty"`
+	/** Set when this show has an active row in podcast_feeds (hybrid or RSS-only). */
+	RssFeed    *PodcastLinkedFeed `json:"rssFeed,omitempty"`
+	AudioFiles []AudioFile        `json:"audioFiles,omitempty"`
+	Episodes   []PodcastEpisode   `json:"episodes,omitempty"`
+	AddedAt    *time.Time         `json:"addedAt,omitempty"`
+	UpdatedAt  *time.Time         `json:"updatedAt,omitempty"`
+	LastScanAt *time.Time         `json:"lastScanAt,omitempty"`
+}
+
+// PodcastLinkedFeed is the RSS subscription backing a hybrid (files + feed) show.
+type PodcastLinkedFeed struct {
+	FeedURL string `json:"feedUrl"`
+	ID      string `json:"id"`
+	Title   string `json:"title,omitempty"`
 }
 
 // PodcastMetadata is the show-level metadata embedded in a PodcastItem.

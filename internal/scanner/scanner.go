@@ -222,16 +222,19 @@ func (s *Scanner) probeAudiobook(ctx context.Context, path string) (probeInfo, e
 	if err != nil {
 		return probeInfo{}, err
 	}
-	if len(info.Chapters) == 0 {
-		ff, ffErr := s.probeMediaFFprobeWithTimeout(ctx, path, true, "32M", "10M", probeFileTimeout)
-		if ffErr == nil {
-			if len(ff.Chapters) > 0 {
-				info.Chapters = ff.Chapters
-			}
-			info = mergeProbeInfo(info, ff, true)
-		} else {
-			log.Printf("scanner: audiobook chapter probe failed for %q: %v", path, ffErr)
-		}
+	// Tag-only OverDrive markers are not playback-accurate; embedded atoms are.
+	info.Chapters = nil
+
+	if chapters := s.probeAudiobookChapterMarkers(ctx, path); len(chapters) > 0 {
+		info.Chapters = chapters
+	}
+
+	probeSize, analyzeDuration := audiobookChapterProbeLimits(path)
+	ff, ffErr := s.probeMediaFFprobeWithTimeout(ctx, path, false, probeSize, analyzeDuration, probeFileTimeout)
+	if ffErr == nil {
+		info = mergeProbeInfo(info, ff, false)
+	} else {
+		log.Printf("scanner: audiobook technical ffprobe failed for %q: %v", path, ffErr)
 	}
 	return finalizeProbeInfo(info), nil
 }

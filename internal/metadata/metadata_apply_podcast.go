@@ -63,6 +63,11 @@ func mergePodcast(item catalog.PodcastItem, candidate SearchResult, fields []str
 			podcast.SiteURL = url
 		}
 	}
+	if wantsField(set, "feedUrl") {
+		if feedURL := firstFeedURL(candidate.ExternalIDs.URLs); feedURL != "" {
+			podcast.FeedURL = feedURL
+		}
+	}
 	if wantsField(set, "language") && candidate.Language != "" {
 		podcast.Language = candidate.Language
 	}

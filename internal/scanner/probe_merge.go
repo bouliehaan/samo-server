@@ -43,7 +43,9 @@ func mergeProbeInfo(native, ff probeInfo, includeChapters bool) probeInfo {
 	out.AudioFile = finalizeAudioFile(af)
 
 	out.Tags = mergeCatalogTags(native.Tags, ff.Tags)
-	if includeChapters && len(out.Chapters) == 0 && len(ff.Chapters) > 0 {
+	// Embedded ffprobe chapters match audible playback; OverDrive MediaMarkers
+	// from native tag reads are often tens of seconds early on retail .m4b files.
+	if includeChapters && len(ff.Chapters) > 0 {
 		out.Chapters = ff.Chapters
 	}
 	if !out.HasEmbeddedCover {

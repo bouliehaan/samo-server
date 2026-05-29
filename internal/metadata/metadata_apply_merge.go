@@ -138,6 +138,20 @@ func firstContributorName(contributors []catalog.ContributorRef) string {
 	return strings.TrimSpace(contributors[0].Name)
 }
 
+func firstFeedURL(urls []string) string {
+	for _, raw := range urls {
+		trimmed := strings.TrimSpace(raw)
+		if trimmed == "" {
+			continue
+		}
+		lower := strings.ToLower(trimmed)
+		if strings.HasSuffix(lower, ".xml") || strings.Contains(lower, "/feed") || strings.Contains(lower, "rss") {
+			return trimmed
+		}
+	}
+	return ""
+}
+
 func firstLinkURL(links []Link) string {
 	for _, link := range links {
 		if url := strings.TrimSpace(link.URL); url != "" {

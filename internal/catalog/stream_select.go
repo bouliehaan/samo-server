@@ -17,6 +17,9 @@ type StreamSelectQuery struct {
 	MediaFileID     string
 	DiscNumber      int
 	ProgressSeconds int
+	// HasProgressSeconds is true when the client sent at/offsetSeconds/progressSeconds
+	// (including an explicit zero to restart from the beginning).
+	HasProgressSeconds bool
 }
 
 // StreamTarget is the selected media file and offset within that file.
@@ -40,12 +43,20 @@ func StreamSelectQueryFromRequest(r *http.Request) StreamSelectQuery {
 		}
 	}
 	for _, key := range []string{"at", "offsetSeconds", "progressSeconds"} {
-		if raw := strings.TrimSpace(r.URL.Query().Get(key)); raw != "" {
-			if seconds, err := strconv.Atoi(raw); err == nil && seconds >= 0 {
-				query.ProgressSeconds = seconds
-				break
-			}
+		if !r.URL.Query().Has(key) {
+			continue
 		}
+		raw := strings.TrimSpace(r.URL.Query().Get(key))
+		if raw == "" {
+			continue
+		}
+		seconds, err := strconv.Atoi(raw)
+		if err != nil || seconds < 0 {
+			continue
+		}
+		query.ProgressSeconds = seconds
+		query.HasProgressSeconds = true
+		break
 	}
 	return query
 }
@@ -80,9 +91,9 @@ func SelectStreamTarget(files []AudioFile, playback PlaybackState, query StreamS
 		}
 	}
 
-	progress := query.ProgressSeconds
-	if progress <= 0 {
-		progress = playback.ProgressSeconds
+	progress := playback.ProgressSeconds
+	if query.HasProgressSeconds {
+		progress = query.ProgressSeconds
 	}
 	if progress <= 0 {
 		return StreamTarget{FileID: sorted[0].ID, OffsetSeconds: 0}, nil

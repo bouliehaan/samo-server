@@ -195,12 +195,10 @@ func (s *Scanner) persistAudiobookGroup(ctx context.Context, library Library, ro
 		if len(chapters) == 0 {
 			chapters = readCueChapters(group.Root, probes)
 		}
-		// Do not wipe existing chapters when probing fails or provides
-		// no chapter markers; preserve previously indexed chapter rows.
-		if len(chapters) > 0 {
-			if err := s.replaceAudiobookChapters(ctx, item.ID, chapters); err != nil {
-				return err
-			}
+		// Always rewrite chapter rows on a successful probe so stale OverDrive
+		// markers from older scans do not linger in the API.
+		if err := s.replaceAudiobookChapters(ctx, item.ID, chapters); err != nil {
+			return err
 		}
 	}
 

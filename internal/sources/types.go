@@ -26,9 +26,16 @@ type PodcastFeed struct {
 	UpdatedAt           *time.Time   `json:"updatedAt,omitempty"`
 }
 
+type AttachPodcastFeedResult struct {
+	Feed               PodcastFeed `json:"feed"`
+	MergedEpisodeCount int         `json:"mergedEpisodeCount"`
+	NewEpisodeCount    int         `json:"newEpisodeCount"`
+}
+
 type AddPodcastFeedInput struct {
 	URL                 string `json:"url"`
 	Title               string `json:"title,omitempty"`
+	PodcastID           string `json:"podcastId,omitempty"`
 	AutoDownloadEnabled *bool  `json:"autoDownloadEnabled,omitempty"`
 }
 

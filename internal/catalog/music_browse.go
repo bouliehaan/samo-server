@@ -16,11 +16,13 @@ const (
 	MusicBrowseStarred        MusicBrowseView = "starred"
 	MusicBrowseRecentlyPlayed MusicBrowseView = "recently-played"
 	MusicBrowseRecentlyAdded  MusicBrowseView = "recently-added"
+	MusicBrowseUnplayed       MusicBrowseView = "unplayed"
+	MusicBrowseDiscovery      MusicBrowseView = "discovery"
 )
 
 func ParseMusicBrowseView(raw string) (MusicBrowseView, error) {
 	switch MusicBrowseView(strings.TrimSpace(raw)) {
-	case MusicBrowseFavorites, MusicBrowseStarred, MusicBrowseRecentlyPlayed, MusicBrowseRecentlyAdded:
+	case MusicBrowseFavorites, MusicBrowseStarred, MusicBrowseRecentlyPlayed, MusicBrowseRecentlyAdded, MusicBrowseUnplayed, MusicBrowseDiscovery:
 		return MusicBrowseView(strings.TrimSpace(raw)), nil
 	default:
 		return "", ErrInvalidBrowseView
@@ -110,6 +112,27 @@ func (s *Service) musicBrowse(
 			Limit:  page.Limit,
 			Offset: page.Offset,
 		}
+	case MusicBrowseUnplayed:
+		matches = filterMusicBrowse(snapshot, func(playback PlaybackState) bool {
+			return playback.PlayCount == 0
+		})
+		sortMusicBrowseByAddedAt(&matches)
+	case MusicBrowseDiscovery:
+		matches = filterMusicBrowse(snapshot, func(playback PlaybackState) bool {
+			return playback.PlayCount == 0
+		})
+		page = normalizePage(page)
+		if page.Limit <= 0 {
+			page.Limit = 10
+		}
+		picked := PickDiscoveryTracks(matches.tracks, page.Limit)
+		return MusicBrowseResults{
+			View:   view,
+			Tracks: picked,
+			Total:  len(picked),
+			Limit:  page.Limit,
+			Offset: page.Offset,
+		}
 	default:
 		return MusicBrowseResults{View: view}
 	}
@@ -155,13 +178,22 @@ func overlayMusicBrowsePlayback(
 		tracks:    append([]MusicTrack(nil), tracks...),
 		playlists: append([]MusicPlaylist(nil), playlists...),
 	}
+	rolledArtists, rolledAlbums := rollupTrackPlaybackToParents(out.tracks, trackStates)
 	for index, artist := range out.artists {
-		if state, ok := artistStates[artist.ID]; ok {
+		state := artistStates[artist.ID]
+		if rolled, ok := rolledArtists[artist.ID]; ok {
+			state = mergePlaybackStates(state, rolled)
+		}
+		if !playbackStateIsEmpty(state) {
 			out.artists[index].Playback = state
 		}
 	}
 	for index, album := range out.albums {
-		if state, ok := albumStates[album.ID]; ok {
+		state := albumStates[album.ID]
+		if rolled, ok := rolledAlbums[album.ID]; ok {
+			state = mergePlaybackStates(state, rolled)
+		}
+		if !playbackStateIsEmpty(state) {
 			out.albums[index].Playback = state
 		}
 	}
@@ -245,6 +277,61 @@ func addedAtAfter(left, right *time.Time) bool {
 		return true
 	}
 	return left.After(*right)
+}
+
+// PickDiscoveryTracks builds a home-discovery queue from unplayed tracks: roughly
+// 70% from the newest-added slice of the unplayed pool and 30% from older
+// additions so the row surfaces fresh catalog arrivals without ignoring deep cuts.
+func PickDiscoveryTracks(tracks []MusicTrack, limit int) []MusicTrack {
+	if len(tracks) == 0 {
+		return nil
+	}
+	if limit <= 0 {
+		limit = 10
+	}
+
+	sorted := append([]MusicTrack(nil), tracks...)
+	sort.SliceStable(sorted, func(i, j int) bool {
+		return addedAtAfter(sorted[i].AddedAt, sorted[j].AddedAt)
+	})
+
+	recentWant := (limit*7 + 9) / 10
+	if recentWant > limit {
+		recentWant = limit
+	}
+	olderWant := limit - recentWant
+
+	split := len(sorted) * 7 / 10
+	if split < 1 {
+		split = 1
+	}
+	if split > len(sorted) {
+		split = len(sorted)
+	}
+
+	out := make([]MusicTrack, 0, limit)
+	out = append(out, sampleDiscoveryTracks(sorted[:split], recentWant)...)
+	out = append(out, sampleDiscoveryTracks(sorted[split:], olderWant)...)
+	return out
+}
+
+func sampleDiscoveryTracks(pool []MusicTrack, want int) []MusicTrack {
+	if want <= 0 || len(pool) == 0 {
+		return nil
+	}
+	if len(pool) <= want {
+		return append([]MusicTrack(nil), pool...)
+	}
+
+	out := make([]MusicTrack, 0, want)
+	for i := 0; i < want; i++ {
+		idx := 0
+		if want > 1 {
+			idx = i * (len(pool) - 1) / (want - 1)
+		}
+		out = append(out, pool[idx])
+	}
+	return out
 }
 
 type browseEntry struct {

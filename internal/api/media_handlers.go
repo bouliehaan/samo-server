@@ -332,7 +332,7 @@ func writeFilesError(w http.ResponseWriter, err error) {
 
 func streamResumeSeconds(r *http.Request, savedProgress int) int {
 	query := catalog.StreamSelectQueryFromRequest(r)
-	if query.ProgressSeconds > 0 {
+	if query.HasProgressSeconds {
 		return query.ProgressSeconds
 	}
 	if savedProgress > 0 {

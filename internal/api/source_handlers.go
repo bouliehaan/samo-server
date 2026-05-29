@@ -36,6 +36,32 @@ func (s *Server) listPodcastFeeds(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, feeds)
 }
 
+func (s *Server) attachPodcastShowFeed(w http.ResponseWriter, r *http.Request) {
+	if _, ok := s.requireAdmin(w, r); !ok {
+		return
+	}
+	podcastID := strings.TrimSpace(r.PathValue("id"))
+	if podcastID == "" {
+		writeError(w, http.StatusBadRequest, "podcast id is required")
+		return
+	}
+	var input sources.AddPodcastFeedInput
+	if !readJSONBody(w, r, &input) {
+		return
+	}
+	input.PodcastID = podcastID
+	feed, err := s.sourcesService().AddPodcastFeed(r.Context(), input)
+	if err != nil {
+		writeSourceError(w, err)
+		return
+	}
+	if err := s.reloadCatalogProjection(r); err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusCreated, feed)
+}
+
 func (s *Server) createPodcastFeed(w http.ResponseWriter, r *http.Request) {
 	if _, ok := s.requireAdmin(w, r); !ok {
 		return
@@ -360,6 +386,12 @@ func writeSourceError(w http.ResponseWriter, err error) {
 		writeError(w, http.StatusNotFound, "source not found")
 	case errors.Is(err, sources.ErrInvalidURL):
 		writeError(w, http.StatusBadRequest, "url must be absolute http or https")
+	case errors.Is(err, sources.ErrPodcastNotFilesystem):
+		writeError(w, http.StatusBadRequest, "podcast must be backed by a local library folder")
+	case errors.Is(err, sources.ErrPodcastAlreadyHasFeed):
+		writeError(w, http.StatusConflict, "podcast already has an rss feed attached")
+	case errors.Is(err, sources.ErrFeedURLInUse):
+		writeError(w, http.StatusConflict, "rss feed url is already subscribed on another podcast")
 	case errors.Is(err, sources.ErrInvalidPollInterval):
 		writeError(w, http.StatusBadRequest, err.Error())
 	case errors.Is(err, sources.ErrInvalidProbeInterval):

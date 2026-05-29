@@ -72,7 +72,11 @@ func (p *ApplePodcastProvider) Search(ctx context.Context, request SearchRequest
 			Description: item.Description,
 			ExternalIDs: catalog.ExternalIDs{
 				ITunesID: strconv.FormatInt(item.CollectionID, 10),
-				URLs:     unique([]string{item.FeedURL, item.TrackViewURL, item.CollectionViewURL}),
+				URLs: unique([]string{
+					item.FeedURL,
+					item.TrackViewURL,
+					item.CollectionViewURL,
+				}),
 			},
 			Links: applePodcastLinks(item),
 		}

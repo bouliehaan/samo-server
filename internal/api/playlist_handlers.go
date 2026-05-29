@@ -69,6 +69,12 @@ func (s *Server) listMusicPlaylistTracks(w http.ResponseWriter, r *http.Request)
 		return
 	}
 	items := s.catalog.MusicTracksForPlaylist(r.PathValue("id"))
+	var overlayErr error
+	items, overlayErr = s.musicTracksWithUserPlayback(r.Context(), principal.User.ID, items)
+	if overlayErr != nil {
+		writeError(w, http.StatusInternalServerError, overlayErr.Error())
+		return
+	}
 	writeJSON(w, http.StatusOK, map[string]any{"items": items, "total": len(items)})
 }
 
