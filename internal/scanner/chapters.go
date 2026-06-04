@@ -60,7 +60,7 @@ func overdriveChapters(tags catalog.Tags) []catalog.AudioChapter {
 	return chapters
 }
 
-func parseMarkerSeconds(value string) int {
+func parseMarkerSeconds(value string) float64 {
 	value = strings.TrimSpace(value)
 	if value == "" {
 		return 0
@@ -74,5 +74,5 @@ func parseMarkerSeconds(value string) int {
 		seconds += parsed * multiplier
 		multiplier *= 60
 	}
-	return int(mathRound(seconds))
+	return seconds
 }

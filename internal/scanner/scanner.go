@@ -41,6 +41,63 @@ type Options struct {
 	// UseFFprobeForScan runs ffprobe per file during library scans. Default is
 	// native header/tag parsing, which is faster and does not spawn subprocesses.
 	UseFFprobeForScan bool
+	// ChapterProvider supplies real chapters for audiobooks whose files carry no
+	// usable embedded markers (e.g. a multi-MP3 book that would otherwise become
+	// one fake chapter per file). Optional; nil disables the network fallback.
+	ChapterProvider ChapterProvider
+}
+
+// ChapterProvider fetches authored chapter markers for an audiobook from an
+// external source (Audnexus/Audible). Implemented in the metadata package and
+// injected here so the scanner keeps no dependency on metadata providers.
+type ChapterProvider interface {
+	// Chapters returns book-global chapters (Start/EndSeconds in fractional
+	// seconds) for the given lookup, along with the provenance the scanner needs
+	// to log and persist WHY a book did or did not get external chapters.
+	Chapters(ctx context.Context, lookup ChapterLookup) ChapterResult
+}
+
+// ChapterResult is the outcome of one ChapterProvider lookup.
+//
+// The provider used to return a bare []AudioChapter, which made every failure
+// mode — no ASIN, a network error, a wrong-edition runtime mismatch — look
+// identical to "no provider configured": the scanner could only silently keep
+// whatever the files yielded. That is the swallow this type exists to end.
+// Chapters is populated ONLY when Outcome is ChapterApplied; otherwise the
+// scanner keeps its file-derived chapters but logs Outcome+Detail so a degraded
+// book is visible instead of quietly wrong.
+type ChapterResult struct {
+	Chapters []catalog.AudioChapter
+	ASIN     string         // ASIN the chapters were resolved from (persisted as provenance)
+	Source   string         // provenance label for applied chapters, e.g. "audnexus"
+	Outcome  ChapterOutcome // machine-readable outcome, for logs/metrics
+	Detail   string         // human-readable detail ("asin=B0… confidence=0.91", "status 503")
+}
+
+// ChapterOutcome enumerates why a ChapterProvider did or did not apply chapters.
+type ChapterOutcome string
+
+const (
+	ChapterApplied       ChapterOutcome = "applied"        // verified chapters returned
+	ChapterNoASIN        ChapterOutcome = "no-asin"        // could not identify the book on Audible
+	ChapterLowConfidence ChapterOutcome = "low-confidence" // search hit(s), none verified well enough
+	ChapterNoChapters    ChapterOutcome = "no-chapters"    // ASIN resolved but the source has no markers
+	ChapterRuntimeReject ChapterOutcome = "runtime-reject" // markers' runtime disagreed with the files
+	ChapterError         ChapterOutcome = "error"          // network/HTTP/decoding failure
+)
+
+// ChapterSourceAudnexus labels chapters sourced from Audnexus/Audible.
+const ChapterSourceAudnexus = "audnexus"
+
+// ChapterLookup is the identifying information the scanner hands a
+// ChapterProvider. ASIN is the strongest signal; title/author let the provider
+// fall back to a catalog search. DurationSeconds lets it reject a match whose
+// runtime is wildly different from the files on disk.
+type ChapterLookup struct {
+	ASIN            string
+	Title           string
+	Author          string
+	DurationSeconds float64
 }
 
 type Scanner struct {
@@ -51,6 +108,7 @@ type Scanner struct {
 	autoImportPlaylists bool
 	externalScanner     bool
 	useFFprobeForScan   bool
+	chapterProvider     ChapterProvider
 	activeScan          *scanAccumulator
 	onWalkProgress      func(int)
 	onActivity          func(string)
@@ -79,6 +137,7 @@ func NewWithOptions(db *sql.DB, options Options) *Scanner {
 		autoImportPlaylists: options.AutoImportPlaylists,
 		externalScanner:     options.ExternalScanner,
 		useFFprobeForScan:   options.UseFFprobeForScan,
+		chapterProvider:     options.ChapterProvider,
 	}
 }
 

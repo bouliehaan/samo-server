@@ -22,6 +22,59 @@ func New(db *sql.DB, extraRoots ...string) *Service {
 	return &Service{db: db, extraRoots: extraRoots}
 }
 
+func (s *Service) ListMediaFilesForEpisode(ctx context.Context, episodeID string) ([]MediaFile, error) {
+	if s == nil || s.db == nil {
+		return nil, ErrDisabled
+	}
+	episodeID = strings.TrimSpace(episodeID)
+	if episodeID == "" {
+		return nil, ErrNotFound
+	}
+
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT id, library_id, audiobook_id, podcast_id, track_id, episode_id, path, relative_path, file_name,
+		       mime_type, container, size_bytes, duration_seconds, modified_at
+		FROM media_files
+		WHERE episode_id = ?
+		ORDER BY relative_path, file_name, id`, episodeID)
+	if err != nil {
+		return nil, fmt.Errorf("list episode media files: %w", err)
+	}
+	defer rows.Close()
+
+	var items []MediaFile
+	for rows.Next() {
+		var (
+			item        MediaFile
+			audiobookID sql.NullString
+			podcastID   sql.NullString
+			trackID     sql.NullString
+			rowEpisode  sql.NullString
+			modifiedRaw sql.NullString
+		)
+		if err := rows.Scan(
+			&item.ID, &item.LibraryID, &audiobookID, &podcastID, &trackID, &rowEpisode,
+			&item.Path, &item.RelativePath, &item.FileName, &item.MimeType, &item.Container,
+			&item.SizeBytes, &item.DurationSeconds, &modifiedRaw,
+		); err != nil {
+			return nil, fmt.Errorf("scan episode media file: %w", err)
+		}
+		item.AudiobookID = audiobookID.String
+		item.PodcastID = podcastID.String
+		item.TrackID = trackID.String
+		item.EpisodeID = rowEpisode.String
+		item.ModifiedAt = parseTimePtr(modifiedRaw)
+		items = append(items, item)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	if len(items) == 0 {
+		return nil, ErrNotFound
+	}
+	return items, nil
+}
+
 func (s *Service) GetMediaFile(ctx context.Context, id string) (MediaFile, error) {
 	if s == nil || s.db == nil {
 		return MediaFile{}, ErrDisabled
@@ -123,7 +176,7 @@ func serveFileAt(w http.ResponseWriter, r *http.Request, path string, info os.Fi
 
 	startByte := int64(0)
 	if offsetSeconds > 0 {
-		startByte = byteOffsetForSeconds(info.Size(), durationSeconds, offsetSeconds)
+		startByte = byteOffsetForSeconds(info.Size(), effectiveDurationSeconds(durationSeconds, info.Size()), offsetSeconds)
 		if startByte > 0 {
 			w.Header().Set("X-Samo-Stream-Offset-Seconds", strconv.Itoa(offsetSeconds))
 		}
@@ -140,15 +193,9 @@ func serveFileAt(w http.ResponseWriter, r *http.Request, path string, info os.Fi
 		if remaining < 0 {
 			remaining = 0
 		}
-		if _, err := file.Seek(startByte, io.SeekStart); err != nil {
-			return fmt.Errorf("seek file: %w", err)
-		}
-		w.Header().Set("Content-Length", strconv.FormatInt(remaining, 10))
-		if r.Method == http.MethodHead {
-			return nil
-		}
-		_, err = io.Copy(w, io.LimitReader(file, remaining))
-		return err
+		section := io.NewSectionReader(file, startByte, remaining)
+		http.ServeContent(w, r, filepath.Base(path), info.ModTime(), section)
+		return nil
 	}
 
 	http.ServeContent(w, r, filepath.Base(path), info.ModTime(), file)
@@ -163,6 +210,20 @@ func byteOffsetForSeconds(size int64, durationSeconds, offsetSeconds int) int64 
 		return 0
 	}
 	return size * int64(offsetSeconds) / int64(durationSeconds)
+}
+
+func effectiveDurationSeconds(durationSeconds int, sizeBytes int64) int {
+	if durationSeconds > 0 {
+		return durationSeconds
+	}
+	if sizeBytes <= 0 {
+		return 0
+	}
+	estimate := int(sizeBytes / 16_000)
+	if estimate < 1 {
+		return 0
+	}
+	return estimate
 }
 
 func mimeTypeForPath(path, container string) string {

@@ -96,6 +96,19 @@ type CachedFile struct {
 	SizeBytes   int64
 }
 
+// Summary describes on-disk enclosure cache usage.
+type Summary struct {
+	Enabled      bool  `json:"enabled"`
+	EpisodeCount int   `json:"episodeCount"`
+	TotalBytes   int64 `json:"totalBytes"`
+}
+
+// ClearResult reports how much cache was removed by ClearAll.
+type ClearResult struct {
+	EpisodesRemoved int   `json:"episodesRemoved"`
+	BytesFreed      int64 `json:"bytesFreed"`
+}
+
 func (s *Service) Lookup(ctx context.Context, episodeID, enclosureURL string) (CachedFile, bool, error) {
 	if s == nil || s.db == nil || !s.enabled {
 		return CachedFile{}, false, nil
@@ -160,6 +173,78 @@ func (s *Service) EnsureCached(ctx context.Context, episode catalog.PodcastEpiso
 	}()
 
 	return s.download(ctx, episodeID, enclosureURL, episode.EnclosureType)
+}
+
+func (s *Service) Summary(ctx context.Context) (Summary, error) {
+	if s == nil || !s.enabled {
+		return Summary{}, nil
+	}
+	if s.db == nil {
+		return Summary{}, ErrDisabled
+	}
+	var count int
+	var total int64
+	err := s.db.QueryRowContext(ctx, `
+		SELECT COUNT(*), COALESCE(SUM(size_bytes), 0)
+		FROM podcast_episode_cache`).Scan(&count, &total)
+	if err != nil {
+		return Summary{}, fmt.Errorf("summarize podcast cache: %w", err)
+	}
+	return Summary{
+		Enabled:      true,
+		EpisodeCount: count,
+		TotalBytes:   total,
+	}, nil
+}
+
+func (s *Service) ClearAll(ctx context.Context) (ClearResult, error) {
+	if s == nil || s.db == nil || !s.enabled {
+		return ClearResult{}, ErrDisabled
+	}
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT episode_id, cache_path, size_bytes
+		FROM podcast_episode_cache`)
+	if err != nil {
+		return ClearResult{}, fmt.Errorf("list podcast cache rows: %w", err)
+	}
+	candidates, err := scanCacheCandidates(rows)
+	if err != nil {
+		return ClearResult{}, err
+	}
+	var result ClearResult
+	for _, row := range candidates {
+		if err := s.removeCacheRow(ctx, row.episodeID, row.cachePath); err != nil {
+			return result, err
+		}
+		result.EpisodesRemoved++
+		if row.sizeBytes > 0 {
+			result.BytesFreed += row.sizeBytes
+		}
+	}
+	if err := s.removeLeftoverCacheFiles(); err != nil {
+		return result, err
+	}
+	return result, nil
+}
+
+func (s *Service) removeLeftoverCacheFiles() error {
+	if s == nil || strings.TrimSpace(s.cacheDir) == "" {
+		return nil
+	}
+	entries, err := os.ReadDir(s.cacheDir)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return fmt.Errorf("read podcast cache directory: %w", err)
+	}
+	for _, entry := range entries {
+		if entry.IsDir() {
+			continue
+		}
+		_ = os.Remove(filepath.Join(s.cacheDir, entry.Name()))
+	}
+	return nil
 }
 
 func (s *Service) Evict(ctx context.Context, episodeID string) error {
@@ -257,9 +342,7 @@ func (s *Service) download(ctx context.Context, episodeID, enclosureURL, fallbac
 		_ = os.Remove(tmpPath)
 		return fmt.Errorf("finalize cache file: %w", err)
 	}
-	if strings.TrimSpace(contentType) == "" {
-		contentType = strings.TrimSpace(fallbackType)
-	}
+	contentType = preferAudioContentType(contentType, fallbackType)
 	if existing, found, err := loadCacheRow(ctx, s.db, episodeID); err != nil {
 		return err
 	} else if found && strings.TrimSpace(existing.CachePath) != "" && existing.CachePath != cachePath {
@@ -311,4 +394,32 @@ func extensionForURL(rawURL, contentType string) string {
 	default:
 		return ".audio"
 	}
+}
+
+func preferAudioContentType(fetched, fallback string) string {
+	fetched = strings.TrimSpace(fetched)
+	fallback = strings.TrimSpace(fallback)
+	if isAudioContentType(fetched) {
+		return fetched
+	}
+	if isAudioContentType(fallback) {
+		return fallback
+	}
+	if fetched == "" {
+		return fallback
+	}
+	return fetched
+}
+
+func isAudioContentType(contentType string) bool {
+	contentType = strings.ToLower(strings.TrimSpace(contentType))
+	if contentType == "" {
+		return false
+	}
+	if strings.HasPrefix(contentType, "text/") || strings.Contains(contentType, "html") {
+		return false
+	}
+	return strings.HasPrefix(contentType, "audio/") ||
+		strings.Contains(contentType, "mpeg") ||
+		strings.Contains(contentType, "ogg")
 }

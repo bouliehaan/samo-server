@@ -57,9 +57,11 @@ type PodcastMetadata struct {
 // PodcastEpisode is one episode of a podcast show. Backed by the
 // `podcast_episodes` table.
 type PodcastEpisode struct {
-	ID              string         `json:"id"`
-	LibraryID       string         `json:"libraryId,omitempty"`
-	PodcastID       string         `json:"podcastId"`
+	ID        string `json:"id"`
+	LibraryID string `json:"libraryId,omitempty"`
+	PodcastID string `json:"podcastId"`
+	/** Show title for list/detail payloads (derived from the parent podcast). */
+	PodcastTitle    string         `json:"podcastTitle,omitempty"`
 	Title           string         `json:"title"`
 	Subtitle        string         `json:"subtitle,omitempty"`
 	Description     string         `json:"description,omitempty"`

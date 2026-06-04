@@ -192,12 +192,58 @@ func (s *Scanner) persistAudiobookGroup(ctx context.Context, library Library, ro
 
 	if len(probes) > 0 || s.groupNeedsProbe(group.Files) {
 		chapters := flattenBookChapters(probes)
+		source := chapterSourceEmbedded
 		if len(chapters) == 0 {
-			chapters = readCueChapters(group.Root, probes)
+			if cue := readCueChapters(group.Root, probes); len(cue) > 0 {
+				chapters, source = cue, chapterSourceCue
+			} else {
+				source = chapterSourceNone
+			}
+		} else if isOneChapterPerFile(chapters, probes) {
+			source = chapterSourceFile
 		}
-		// Always rewrite chapter rows on a successful probe so stale OverDrive
-		// markers from older scans do not linger in the API.
+
+		// Audible-authoritative chapters. When we can VERIFY an Audible edition
+		// (title + author + runtime), its authored markers REPLACE whatever the
+		// files carried — Audible is the source of truth, not a last resort. When
+		// no match verifies we keep the file chapters, but we ALWAYS log the
+		// outcome so a book that fell back is visible, never silently wrong.
+		var asin string
+		var syncedAt *time.Time
+		// Real in-file markers (embedded chapter atoms or a .cue sidecar) are
+		// positions in the ACTUAL audio, so they cannot drift. Audnexus markers
+		// are timed against the Audible master edition; when they REPLACE real
+		// markers they reintroduce a cumulative offset that grows the deeper you
+		// get — the "first chapters are fine, then it drifts further and further
+		// off" bug. So Audnexus is consulted ONLY when the files gave us nothing
+		// navigable (a whole-book or one-chapter-per-file degenerate layout).
+		// This mirrors Audiobookshelf, which trusts the embedded chapters and
+		// uses an Audnexus lookup only to FILL IN chapters that aren't on disk.
+		fileChaptersAreReal := source == chapterSourceEmbedded || source == chapterSourceCue
+		if s.chapterProvider != nil && !fileChaptersAreReal {
+			result := s.externalChaptersSafe(ctx, item, duration)
+			if result.Outcome == ChapterApplied && len(result.Chapters) > 0 {
+				chapters = fixChapterEndTimes(result.Chapters, float64(duration))
+				source, asin = result.Source, result.ASIN
+				now := time.Now().UTC()
+				syncedAt = &now
+				log.Printf("scanner: audiobook %q: applied %d Audnexus chapter(s) (%s)",
+					group.Root, len(chapters), result.Detail)
+			} else {
+				log.Printf("scanner: audiobook %q: kept %s chapters — Audnexus did not apply: %s (%s)",
+					group.Root, source, result.Outcome, result.Detail)
+			}
+		} else if s.chapterProvider != nil {
+			log.Printf("scanner: audiobook %q: kept %d real in-file %s chapter(s); Audnexus not consulted (on-disk markers are authoritative)",
+				group.Root, len(chapters), source)
+		}
+
+		// Always rewrite chapter rows on a successful probe so stale markers from
+		// older scans do not linger in the API, and record where they came from.
 		if err := s.replaceAudiobookChapters(ctx, item.ID, chapters); err != nil {
+			return err
+		}
+		if err := s.setAudiobookChapterProvenance(ctx, item.ID, source, asin, syncedAt); err != nil {
 			return err
 		}
 	}
@@ -439,12 +485,18 @@ func seriesRefsFromTags(tags catalog.Tags) []catalog.SeriesRef {
 	return refs
 }
 
+// flattenBookChapters projects every file's chapters onto the book-global
+// timeline. The running offset accumulates each file's *fractional* duration
+// (millisecond-precise when ffprobe supplied it) instead of whole seconds, so a
+// 30-file book no longer drifts up to ~15s by the final chapter. Files with no
+// embedded chapters contribute one chapter spanning the whole file.
 func flattenBookChapters(probes []probedFile) []catalog.AudioChapter {
 	var chapters []catalog.AudioChapter
-	offset := 0
+	offset := 0.0
 	for _, probe := range probes {
+		fileDuration := probeDurationSeconds(probe)
 		if len(probe.Chapters) == 0 {
-			end := offset + probe.AudioFile.DurationSeconds
+			end := offset + fileDuration
 			if end <= offset {
 				end = offset + 1
 			}
@@ -464,7 +516,7 @@ func flattenBookChapters(probes []probedFile) []catalog.AudioChapter {
 			chapter.EndSeconds += offset
 			chapters = append(chapters, chapter)
 		}
-		offset += probe.AudioFile.DurationSeconds
+		offset += fileDuration
 	}
 	return normalizeAudiobookChapters(probes, chapters)
 }

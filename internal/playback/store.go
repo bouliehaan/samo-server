@@ -118,8 +118,9 @@ func applyPatch(current State, patch PatchInput) State {
 	}
 	if patch.Favorite != nil {
 		current.Favorite = *patch.Favorite
-		// Keep starred in sync with favorite so Subsonic star and Samo fav
-		// represent one concept in the UI.
+		// Mirror the legacy `Starred` flag onto favorite so the residual field
+		// stays consistent until it is removed — Subsonic, its only consumer,
+		// has been stripped.
 		current.Starred = *patch.Favorite
 	}
 	if patch.ProgressSeconds != nil {

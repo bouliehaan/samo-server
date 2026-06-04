@@ -41,6 +41,7 @@ func (s *Service) ListMusicArtistsSorted(options MusicListOptions) Page[MusicArt
 	}
 	s.mu.RUnlock()
 
+	items = filterUpdatedSince(items, options.Page.UpdatedSince, func(a MusicArtist) *time.Time { return a.UpdatedAt })
 	applyArtistPlaybackOverlay(items, options.Playback.ArtistStates, tracks, options.Playback.TrackStates)
 	sortMusicArtistList(items, options)
 	return paginate(items, options.Page)
@@ -55,6 +56,7 @@ func (s *Service) ListMusicAlbumsSorted(options MusicListOptions) Page[MusicAlbu
 	}
 	s.mu.RUnlock()
 
+	items = filterUpdatedSince(items, options.Page.UpdatedSince, func(a MusicAlbum) *time.Time { return a.UpdatedAt })
 	applyAlbumPlaybackOverlay(items, options.Playback.AlbumStates, tracks, options.Playback.TrackStates)
 	sortMusicAlbumList(items, options)
 	return paginate(items, options.Page)
@@ -65,6 +67,7 @@ func (s *Service) ListMusicTracksSorted(options MusicListOptions) Page[MusicTrac
 	items := append([]MusicTrack(nil), s.musicTracks...)
 	s.mu.RUnlock()
 
+	items = filterUpdatedSince(items, options.Page.UpdatedSince, func(t MusicTrack) *time.Time { return t.UpdatedAt })
 	applyTrackPlaybackOverlay(items, options.Playback.TrackStates)
 	sortMusicTrackList(items, options)
 	return paginate(items, options.Page)

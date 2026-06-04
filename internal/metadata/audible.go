@@ -3,11 +3,13 @@ package metadata
 import (
 	"context"
 	"fmt"
+	"math"
 	"net/http"
 	"net/url"
 	"regexp"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/bouliehaan/samo-server/internal/catalog"
 )
@@ -38,12 +40,29 @@ type AudibleProvider struct {
 }
 
 func NewAudibleProvider(client *http.Client) *AudibleProvider {
+	// Callers (e.g. the scan subprocess wiring) pass nil to mean "use a
+	// default client". Without this guard every Audnexus request did
+	// `nil.Do(req)` and panicked the whole scan the moment an audiobook needed
+	// the chapter fallback.
+	if client == nil {
+		client = &http.Client{Timeout: 30 * time.Second}
+	}
 	return &AudibleProvider{
 		client:         client,
 		audnexusURL:    "https://api.audnex.us",
 		catalogBaseURL: "https://api.audible",
 		region:         "us",
 	}
+}
+
+// withRegion overrides the Audible/Audnexus region used for catalog search and
+// chapter lookups (default "us"). An empty value is ignored so callers can pass
+// an unset config field straight through.
+func (p *AudibleProvider) withRegion(region string) *AudibleProvider {
+	if r := strings.ToLower(strings.TrimSpace(region)); r != "" {
+		p.region = r
+	}
+	return p
 }
 
 func (p *AudibleProvider) Name() string {
@@ -97,9 +116,27 @@ func (p *AudibleProvider) Search(ctx context.Context, request SearchRequest) ([]
 		if err != nil {
 			continue
 		}
-		results = append(results, p.mapBook(book, 100-index))
+		results = append(results, p.mapBook(book, audibleSearchScore(book, title, request.Author, index)))
 	}
 	return results, nil
+}
+
+// audibleSearchScore ranks a catalog hit by how well it actually matches the
+// requested title/author rather than by Audible's raw return order — which is
+// all the old `100-index` conveyed, letting whatever the marketplace listed
+// first win. It reuses the verified-match similarity helpers; because their
+// tokenizer keeps only [a-z0-9] runs, a foreign-script edition (e.g. the Russian
+// "Дыхание" surfaced for an English "Breath" search) tokenizes to nothing and
+// scores ~0, so the matching English edition is no longer buried beneath a
+// localized one the catalog happened to relevance-rank first. Audible's own
+// ordering is kept only as a gentle tiebreaker between equally good matches.
+func audibleSearchScore(book audnexusBook, title, author string, order int) int {
+	titleSim := titleSimilarity(book.Title, title)
+	quality := titleSim
+	if authorSim, haveAuthor := authorSimilarity(book.Authors, author); haveAuthor {
+		quality = 0.75*titleSim + 0.25*authorSim
+	}
+	return int(math.Round(quality*1000)) - order
 }
 
 func audibleLookupASINs(request SearchRequest) []string {

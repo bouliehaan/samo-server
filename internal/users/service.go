@@ -112,35 +112,6 @@ func (s *Service) AuthenticateCredentials(ctx context.Context, username, passwor
 	return Principal{User: user}, nil
 }
 
-func (s *Service) AuthenticateSubsonic(ctx context.Context, username, credential, tokenAuth, salt string) (Principal, error) {
-	if !s.Enabled() {
-		return Principal{}, ErrDisabled
-	}
-	username = strings.TrimSpace(username)
-	credential = strings.TrimSpace(credential)
-	if username == "" {
-		return Principal{}, ErrUnauthorized
-	}
-	user, passwordHash, err := loadUserByUsername(ctx, s.db, username)
-	if err != nil {
-		return Principal{}, ErrUnauthorized
-	}
-	if tokenAuth != "" && salt != "" {
-		if verifyTokenAuth(credential, salt, tokenAuth) || verifyTokenAuth(s.legacyAPIToken, salt, tokenAuth) {
-			return Principal{User: user}, nil
-		}
-	}
-	if credential != "" {
-		if verifyPassword(passwordHash, credential) {
-			return Principal{User: user}, nil
-		}
-		if principal, err := s.AuthenticateToken(ctx, credential); err == nil && principal.User.ID == user.ID {
-			return principal, nil
-		}
-	}
-	return Principal{}, ErrUnauthorized
-}
-
 func (s *Service) Get(ctx context.Context, id string) (User, error) {
 	return loadUserByID(ctx, s.db, strings.TrimSpace(id))
 }

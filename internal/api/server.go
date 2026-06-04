@@ -29,7 +29,6 @@ import (
 	"github.com/bouliehaan/samo-server/internal/radio"
 	"github.com/bouliehaan/samo-server/internal/search"
 	"github.com/bouliehaan/samo-server/internal/sources"
-	"github.com/bouliehaan/samo-server/internal/subsonic"
 	"github.com/bouliehaan/samo-server/internal/users"
 )
 
@@ -197,6 +196,7 @@ func (s *Server) routes() {
 	s.handleAPI("GET /api/v1/server/activity", s.serverActivity)
 	s.handleAPI("POST /api/v1/catalog/reload", s.postCatalogReload)
 	s.handleAPI("GET /api/v1/catalog/manifest", s.catalogManifest)
+	s.handleAPI("GET /api/v1/catalog/sync/manifest", s.catalogSyncManifest)
 
 	s.handleAPI("GET /api/v1/libraries", s.listLibraries)
 	s.handleAPI("GET /api/v1/libraries/{id}", s.getLibrary)
@@ -250,6 +250,8 @@ func (s *Server) routes() {
 	s.handleAPI("DELETE /api/v1/podcasts/shows/{id}", s.deletePodcastShow)
 	s.handleAPI("GET /api/v1/podcasts/shows/{id}/episodes", s.listPodcastShowEpisodes)
 	s.handleAPI("GET /api/v1/podcasts/episodes/{id}/stream", s.streamPodcastEpisode)
+	s.handleAPI("GET /api/v1/podcasts/cache", s.getPodcastCacheSummary)
+	s.handleAPI("DELETE /api/v1/podcasts/cache", s.clearPodcastCache)
 	s.handleAPI("GET /api/v1/podcasts/episodes/{id}/cache", s.getPodcastEpisodeCache)
 	s.handleAPI("POST /api/v1/podcasts/episodes/{id}/cache", s.cachePodcastEpisode)
 	s.handleAPI("DELETE /api/v1/podcasts/episodes/{id}/cache", s.deletePodcastEpisodeCache)
@@ -373,20 +375,6 @@ func (s *Server) routes() {
 	// header. Same pattern as /api/v1/music/tracks/{id}/stream.
 	s.mux.HandleFunc("GET /channels/{id}/playlist.m3u", s.requireUser(s.channelPlaylist))
 	s.mux.HandleFunc("GET /channels/{id}/stream", s.requireUser(s.channelStream))
-
-	subsonicHandler := subsonic.New(subsonic.Options{
-		Catalog:       s.catalog,
-		Search:        s.search,
-		Libraries:     s.libraries,
-		Files:         s.files,
-		Playback:      s.playback,
-		LastFM:        s.lastfm,
-		ArtistImages:  s.artistImages,
-		Users:         s.users,
-		APIToken:      s.apiToken,
-		ServerVersion: "0.1.0",
-	})
-	s.mux.HandleFunc("GET /rest/{action}", subsonicHandler.ServeHTTP)
 }
 
 func (s *Server) handleAPI(pattern string, handler http.HandlerFunc) {

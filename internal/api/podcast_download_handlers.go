@@ -61,6 +61,38 @@ func (s *Server) getPodcastEpisodeCache(w http.ResponseWriter, r *http.Request) 
 	writeJSON(w, http.StatusOK, s.podcastCache.EpisodeCacheStatus(r.Context(), episode))
 }
 
+func (s *Server) getPodcastCacheSummary(w http.ResponseWriter, r *http.Request) {
+	if _, ok := s.requireAdmin(w, r); !ok {
+		return
+	}
+	if s.podcastCache == nil || !s.podcastCache.Enabled() {
+		writeJSON(w, http.StatusOK, podcastcache.Summary{Enabled: false})
+		return
+	}
+	summary, err := s.podcastCache.Summary(r.Context())
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, summary)
+}
+
+func (s *Server) clearPodcastCache(w http.ResponseWriter, r *http.Request) {
+	if _, ok := s.requireAdmin(w, r); !ok {
+		return
+	}
+	if s.podcastCache == nil || !s.podcastCache.Enabled() {
+		writeError(w, http.StatusServiceUnavailable, "podcast cache is not enabled")
+		return
+	}
+	result, err := s.podcastCache.ClearAll(r.Context())
+	if err != nil {
+		writePodcastCacheError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, result)
+}
+
 func (s *Server) deletePodcastEpisodeCache(w http.ResponseWriter, r *http.Request) {
 	if _, ok := s.requireAdmin(w, r); !ok {
 		return

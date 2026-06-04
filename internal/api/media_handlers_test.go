@@ -98,15 +98,22 @@ func TestStreamAudiobookSelectsFileFromPlaybackProgress(t *testing.T) {
 	if rec.Code != http.StatusOK && rec.Code != http.StatusPartialContent {
 		t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
 	}
+	// Book-global progress (12s) lands inside file-2's span [10s,15s), so file-2
+	// is the file to serve.
 	if got := rec.Header().Get("X-Samo-Media-File-Id"); got != "file-2" {
 		t.Fatalf("media file header = %q, want file-2", got)
 	}
-	if got := rec.Header().Get("X-Samo-Stream-Offset-Seconds"); got != "2" {
-		t.Fatalf("offset header = %q, want 2", got)
+	// New contract: the file is served WHOLE (no time->byte slicing). The client
+	// seeks locally; we only tell it where the file starts on the book timeline.
+	if got := rec.Header().Get("X-Samo-Stream-Offset-Seconds"); got != "" {
+		t.Fatalf("offset header = %q, want empty (whole-file serving)", got)
+	}
+	if got := rec.Header().Get("X-Samo-Stream-File-Offset-Ms"); got != "10000" {
+		t.Fatalf("file-offset header = %q, want 10000 (file-2 starts at 10s)", got)
 	}
 	part2Payload := []byte("abcdefghij")
-	if !bytes.Equal(rec.Body.Bytes(), part2Payload[4:]) {
-		t.Fatalf("body = %q, want tail of part-2 from resume offset", rec.Body.Bytes())
+	if !bytes.Equal(rec.Body.Bytes(), part2Payload) {
+		t.Fatalf("body = %q, want the whole of part-2", rec.Body.Bytes())
 	}
 }
 

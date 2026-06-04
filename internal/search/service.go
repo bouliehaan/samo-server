@@ -55,7 +55,7 @@ func (s *Service) SearchPodcasts(query PodcastQuery, overlay PlaybackOverlay) ca
 	return s.podcasts.search(query, overlay)
 }
 
-// SearchMusicText is a compatibility helper for text-only callers (Subsonic, legacy tests).
+// SearchMusicText is a compatibility helper for text-only callers (legacy tests).
 func (s *Service) SearchMusicText(text string, page catalog.PageRequest) catalog.MusicSearchResults {
 	return s.SearchMusic(MusicQuery{Text: text, Page: page, Sort: SortRelevance}, PlaybackOverlay{})
 }

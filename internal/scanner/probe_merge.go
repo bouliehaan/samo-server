@@ -15,6 +15,11 @@ func mergeProbeInfo(native, ff probeInfo, includeChapters bool) probeInfo {
 	if ff.AudioFile.DurationSeconds > 0 {
 		af.DurationSeconds = ff.AudioFile.DurationSeconds
 	}
+	// ffprobe is the only probe path with sub-second precision; prefer its
+	// millisecond duration so book-global chapter offsets stay exact.
+	if ff.AudioFile.DurationMs > 0 {
+		af.DurationMs = ff.AudioFile.DurationMs
+	}
 	if ff.AudioFile.Bitrate > 0 {
 		af.Bitrate = ff.AudioFile.Bitrate
 	}

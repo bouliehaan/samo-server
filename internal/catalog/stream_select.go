@@ -29,6 +29,77 @@ type StreamTarget struct {
 	GlobalSeconds int    `json:"globalSeconds,omitempty"`
 }
 
+// AudiobookStreamTarget is the file an audiobook stream should serve. Unlike
+// StreamTarget it carries no within-file byte offset — audiobook files are
+// always served whole and the client seeks locally. StartOffsetMs is the file's
+// position on the book-global timeline so the client can map player-time to
+// book-time.
+type AudiobookStreamTarget struct {
+	FileID        string
+	StartOffsetMs int64
+}
+
+// SelectAudiobookFile picks which underlying file an audiobook stream should
+// serve, without ever computing a within-file offset. Order of precedence:
+//
+//  1. explicit mediaFileId (the client knows exactly which file it wants)
+//  2. the file whose book-global span contains progressSeconds (resume / a
+//     book-time seek that crossed a file boundary)
+//  3. the first file
+//
+// The whole file is then served with HTTP range support; the player seeks.
+func SelectAudiobookFile(files []AudioFile, playback PlaybackState, query StreamSelectQuery) (AudiobookStreamTarget, error) {
+	if len(files) == 0 {
+		return AudiobookStreamTarget{}, fmt.Errorf("no audio files available")
+	}
+	sorted := assignStreamOffsets(SortAudioFiles(files))
+
+	if query.MediaFileID != "" {
+		for _, file := range sorted {
+			if file.ID == query.MediaFileID {
+				return AudiobookStreamTarget{FileID: file.ID, StartOffsetMs: fileStartOffsetMs(file)}, nil
+			}
+		}
+		return AudiobookStreamTarget{}, fmt.Errorf("mediaFileId does not belong to this item")
+	}
+
+	progress := playback.ProgressSeconds
+	if query.HasProgressSeconds {
+		progress = query.ProgressSeconds
+	}
+	if progress > 0 {
+		if file, ok := audiobookFileForBookSeconds(sorted, float64(progress)); ok {
+			return AudiobookStreamTarget{FileID: file.ID, StartOffsetMs: fileStartOffsetMs(file)}, nil
+		}
+	}
+
+	first := sorted[0]
+	return AudiobookStreamTarget{FileID: first.ID, StartOffsetMs: fileStartOffsetMs(first)}, nil
+}
+
+// audiobookFileForBookSeconds returns the file whose [startOffset, startOffset
+// + duration) span contains the given book-global second.
+func audiobookFileForBookSeconds(sorted []AudioFile, bookSeconds float64) (AudioFile, bool) {
+	for _, file := range sorted {
+		start := file.StartOffsetSeconds
+		end := start + audioFileDurationSeconds(file)
+		if bookSeconds < end {
+			return file, true
+		}
+	}
+	if len(sorted) > 0 {
+		return sorted[len(sorted)-1], true
+	}
+	return AudioFile{}, false
+}
+
+func fileStartOffsetMs(file AudioFile) int64 {
+	if file.StartOffsetSeconds <= 0 {
+		return 0
+	}
+	return int64(file.StartOffsetSeconds*1000 + 0.5)
+}
+
 // StreamSelectQueryFromRequest parses stream shortcut query parameters.
 func StreamSelectQueryFromRequest(r *http.Request) StreamSelectQuery {
 	if r == nil {

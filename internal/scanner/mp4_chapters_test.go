@@ -7,14 +7,26 @@ import (
 	"testing"
 )
 
+// chplEntry encodes one { uint64 start (100ns units), pascal-string title } record.
+func chplEntry(startSeconds int, title string) []byte {
+	out := make([]byte, 8)
+	binary.BigEndian.PutUint64(out, uint64(startSeconds)*chplTimeUnitsPerSecond)
+	out = append(out, byte(len(title)))
+	return append(out, []byte(title)...)
+}
+
+// chplPayloadV1 builds a version-1 'chpl' payload: version+flags (4) + reserved
+// (4) + chapter count (1) + entries — the layout ffmpeg/Apple actually write.
+func chplPayloadV1(entries ...[]byte) []byte {
+	payload := []byte{0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, byte(len(entries))}
+	for _, entry := range entries {
+		payload = append(payload, entry...)
+	}
+	return payload
+}
+
 func TestParseChplPayload(t *testing.T) {
-	payload := make([]byte, 4+8+1+5+8+1+6)
-	copy(payload[4:4+8], []byte{0, 0, 0, 0, 0, 0, 3, 232}) // 1000 ms
-	payload[12] = 5
-	copy(payload[13:18], "Intro")
-	copy(payload[18:18+8], []byte{0, 0, 0, 0, 0, 0, 31, 64}) // 8000 ms
-	payload[26] = 6
-	copy(payload[27:33], "Part 1")
+	payload := chplPayloadV1(chplEntry(1, "Intro"), chplEntry(8, "Part 1"))
 
 	chapters, err := parseChplPayload(payload)
 	if err != nil {
@@ -24,10 +36,25 @@ func TestParseChplPayload(t *testing.T) {
 		t.Fatalf("chapters = %d, want 2", len(chapters))
 	}
 	if chapters[0].StartSeconds != 1 || chapters[1].StartSeconds != 8 {
-		t.Fatalf("starts = %d,%d want 1,8", chapters[0].StartSeconds, chapters[1].StartSeconds)
+		t.Fatalf("starts = %v,%v want 1,8", chapters[0].StartSeconds, chapters[1].StartSeconds)
 	}
 	if chapters[0].EndSeconds != 8 {
-		t.Fatalf("first end = %d, want 8", chapters[0].EndSeconds)
+		t.Fatalf("first end = %v, want 8", chapters[0].EndSeconds)
+	}
+}
+
+// TestParseChplPayloadVersion0 covers the version-0 layout, where the chapter
+// count directly follows version+flags with no reserved field.
+func TestParseChplPayloadVersion0(t *testing.T) {
+	payload := []byte{0x00, 0x00, 0x00, 0x00, 0x01} // version 0 + flags + count=1
+	payload = append(payload, chplEntry(3, "Only")...)
+
+	chapters, err := parseChplPayload(payload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(chapters) != 1 || chapters[0].StartSeconds != 3 {
+		t.Fatalf("got %+v, want one chapter at 3s", chapters)
 	}
 }
 
@@ -35,10 +62,7 @@ func TestMp4ChaptersFromFileFindsChplInMoov(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "book.m4b")
 
-	chplPayload := make([]byte, 4+8+1+4)
-	binary.BigEndian.PutUint64(chplPayload[4:12], 528_000) // 8:48
-	chplPayload[12] = 4
-	copy(chplPayload[13:17], "Ch 1")
+	chplPayload := chplPayloadV1(chplEntry(528, "Ch 1")) // 8:48
 	chpl := make([]byte, 8+len(chplPayload))
 	binary.BigEndian.PutUint32(chpl[0:4], uint32(len(chpl)))
 	copy(chpl[4:8], []byte("chpl"))
@@ -72,6 +96,6 @@ func TestMp4ChaptersFromFileFindsChplInMoov(t *testing.T) {
 		t.Fatalf("chapters = %d, want 1", len(chapters))
 	}
 	if chapters[0].StartSeconds != 528 {
-		t.Fatalf("start = %d, want 528 (8:48)", chapters[0].StartSeconds)
+		t.Fatalf("start = %v, want 528 (8:48)", chapters[0].StartSeconds)
 	}
 }

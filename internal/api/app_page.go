@@ -1745,6 +1745,13 @@ const appJS = `
     return "/api/v1/podcasts/episodes/" + encodeURIComponent(id) + "/stream" + streamQuery();
   }
 
+  function podcastEpisodeStreamURLAt(id, atSeconds) {
+    const base = podcastEpisodeStreamURL(id);
+    const at = Math.max(0, Math.floor(atSeconds || 0));
+    if (at <= 0) return base;
+    return base + (base.includes("?") ? "&" : "?") + "offsetSeconds=" + at;
+  }
+
   function libraryKindLabel(lib) {
     if (!lib) return "UNKNOWN";
     switch (lib.kind) {
@@ -2614,9 +2621,29 @@ const appJS = `
     });
   }
 
+  function playbackGlobalSeconds(target) {
+    if (!target) return 0;
+    if (target.kind === "audiobook" || target.kind === "podcast-episode") {
+      return (target.globalBase || 0) + Math.floor(audio.currentTime || 0);
+    }
+    return Math.floor(audio.currentTime || 0);
+  }
+
+  function flushPlaybackProgress() {
+    if (!playerTarget) return;
+    const now = playbackGlobalSeconds(playerTarget);
+    if (now <= 0) return;
+    if (playerTarget.kind === "audiobook") {
+      patchPlayback("audiobook", playerTarget.id, { progressSeconds: now, touchLastPositionAt: true }).catch(() => {});
+    } else if (playerTarget.kind === "music-track" || playerTarget.kind === "podcast-episode") {
+      patchPlayback(playerTarget.kind, playerTarget.id, { progressSeconds: now, touchLastPositionAt: true }).catch(() => {});
+    }
+  }
+
   function playURL(url, title, subtitle, target) {
+    flushPlaybackProgress();
     playerTarget = target || null;
-    lastProgressSync = 0;
+    lastProgressSync = playerTarget ? (playerTarget.globalBase || 0) : 0;
     playerTitle.textContent = title || "UNKNOWN";
     playerSub.textContent = subtitle || "";
     if (nowPlayingBtn && nowPlayingSub) {
@@ -2642,8 +2669,20 @@ const appJS = `
     }
   }
 
-  async function playPodcastEpisode(id, title, subtitle, duration) {
-    playURL(podcastEpisodeStreamURL(id), title || "Episode", subtitle || "Podcast", { kind: "podcast-episode", id: id, duration: duration || 0 });
+  async function playPodcastEpisode(id, title, subtitle, duration, progressSeconds) {
+    let resume = Math.max(0, Math.floor(progressSeconds || 0));
+    try {
+      const state = await api("/api/v1/playback/podcast-episode/" + encodeURIComponent(id));
+      if (state && !state.completed && state.progressSeconds != null) {
+        resume = Math.max(resume, Math.floor(state.progressSeconds || 0));
+      }
+    } catch (_) {}
+    playURL(podcastEpisodeStreamURLAt(id, resume), title || "Episode", subtitle || "Podcast", {
+      kind: "podcast-episode",
+      id: id,
+      duration: duration || 0,
+      globalBase: resume,
+    });
     try {
       await patchPlayback("podcast-episode", id, { incrementPlayCount: true, touchLastPlayedAt: true });
     } catch (err) {
@@ -2682,14 +2721,45 @@ const appJS = `
     if (playerToggle) playerToggle.setAttribute("aria-label", paused ? "Play" : "Pause");
   }
 
+  function applyStreamResumeSeek() {
+    if (!playerTarget) return;
+    const base = playerTarget.globalBase || 0;
+    if (base <= 0) return;
+    const fileDur = isFinite(audio.duration) ? audio.duration : 0;
+    if (fileDur <= 0) return;
+    const total = playerTarget.duration || 0;
+    // Tail-only partial response: currentTime 0 already matches globalBase audibly.
+    if (total > 0 && fileDur < total * 0.85) return;
+    if (audio.currentTime >= 0.75) return;
+    const cap = total > 0 ? Math.min(base, total - 0.25) : base;
+    const target = Math.min(cap, fileDur - 0.05);
+    if (target > 0) {
+      audio.currentTime = target;
+      // Full file in the browser — position lives in currentTime only. Keeping
+      // globalBase would double-count on save (globalBase + currentTime).
+      playerTarget.globalBase = 0;
+      lastProgressSync = Math.floor(target);
+    }
+  }
+
   function refreshSeekUI() {
     if (!playerSeekBar || !playerSeekHead) return;
-    const dur = isFinite(audio.duration) ? audio.duration : 0;
-    const pct = dur > 0 ? Math.min(100, (audio.currentTime / dur) * 100) : 0;
+    const fileDur = isFinite(audio.duration) ? audio.duration : 0;
+    const globalNow =
+      playerTarget && (playerTarget.kind === "audiobook" || playerTarget.kind === "podcast-episode")
+        ? playbackGlobalSeconds(playerTarget)
+        : Math.floor(audio.currentTime || 0);
+    const totalDur =
+      playerTarget &&
+      (playerTarget.kind === "audiobook" || playerTarget.kind === "podcast-episode") &&
+      playerTarget.duration > 0
+        ? playerTarget.duration
+        : fileDur;
+    const pct = totalDur > 0 ? Math.min(100, (globalNow / totalDur) * 100) : 0;
     playerSeekBar.style.width = pct + "%";
     playerSeekHead.style.left = pct + "%";
-    if (playerTimeEl) playerTimeEl.textContent = formatClock(audio.currentTime);
-    if (playerDurationEl) playerDurationEl.textContent = formatClock(dur);
+    if (playerTimeEl) playerTimeEl.textContent = formatClock(globalNow);
+    if (playerDurationEl) playerDurationEl.textContent = formatClock(totalDur);
     if (playerSeek) playerSeek.setAttribute("aria-valuenow", String(Math.round(pct)));
   }
 
@@ -2697,9 +2767,16 @@ const appJS = `
     if (!playerSeek) return;
     const rect = playerSeek.getBoundingClientRect();
     const x = Math.max(0, Math.min(rect.width, event.clientX - rect.left));
-    const dur = isFinite(audio.duration) ? audio.duration : 0;
-    if (dur <= 0) return;
-    audio.currentTime = (x / rect.width) * dur;
+    const fileDur = isFinite(audio.duration) ? audio.duration : 0;
+    if (fileDur <= 0) return;
+    if (playerTarget && (playerTarget.kind === "audiobook" || playerTarget.kind === "podcast-episode")) {
+      const total = playerTarget.duration || fileDur;
+      const globalTarget = (x / rect.width) * total;
+      const base = playerTarget.globalBase || 0;
+      audio.currentTime = Math.max(0, Math.min(fileDur - 0.05, globalTarget - base));
+    } else {
+      audio.currentTime = (x / rect.width) * fileDur;
+    }
     refreshSeekUI();
   }
 
@@ -2714,6 +2791,7 @@ const appJS = `
 
   if (playerStop) {
     playerStop.addEventListener("click", () => {
+      flushPlaybackProgress();
       audio.pause();
       audio.currentTime = 0;
       audio.removeAttribute("src");
@@ -2761,19 +2839,26 @@ const appJS = `
 
   audio.addEventListener("play", () => setPlayerGlyph(false));
   audio.addEventListener("pause", () => setPlayerGlyph(true));
-  audio.addEventListener("loadedmetadata", refreshSeekUI);
-  audio.addEventListener("durationchange", refreshSeekUI);
+  audio.addEventListener("loadedmetadata", () => {
+    applyStreamResumeSeek();
+    refreshSeekUI();
+  });
+  audio.addEventListener("durationchange", () => {
+    applyStreamResumeSeek();
+    refreshSeekUI();
+  });
+  audio.addEventListener("canplay", applyStreamResumeSeek);
   audio.addEventListener("timeupdate", () => {
     refreshSeekUI();
     if (!playerTarget) return;
-    if (playerTarget.kind === "audiobook") {
-      const globalNow = (playerTarget.globalBase || 0) + Math.floor(audio.currentTime || 0);
+    if (playerTarget.kind === "audiobook" || playerTarget.kind === "podcast-episode") {
+      const globalNow = playbackGlobalSeconds(playerTarget);
       if (globalNow <= 0 || globalNow - lastProgressSync < 20) return;
       lastProgressSync = globalNow;
-      patchPlayback("audiobook", playerTarget.id, { progressSeconds: globalNow, touchLastPositionAt: true }).catch(() => {});
+      patchPlayback(playerTarget.kind, playerTarget.id, { progressSeconds: globalNow, touchLastPositionAt: true }).catch(() => {});
       return;
     }
-    if (playerTarget.kind !== "music-track" && playerTarget.kind !== "podcast-episode") return;
+    if (playerTarget.kind !== "music-track") return;
     const now = Math.floor(audio.currentTime || 0);
     if (now <= 0 || now - lastProgressSync < 20) return;
     lastProgressSync = now;
@@ -2799,7 +2884,16 @@ const appJS = `
       patchPlayback("audiobook", playerTarget.id, { completed: true, progressSeconds: globalNow, touchLastPlayedAt: true }).catch(() => {});
       return;
     }
-    if (playerTarget.kind !== "music-track" && playerTarget.kind !== "podcast-episode") return;
+    if (playerTarget.kind === "podcast-episode") {
+      const globalNow = playbackGlobalSeconds(playerTarget);
+      patchPlayback("podcast-episode", playerTarget.id, {
+        completed: true,
+        progressSeconds: globalNow,
+        touchLastPlayedAt: true,
+      }).catch(() => {});
+      return;
+    }
+    if (playerTarget.kind !== "music-track") return;
     patchPlayback(playerTarget.kind, playerTarget.id, { completed: true, touchLastPlayedAt: true }).catch(() => {});
   });
 
@@ -2836,7 +2930,7 @@ const appJS = `
       html += statCard("LIBRARIES", libCount);
       html += '</div>';
 
-      const recentItems = (recentlyAdded && recentlyAdded.items) || [];
+      const recentItems = ((recentlyAdded && recentlyAdded.items) || []).slice(0, 12);
       html += '<div class="section-row">';
       html += '<div class="section-label">// recently added</div>';
       if (recentItems.length > 0) {
@@ -3469,7 +3563,7 @@ const appJS = `
           progressBar(item.progress || {}, item.durationSeconds || 0) +
         '</div>' +
         '<div class="actions">' +
-          '<button class="btn primary btn-mini" data-action="play-podcast-episode" data-id="' + attr(item.id) + '" data-title="' + attr(title) + '" data-sub="Podcast episode" data-duration="' + attr(item.durationSeconds || 0) + '">PLAY</button>' +
+          '<button class="btn primary btn-mini" data-action="play-podcast-episode" data-id="' + attr(item.id) + '" data-title="' + attr(title) + '" data-sub="Podcast episode" data-duration="' + attr(item.durationSeconds || 0) + '" data-progress="' + attr((item.progress && item.progress.progressSeconds) || 0) + '">PLAY</button>' +
           downloadBtn +
           '<a class="btn ghost btn-mini" href="' + attr(podcastEpisodeStreamURL(item.id)) + '" target="_blank">OPEN</a>' +
         '</div>' +
@@ -4363,10 +4457,32 @@ const appJS = `
     return html;
   }
 
+  function formatDataSize(bytes) {
+    bytes = Number(bytes) || 0;
+    if (bytes < 1024) return bytes + " B";
+    if (bytes < 1024 * 1024) return (bytes / 1024).toFixed(1) + " KB";
+    if (bytes < 1024 * 1024 * 1024) return (bytes / (1024 * 1024)).toFixed(1) + " MB";
+    return (bytes / (1024 * 1024 * 1024)).toFixed(2) + " GB";
+  }
+
   async function settingsPodcasts() {
-    const data = await api("/api/v1/podcasts/feeds?limit=80").catch(() => ({ items: [] }));
-    const feeds = (data && data.items) || [];
+    const [feedData, cacheData] = await Promise.all([
+      api("/api/v1/podcasts/feeds?limit=80").catch(() => ({ items: [] })),
+      api("/api/v1/podcasts/cache").catch(() => ({ enabled: false })),
+    ]);
+    const feeds = (feedData && feedData.items) || [];
     let html = '<div class="panel-grid">';
+    html += '<div class="panel panel-wide">' +
+      '<div class="panel-head"><span>// enclosure cache</span></div>' +
+      '<div class="empty-state" style="margin-bottom:12px">// Samo stores downloaded RSS audio on disk before streaming. Clear this if episodes play silence or wrong audio after a server upgrade.</div>';
+    if (!cacheData || !cacheData.enabled) {
+      html += '<div class="empty-state">// podcast enclosure cache is disabled on this server</div>';
+    } else {
+      html += '<div class="empty-state" style="margin-bottom:12px">// ' +
+        (cacheData.episodeCount || 0) + ' episodes · ' + formatDataSize(cacheData.totalBytes || 0) + ' on disk</div>' +
+        '<div class="actions"><button class="btn danger" type="button" data-action="clear-podcast-cache">CLEAR ENCLOSURE CACHE</button></div>';
+    }
+    html += '</div>';
     html += '<form class="panel panel-wide settings-form" id="podcastFeedForm">' +
       '<div class="panel-head"><span>// add podcast feed</span></div>' +
       '<div class="form-grid">' +
@@ -5151,7 +5267,7 @@ const appJS = `
         await playTrack(el.dataset.id, el.dataset.title, el.dataset.sub, Number(el.dataset.duration || 0));
       } else if (action === "play-podcast-episode") {
         event.preventDefault();
-        await playPodcastEpisode(el.dataset.id, el.dataset.title, el.dataset.sub, Number(el.dataset.duration || 0));
+        await playPodcastEpisode(el.dataset.id, el.dataset.title, el.dataset.sub, Number(el.dataset.duration || 0), Number(el.dataset.progress || 0));
       } else if (action === "play-audiobook") {
         event.preventDefault();
         await playAudiobook(el.dataset.id, el.dataset.title, el.dataset.sub, Number(el.dataset.duration || 0), Number(el.dataset.progress || 0));
@@ -5329,6 +5445,15 @@ const appJS = `
         if (!confirm("Delete station " + (el.dataset.name || "") + "?")) return;
         await api("/api/v1/internet-radio/stations/" + encodeURIComponent(el.dataset.id), { method: "DELETE" });
         if (activeTab === "radio") await viewRadio();
+      } else if (action === "clear-podcast-cache") {
+        if (!confirm("Clear all cached podcast enclosure files on this server? Playback will re-fetch from the publisher URLs.")) return;
+        await withButton(el, "CLEARING...", async () => {
+          const result = await api("/api/v1/podcasts/cache", { method: "DELETE" });
+          const count = result && result.episodesRemoved != null ? result.episodesRemoved : 0;
+          setStatus("PODCAST CACHE · cleared " + count + " episode(s)");
+          settingsMode = "podcasts";
+          await viewSettings();
+        });
       } else if (action === "poll-podcasts") {
         await withButton(el, "POLLING...", async () => {
           await api("/api/v1/podcasts/feeds/poll", { method: "POST" });

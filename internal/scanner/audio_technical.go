@@ -49,6 +49,18 @@ func finalizeProbeInfo(info probeInfo) probeInfo {
 
 func finalizeAudioFile(file catalog.AudioFile) catalog.AudioFile {
 	file = catalog.NormalizeAudioFile(file)
+	// Keep the second/millisecond duration views consistent regardless of which
+	// probe path filled which field. ffprobe gives us fractional ms; native
+	// header probes only give whole seconds. Backfilling both ways means
+	// multi-file audiobooks always have a millisecond value to accumulate
+	// book-global offsets from (so late chapters stop drifting), and any
+	// consumer that still reads whole seconds keeps working.
+	if file.DurationMs <= 0 && file.DurationSeconds > 0 {
+		file.DurationMs = int64(file.DurationSeconds) * 1000
+	}
+	if file.DurationSeconds <= 0 && file.DurationMs > 0 {
+		file.DurationSeconds = int((file.DurationMs + 500) / 1000)
+	}
 	if file.Bitrate <= 0 && file.DurationSeconds > 0 && file.SizeBytes > 0 {
 		file.Bitrate = estimateBitrate(file.SizeBytes, file.DurationSeconds)
 	}

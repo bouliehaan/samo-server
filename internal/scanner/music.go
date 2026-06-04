@@ -62,7 +62,11 @@ func (s *Scanner) scanMusicFile(ctx context.Context, library Library, root strin
 	}
 	artistSortNames := splitTag(tags, "artistsort", "artist_sort", "sortname")
 	albumArtistSortNames := splitTag(tags, "albumartistsort", "album_artist_sort", "albumsort")
-	artists := musicArtistsFromNames(artistNames, splitTag(tags, "musicbrainz_artistid", "musicbrainz_artist_id"), artistSortNames)
+	// Use the PRIMARY artist for catalog entities (drops "feat. X" credits) so
+	// the browse list collapses to real artists instead of one entry per
+	// featuring combination. The raw artistNames still drive the track's
+	// DisplayArtist below, so the per-track credit keeps the full "feat." line.
+	artists := musicArtistsFromNames(normalizeFeaturedArtistNames(artistNames), splitTag(tags, "musicbrainz_artistid", "musicbrainz_artist_id"), artistSortNames)
 
 	albumTitle := firstNonEmpty(firstTag(tags, "album"), albumSidecar.Title)
 	if albumTitle == "" {

@@ -53,7 +53,7 @@ func TestParseCueFileBuildsChapters(t *testing.T) {
 		t.Fatalf("first chapter = %#v", chapters[0])
 	}
 	if chapters[0].EndSeconds != 600 {
-		t.Fatalf("first chapter end = %d, want 600", chapters[0].EndSeconds)
+		t.Fatalf("first chapter end = %v, want 600", chapters[0].EndSeconds)
 	}
 }
 

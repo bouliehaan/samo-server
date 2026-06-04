@@ -72,6 +72,6 @@ func TestFlattenBookChaptersUsesPositiveFallbackDuration(t *testing.T) {
 		t.Fatalf("chapters = %d, want 1", len(chapters))
 	}
 	if chapters[0].EndSeconds <= chapters[0].StartSeconds {
-		t.Fatalf("chapter range invalid: %d-%d", chapters[0].StartSeconds, chapters[0].EndSeconds)
+		t.Fatalf("chapter range invalid: %v-%v", chapters[0].StartSeconds, chapters[0].EndSeconds)
 	}
 }

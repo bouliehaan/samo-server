@@ -246,6 +246,54 @@ func TestServeMediaFileSetsDirectPlaybackHeaders(t *testing.T) {
 	}
 }
 
+func TestServeMediaFileAtResumeSupportsRangeRequests(t *testing.T) {
+	ctx := context.Background()
+	root := t.TempDir()
+	libraryDir := filepath.Join(root, "music")
+	if err := os.MkdirAll(libraryDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	audioPath := filepath.Join(libraryDir, "song.flac")
+	payload := []byte("0123456789abcdefghij")
+	if err := os.WriteFile(audioPath, payload, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	db, err := storage.Open(ctx, filepath.Join(root, "samo.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	if err := storage.ApplyMigrations(ctx, db, migrations.Files); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.ExecContext(ctx, `
+		INSERT INTO libraries (id, name, kind, media_type, path)
+		VALUES ('library-1', 'Music', 'music', '', ?)`, libraryDir); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.ExecContext(ctx, `
+		INSERT INTO media_files (id, library_id, path, file_name, mime_type, size_bytes, duration_seconds)
+		VALUES ('file-1', 'library-1', ?, 'song.flac', 'audio/flac', ?, 10)`, audioPath, len(payload)); err != nil {
+		t.Fatal(err)
+	}
+
+	service := New(db)
+	rangeRec := httptest.NewRecorder()
+	rangeReq := httptest.NewRequest(http.MethodGet, "/stream", nil)
+	rangeReq.Header.Set("Range", "bytes=0-4")
+	if err := service.ServeMediaFileAt(ctx, "file-1", 5, rangeRec, rangeReq); err != nil {
+		t.Fatal(err)
+	}
+	if rangeRec.Code != http.StatusPartialContent {
+		t.Fatalf("range status = %d, want 206", rangeRec.Code)
+	}
+	wantRange := payload[10:15]
+	if !bytes.Equal(rangeRec.Body.Bytes(), wantRange) {
+		t.Fatalf("range body = %q, want %q", rangeRec.Body.Bytes(), wantRange)
+	}
+}
+
 func TestServeMediaFileAtResumeReturnsUnmodifiedTailBytes(t *testing.T) {
 	ctx := context.Background()
 	root := t.TempDir()

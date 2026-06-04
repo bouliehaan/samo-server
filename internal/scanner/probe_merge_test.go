@@ -23,7 +23,7 @@ func TestMergeProbeInfoPrefersFFprobeChaptersOverOverdrive(t *testing.T) {
 		t.Fatalf("chapters = %d, want 1", len(merged.Chapters))
 	}
 	if merged.Chapters[0].StartSeconds != 528 {
-		t.Fatalf("start = %d, want embedded 528", merged.Chapters[0].StartSeconds)
+		t.Fatalf("start = %v, want embedded 528", merged.Chapters[0].StartSeconds)
 	}
 	if merged.Chapters[0].Title != "Embedded" {
 		t.Fatalf("title = %q, want Embedded", merged.Chapters[0].Title)

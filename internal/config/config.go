@@ -29,6 +29,7 @@ type Config struct {
 	Libraries              []Library
 	MetadataProviders      []string
 	MetadataUserAgent      string
+	AudibleRegion          string
 	ScanOnStart            bool
 	WatchLibraries         bool
 	WatchDebounce          time.Duration
@@ -80,6 +81,7 @@ func LoadEnv() (Config, error) {
 		Libraries:              loadLibraries(),
 		MetadataProviders:      envCSVOrDefault("SAMO_METADATA_PROVIDERS", defaultMetadataProviders),
 		MetadataUserAgent:      envOrDefault("SAMO_METADATA_USER_AGENT", "SamoServer/0.1 (https://github.com/bouliehaan/samo-server)"),
+		AudibleRegion:          envOrDefault("SAMO_AUDIBLE_REGION", "us"),
 		ScanOnStart:            envBool("SAMO_SCAN_ON_START", false),
 		WatchLibraries:         envBool("SAMO_WATCH_LIBRARIES", true),
 		WatchDebounce:          envDuration("SAMO_WATCH_DEBOUNCE", 3*time.Second),

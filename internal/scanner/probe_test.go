@@ -69,6 +69,6 @@ func TestOverdriveMarkersBecomeChapters(t *testing.T) {
 		t.Fatalf("chapters = %d, want 2", len(chapters))
 	}
 	if chapters[0].EndSeconds != 45 {
-		t.Fatalf("first chapter end = %d, want 45", chapters[0].EndSeconds)
+		t.Fatalf("first chapter end = %v, want 45", chapters[0].EndSeconds)
 	}
 }

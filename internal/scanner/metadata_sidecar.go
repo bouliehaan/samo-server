@@ -226,7 +226,7 @@ func parseCueFile(path string) []catalog.AudioChapter {
 	return chapters
 }
 
-func parseCueTimestamp(value string) int {
+func parseCueTimestamp(value string) float64 {
 	value = strings.TrimSpace(value)
 	parts := strings.Split(value, ":")
 	seconds := 0.0
@@ -237,5 +237,5 @@ func parseCueTimestamp(value string) int {
 		seconds += parsed * multiplier
 		multiplier *= 60
 	}
-	return int(mathRound(seconds))
+	return seconds
 }

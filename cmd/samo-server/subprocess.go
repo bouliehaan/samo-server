@@ -6,15 +6,30 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"github.com/bouliehaan/samo-server/internal/config"
 	"github.com/bouliehaan/samo-server/internal/covers"
+	"github.com/bouliehaan/samo-server/internal/metadata"
 	"github.com/bouliehaan/samo-server/internal/playlists"
 	"github.com/bouliehaan/samo-server/internal/scanner"
 	"github.com/bouliehaan/samo-server/internal/storage"
 	"github.com/bouliehaan/samo-server/internal/toolchain"
 	"github.com/bouliehaan/samo-server/migrations"
 )
+
+// chapterProviderForConfig returns the Audnexus-backed chapter provider when the
+// Audible/Audnexus provider is enabled, else nil (which disables external
+// chapters — the scanner then relies on embedded + CUE chapters only).
+func chapterProviderForConfig(providers []string, region string) scanner.ChapterProvider {
+	for _, name := range providers {
+		switch strings.ToLower(strings.TrimSpace(name)) {
+		case "audible", "audnexus":
+			return metadata.NewAudnexusChapterProvider(nil, region)
+		}
+	}
+	return nil
+}
 
 func runScanSubprocess(ctx context.Context, payloadPath string) {
 	cfg, err := config.LoadEnv()
@@ -48,6 +63,7 @@ func runScanSubprocess(ctx context.Context, payloadPath string) {
 		PlaylistImport:      playlistScanBridge{db: db, svc: playlistService},
 		AutoImportPlaylists: cfg.AutoImportPlaylists,
 		ExternalScanner:     false,
+		ChapterProvider:     chapterProviderForConfig(cfg.MetadataProviders, cfg.AudibleRegion),
 	})
 	if err := scanner.RunSubprocessScan(ctx, scan, payloadPath); err != nil {
 		log.Fatal(err)

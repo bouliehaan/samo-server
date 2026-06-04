@@ -78,6 +78,77 @@ func TestEnsureCachedDownloadsAndLookupServesPath(t *testing.T) {
 	}
 }
 
+func TestClearAllRemovesRowsAndFiles(t *testing.T) {
+	ctx := context.Background()
+	root := t.TempDir()
+	db, err := storage.Open(ctx, filepath.Join(root, "samo.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	if err := storage.ApplyMigrations(ctx, db, migrations.Files); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.ExecContext(ctx, `
+		INSERT INTO libraries (id, name, kind, path)
+		VALUES ('lib-1', 'Podcasts', 'podcast', 'samo://podcast-feeds')`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.ExecContext(ctx, `
+		INSERT INTO podcasts (id, library_id, path)
+		VALUES ('pod-1', 'lib-1', 'samo://show')`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.ExecContext(ctx, `
+		INSERT INTO podcast_episodes (id, library_id, podcast_id, title, enclosure_url)
+		VALUES ('ep-1', 'lib-1', 'pod-1', 'Episode', 'https://example.com/ep-1.mp3')`); err != nil {
+		t.Fatal(err)
+	}
+
+	cacheDir := filepath.Join(root, "podcast-cache")
+	service, err := New(db, Options{CacheDir: cacheDir, Enabled: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	cachePath := filepath.Join(cacheDir, "ep-1.mp3")
+	if err := os.WriteFile(cachePath, []byte("cached-audio"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cacheDir, "orphan.part"), []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC().Format(time.RFC3339)
+	if _, err := db.ExecContext(ctx, `
+		INSERT INTO podcast_episode_cache (
+		  episode_id, enclosure_url, cache_path, content_type, size_bytes, downloaded_at, last_accessed_at
+		)
+		VALUES ('ep-1', 'https://example.com/ep-1.mp3', ?, 'audio/mpeg', 12, ?, ?)`,
+		cachePath, now, now); err != nil {
+		t.Fatal(err)
+	}
+
+	result, err := service.ClearAll(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.EpisodesRemoved != 1 || result.BytesFreed != 12 {
+		t.Fatalf("result = %+v", result)
+	}
+	if _, err := os.Stat(cachePath); !os.IsNotExist(err) {
+		t.Fatalf("cache file still present: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(cacheDir, "orphan.part")); !os.IsNotExist(err) {
+		t.Fatalf("orphan.part still present: %v", err)
+	}
+	var count int
+	if err := db.QueryRowContext(ctx, `SELECT COUNT(*) FROM podcast_episode_cache`).Scan(&count); err != nil {
+		t.Fatal(err)
+	}
+	if count != 0 {
+		t.Fatalf("cache rows = %d", count)
+	}
+}
+
 func TestPruneRetentionRemovesOldestWhenOverMaxBytes(t *testing.T) {
 	ctx := context.Background()
 	root := t.TempDir()

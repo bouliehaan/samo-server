@@ -23,7 +23,7 @@ func TestNormalizeAudiobookChaptersCollapsesShortOverdriveMarkers(t *testing.T) 
 		t.Fatalf("chapters = %d, want 1 full-book chapter", len(out))
 	}
 	if out[0].EndSeconds != 36000 {
-		t.Fatalf("end = %d, want 36000", out[0].EndSeconds)
+		t.Fatalf("end = %v, want 36000", out[0].EndSeconds)
 	}
 }
 
@@ -37,6 +37,6 @@ func TestNormalizeAudiobookChaptersFixesLastChapterEnd(t *testing.T) {
 	}
 	out := normalizeAudiobookChapters([]probedFile{probe}, chapters)
 	if out[len(out)-1].EndSeconds != 1000 {
-		t.Fatalf("last end = %d, want 1000", out[len(out)-1].EndSeconds)
+		t.Fatalf("last end = %v, want 1000", out[len(out)-1].EndSeconds)
 	}
 }

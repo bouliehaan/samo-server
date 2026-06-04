@@ -5,7 +5,7 @@ import (
 	"strings"
 )
 
-// NormalizeAudioFile fixes codec/container fields for API and Subsonic clients.
+// NormalizeAudioFile fixes codec/container fields for API clients.
 // Historically container stored tag header types (ID3v2.4, VORBIS, MP4) from
 // native tag readers; many clients display container as the audio format badge.
 // We keep metadataFormats for tag schemes and align container with stream codec.

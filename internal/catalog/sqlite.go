@@ -531,7 +531,7 @@ func loadTrackArtistRefs(ctx context.Context, db *sql.DB) (map[string]namedRefs,
 func loadAudioFiles(ctx context.Context, db *sql.DB, ownerColumn string) (map[string][]AudioFile, error) {
 	rows, err := db.QueryContext(ctx, fmt.Sprintf(`
 		SELECT %s, id, path, relative_path, file_name, container, mime_type, codec, codec_profile, metadata_formats_json, bitrate,
-		       bit_depth, sample_rate, channels, channel_layout, duration_seconds, size_bytes, modified_at,
+		       bit_depth, sample_rate, channels, channel_layout, duration_seconds, duration_ms, size_bytes, modified_at,
 		       checksum, embedded_tags_json
 		FROM media_files
 		WHERE %s IS NOT NULL
@@ -546,12 +546,18 @@ func loadAudioFiles(ctx context.Context, db *sql.DB, ownerColumn string) (map[st
 		var ownerID string
 		var item AudioFile
 		var modifiedAt sql.NullString
+		var durationMs sql.NullInt64
 		var metadataFormatsJSON, embeddedTagsJSON string
 		if err := rows.Scan(&ownerID, &item.ID, &item.Path, &item.RelativePath, &item.FileName, &item.Container,
 			&item.MimeType, &item.Codec, &item.CodecProfile, &metadataFormatsJSON, &item.Bitrate, &item.BitDepth, &item.SampleRate,
-			&item.Channels, &item.ChannelLayout, &item.DurationSeconds, &item.SizeBytes, &modifiedAt,
+			&item.Channels, &item.ChannelLayout, &item.DurationSeconds, &durationMs, &item.SizeBytes, &modifiedAt,
 			&item.Checksum, &embeddedTagsJSON); err != nil {
 			return nil, fmt.Errorf("scan audio file: %w", err)
+		}
+		if durationMs.Valid && durationMs.Int64 > 0 {
+			item.DurationMs = durationMs.Int64
+		} else if item.DurationSeconds > 0 {
+			item.DurationMs = int64(item.DurationSeconds) * 1000
 		}
 		decodeJSON(metadataFormatsJSON, &item.MetadataFormats)
 		decodeJSON(embeddedTagsJSON, &item.EmbeddedTags)
@@ -560,14 +566,40 @@ func loadAudioFiles(ctx context.Context, db *sql.DB, ownerColumn string) (map[st
 		files[ownerID] = append(files[ownerID], item)
 	}
 	for ownerID := range files {
-		files[ownerID] = SortAudioFiles(files[ownerID])
+		files[ownerID] = assignStreamOffsets(SortAudioFiles(files[ownerID]))
 	}
 	return files, rows.Err()
 }
 
+// assignStreamOffsets stamps each file's StartOffsetSeconds with the running
+// book-global start position — the exact, millisecond-derived sum of every
+// earlier file's duration. This per-file manifest lets clients map book-time
+// <-> (file, file-time) without re-accumulating durations and drifting.
+// Single-file items keep offset 0; the slice must already be sorted.
+func assignStreamOffsets(files []AudioFile) []AudioFile {
+	if len(files) <= 1 {
+		return files
+	}
+	offset := 0.0
+	for i := range files {
+		files[i].StartOffsetSeconds = offset
+		offset += audioFileDurationSeconds(files[i])
+	}
+	return files
+}
+
+// audioFileDurationSeconds returns the file duration in fractional seconds,
+// preferring the exact millisecond field.
+func audioFileDurationSeconds(file AudioFile) float64 {
+	if file.DurationMs > 0 {
+		return float64(file.DurationMs) / 1000
+	}
+	return float64(file.DurationSeconds)
+}
+
 func loadAudiobookChapters(ctx context.Context, db *sql.DB) (map[string][]AudioChapter, error) {
 	rows, err := db.QueryContext(ctx, `
-		SELECT audiobook_id, id, chapter_index, title, start_seconds, end_seconds
+		SELECT audiobook_id, id, chapter_index, title, start_seconds, end_seconds, start_ms, end_ms
 		FROM audiobook_chapters
 		ORDER BY chapter_index`)
 	if err != nil {
@@ -580,7 +612,7 @@ func loadAudiobookChapters(ctx context.Context, db *sql.DB) (map[string][]AudioC
 
 func loadEpisodeChapters(ctx context.Context, db *sql.DB) (map[string][]AudioChapter, error) {
 	rows, err := db.QueryContext(ctx, `
-		SELECT episode_id, id, chapter_index, title, start_seconds, end_seconds
+		SELECT episode_id, id, chapter_index, title, start_seconds, end_seconds, start_ms, end_ms
 		FROM episode_chapters
 		ORDER BY chapter_index`)
 	if err != nil {
@@ -596,8 +628,23 @@ func scanChapterRows(rows *sql.Rows) (map[string][]AudioChapter, error) {
 	for rows.Next() {
 		var ownerID string
 		var item AudioChapter
-		if err := rows.Scan(&ownerID, &item.ID, &item.Index, &item.Title, &item.StartSeconds, &item.EndSeconds); err != nil {
+		// start_seconds/end_seconds are the legacy whole-second columns; start_ms
+		// /end_ms carry the precise values. Prefer ms and fall back to seconds for
+		// rows written before migration 026.
+		var startSeconds, endSeconds int
+		var startMs, endMs sql.NullInt64
+		if err := rows.Scan(&ownerID, &item.ID, &item.Index, &item.Title, &startSeconds, &endSeconds, &startMs, &endMs); err != nil {
 			return nil, fmt.Errorf("scan chapter: %w", err)
+		}
+		if startMs.Valid && startMs.Int64 > 0 {
+			item.StartSeconds = float64(startMs.Int64) / 1000
+		} else {
+			item.StartSeconds = float64(startSeconds)
+		}
+		if endMs.Valid && endMs.Int64 > 0 {
+			item.EndSeconds = float64(endMs.Int64) / 1000
+		} else {
+			item.EndSeconds = float64(endSeconds)
 		}
 		chapters[ownerID] = append(chapters[ownerID], item)
 	}

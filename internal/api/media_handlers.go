@@ -55,7 +55,36 @@ func (s *Server) streamAudiobook(w http.ResponseWriter, r *http.Request) {
 		writeCatalogError(w, err)
 		return
 	}
-	s.streamCatalogAudioFiles(w, r, item.AudioFiles, item.Progress, 0)
+	s.streamAudiobookFileWhole(w, r, item.AudioFiles, item.Progress)
+}
+
+// streamAudiobookFileWhole serves one underlying audiobook file in its entirety
+// with native HTTP range support, and never time-slices the bytes.
+//
+// The old path computed a byte offset from a wall-clock second
+// (size*sec/duration) and served the file from there. That is only ~right for
+// CBR MP3 — for the M4B/AAC and VBR files audiobooks actually use it landed on
+// the wrong byte AND sheared off the MP4 moov/sample tables the decoder needs,
+// which is what made timestamps wrong and backward seeks impossible. Now the
+// client owns seeking: it picks the file (mediaFileId, or the file that
+// contains its book-global position) and the player seeks within the whole
+// file using the container's real seek tables.
+func (s *Server) streamAudiobookFileWhole(w http.ResponseWriter, r *http.Request, audioFiles []catalog.AudioFile, playback catalog.PlaybackState) {
+	target, err := catalog.SelectAudiobookFile(audioFiles, playback, catalog.StreamSelectQueryFromRequest(r))
+	if err != nil {
+		writeStreamSelectError(w, err)
+		return
+	}
+	w.Header().Set("X-Samo-Media-File-Id", target.FileID)
+	// Tell the client where this file sits on the book-global timeline so it can
+	// map player-time -> book-time without re-deriving offsets.
+	if target.StartOffsetMs > 0 {
+		w.Header().Set("X-Samo-Stream-File-Offset-Ms", strconv.FormatInt(target.StartOffsetMs, 10))
+	}
+	// offsetSeconds is hard-wired to 0: serve the whole file, let the player seek.
+	if err := s.filesService().ServeMediaFileAt(r.Context(), target.FileID, 0, w, r); err != nil {
+		writeFilesError(w, err)
+	}
 }
 
 func (s *Server) streamPodcastEpisode(w http.ResponseWriter, r *http.Request) {
@@ -69,11 +98,79 @@ func (s *Server) streamPodcastEpisode(w http.ResponseWriter, r *http.Request) {
 		writeCatalogError(w, err)
 		return
 	}
-	if len(episode.AudioFiles) == 0 {
+	audioFiles := episode.AudioFiles
+	// RSS-only episodes never have on-disk audio; skipping DB lookup avoids
+	// blocking on stale media_files paths and always proxies the enclosure.
+	if episode.LibraryID != "library_remote_podcasts" {
+		audioFiles = s.filterReadablePodcastAudioFiles(r.Context(), audioFiles)
+		if len(audioFiles) == 0 {
+			audioFiles = s.filterReadablePodcastAudioFiles(
+				r.Context(),
+				s.podcastEpisodeAudioFilesFromDB(r.Context(), episode.ID),
+			)
+		}
+	} else {
+		audioFiles = nil
+	}
+	if len(audioFiles) == 0 {
 		s.streamPodcastEnclosure(w, r, episode)
 		return
 	}
-	s.streamCatalogAudioFiles(w, r, episode.AudioFiles, episode.Progress, 0)
+	playback := podcastStreamPlayback(r, episode.Progress)
+	s.streamCatalogAudioFiles(w, r, audioFiles, playback, 0)
+}
+
+// podcastStreamPlayback applies an explicit stream offset query to on-disk files.
+// Remote enclosure streams use streamPodcastEnclosure + streamResumeSeconds instead.
+func podcastStreamPlayback(r *http.Request, saved catalog.PlaybackState) catalog.PlaybackState {
+	query := catalog.StreamSelectQueryFromRequest(r)
+	if query.HasProgressSeconds {
+		return catalog.PlaybackState{ProgressSeconds: query.ProgressSeconds}
+	}
+	return saved
+}
+
+func (s *Server) filterReadablePodcastAudioFiles(ctx context.Context, files []catalog.AudioFile) []catalog.AudioFile {
+	if len(files) == 0 || s.files == nil {
+		return nil
+	}
+	readable := make([]catalog.AudioFile, 0, len(files))
+	for _, file := range files {
+		item, err := s.files.GetMediaFile(ctx, file.ID)
+		if err != nil {
+			continue
+		}
+		if _, _, err := s.files.ValidateLocalPath(ctx, item.Path); err != nil {
+			continue
+		}
+		readable = append(readable, file)
+	}
+	return readable
+}
+
+func (s *Server) podcastEpisodeAudioFilesFromDB(ctx context.Context, episodeID string) []catalog.AudioFile {
+	if s.files == nil {
+		return nil
+	}
+	files, err := s.files.ListMediaFilesForEpisode(ctx, episodeID)
+	if err != nil {
+		return nil
+	}
+	out := make([]catalog.AudioFile, 0, len(files))
+	for _, file := range files {
+		out = append(out, catalog.AudioFile{
+			ID:              file.ID,
+			Path:            file.Path,
+			RelativePath:    file.RelativePath,
+			FileName:        file.FileName,
+			MimeType:        file.MimeType,
+			Container:       file.Container,
+			DurationSeconds: file.DurationSeconds,
+			SizeBytes:       file.SizeBytes,
+			ModifiedAt:      file.ModifiedAt,
+		})
+	}
+	return catalog.SortAudioFiles(out)
 }
 
 func (s *Server) streamCatalogAudioFiles(w http.ResponseWriter, r *http.Request, audioFiles []catalog.AudioFile, playback catalog.PlaybackState, defaultDisc int) {
@@ -102,14 +199,17 @@ func (s *Server) streamPodcastEnclosure(w http.ResponseWriter, r *http.Request, 
 			writeError(w, http.StatusInternalServerError, err.Error())
 			return
 		} else if ok {
-			w.Header().Set("X-Samo-Stream-Source", "cache")
-			if resume > 0 {
-				w.Header().Set("X-Samo-Stream-Offset-Seconds", strconv.Itoa(resume))
+			if !isAudioCacheContentType(cached.ContentType) {
+				// HTML error page or other junk on disk — ignore cache and proxy live.
+			} else {
+				w.Header().Set("X-Samo-Stream-Source", "cache")
+				if resume > 0 {
+					w.Header().Set("X-Samo-Stream-Offset-Seconds", strconv.Itoa(resume))
+				}
+				if err := s.filesService().ServeReadablePathAt(r.Context(), cached.Path, cached.ContentType, episode.DurationSeconds, resume, w, r); err == nil {
+					return
+				}
 			}
-			if err := s.filesService().ServeReadablePathAt(r.Context(), cached.Path, cached.ContentType, episode.DurationSeconds, resume, w, r); err != nil {
-				writeFilesError(w, err)
-			}
-			return
 		}
 	}
 	if err := s.podcastStreamService().ServeEnclosure(r.Context(), podcaststream.Enclosure{
@@ -328,6 +428,17 @@ func writeFilesError(w http.ResponseWriter, err error) {
 	default:
 		writeError(w, http.StatusInternalServerError, err.Error())
 	}
+}
+
+func isAudioCacheContentType(contentType string) bool {
+	contentType = strings.ToLower(strings.TrimSpace(contentType))
+	if contentType == "" {
+		return true
+	}
+	if strings.HasPrefix(contentType, "text/") || strings.Contains(contentType, "html") {
+		return false
+	}
+	return strings.HasPrefix(contentType, "audio/") || strings.Contains(contentType, "mpeg")
 }
 
 func streamResumeSeconds(r *http.Request, savedProgress int) int {

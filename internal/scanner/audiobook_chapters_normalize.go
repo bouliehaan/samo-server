@@ -13,15 +13,27 @@ func normalizeAudiobookChapters(probes []probedFile, chapters []catalog.AudioCha
 	return fixChapterEndTimes(chapters, total)
 }
 
-func totalProbeDurationSeconds(probes []probedFile) int {
-	total := 0
+// totalProbeDurationSeconds sums file durations using the millisecond-precise
+// value when available so the book-global end never lands a second short of the
+// last chapter boundary on multi-file books.
+func totalProbeDurationSeconds(probes []probedFile) float64 {
+	total := 0.0
 	for _, probe := range probes {
-		total += probe.AudioFile.DurationSeconds
+		total += probeDurationSeconds(probe)
 	}
 	return total
 }
 
-func fixChapterEndTimes(chapters []catalog.AudioChapter, totalDuration int) []catalog.AudioChapter {
+// probeDurationSeconds returns one file's duration in fractional seconds,
+// preferring the exact millisecond field and falling back to whole seconds.
+func probeDurationSeconds(probe probedFile) float64 {
+	if probe.AudioFile.DurationMs > 0 {
+		return float64(probe.AudioFile.DurationMs) / 1000
+	}
+	return float64(probe.AudioFile.DurationSeconds)
+}
+
+func fixChapterEndTimes(chapters []catalog.AudioChapter, totalDuration float64) []catalog.AudioChapter {
 	if len(chapters) == 0 {
 		return chapters
 	}
@@ -50,26 +62,26 @@ func fixChapterEndTimes(chapters []catalog.AudioChapter, totalDuration int) []ca
 	return out
 }
 
-func shouldCollapseToSingleBook(chapters []catalog.AudioChapter, total int) bool {
+func shouldCollapseToSingleBook(chapters []catalog.AudioChapter, total float64) bool {
 	if total <= 0 || len(chapters) == 0 {
 		return false
 	}
 	coverageEnd := chapterCoverageEnd(chapters)
-	minCoverage := minInt(600, int(float64(total)*0.05))
+	minCoverage := minFloat(600, total*0.05)
 	if minCoverage < 120 {
 		minCoverage = 120
 	}
 	if coverageEnd < minCoverage {
 		return true
 	}
-	if len(chapters) <= 3 && coverageEnd < int(float64(total)*0.5) && coverageEnd/len(chapters) < 120 {
+	if len(chapters) <= 3 && coverageEnd < total*0.5 && coverageEnd/float64(len(chapters)) < 120 {
 		return true
 	}
 	return false
 }
 
-func chapterCoverageEnd(chapters []catalog.AudioChapter) int {
-	coverageEnd := 0
+func chapterCoverageEnd(chapters []catalog.AudioChapter) float64 {
+	coverageEnd := 0.0
 	for _, chapter := range chapters {
 		if chapter.EndSeconds <= chapter.StartSeconds {
 			continue
@@ -81,7 +93,7 @@ func chapterCoverageEnd(chapters []catalog.AudioChapter) int {
 	return coverageEnd
 }
 
-func singleProbeChapter(probe probedFile, total int) catalog.AudioChapter {
+func singleProbeChapter(probe probedFile, total float64) catalog.AudioChapter {
 	if total <= 0 {
 		total = 1
 	}
@@ -93,7 +105,7 @@ func singleProbeChapter(probe probedFile, total int) catalog.AudioChapter {
 	}
 }
 
-func minInt(a, b int) int {
+func minFloat(a, b float64) float64 {
 	if a < b {
 		return a
 	}

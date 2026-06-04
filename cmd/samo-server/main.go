@@ -82,6 +82,7 @@ func main() {
 		AutoImportPlaylists: cfg.AutoImportPlaylists,
 		ExternalScanner:     cfg.ScannerExternal,
 		UseFFprobeForScan:   cfg.ScanFFprobe,
+		ChapterProvider:     chapterProviderForConfig(cfg.MetadataProviders, cfg.AudibleRegion),
 	})
 	libraryService := libraries.New(db, scan)
 	libraryService.SetBackgroundContext(ctx)

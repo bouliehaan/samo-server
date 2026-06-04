@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/bouliehaan/samo-server/internal/catalog"
 )
@@ -51,6 +52,18 @@ func (s *Server) catalogRecentlyAdded(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, s.catalog.ListRecentlyAdded(page))
 }
 
+// catalogSyncManifest returns the server clock plus every current entity ID
+// (playlists scoped to the caller) so an incremental client sync can reconcile
+// deletions: drop any locally-mirrored row whose ID is absent from the set.
+func (s *Server) catalogSyncManifest(w http.ResponseWriter, r *http.Request) {
+	principal, ok := s.currentUser(r)
+	if !ok {
+		writeError(w, http.StatusUnauthorized, "unauthorized")
+		return
+	}
+	writeJSON(w, http.StatusOK, s.catalog.SyncManifest(principal.User.ID))
+}
+
 func (s *Server) postCatalogReload(w http.ResponseWriter, r *http.Request) {
 	if _, ok := s.requireAdmin(w, r); !ok {
 		return
@@ -69,7 +82,7 @@ func (s *Server) catalogManifest(w http.ResponseWriter, r *http.Request) {
 		Auth: authManifest{
 			APIUsesBearerToken: true,
 			AcceptedHeaders:    []string{"Authorization: Bearer <token>", "X-Samo-Token: <token>"},
-			PublicRoutes:       []string{"/health", "/radio/{id}/playlist.m3u", "/radio/{id}/stream", "/internet-radio/{id}/playlist.m3u", "/internet-radio/{id}/stream", "/rest/{action}"},
+			PublicRoutes:       []string{"/health", "/radio/{id}/playlist.m3u", "/radio/{id}/stream", "/internet-radio/{id}/playlist.m3u", "/internet-radio/{id}/stream"},
 		},
 		Namespaces: []namespaceManifest{
 			{Name: "libraries", PathPrefix: "/api/v1/libraries", Description: "Filesystem library management and scan orchestration."},
@@ -81,7 +94,6 @@ func (s *Server) catalogManifest(w http.ResponseWriter, r *http.Request) {
 			{Name: "podcasts", PathPrefix: "/api/v1/podcasts", Description: "Podcast shows, episodes, RSS feeds, and search."},
 			{Name: "radio", PathPrefix: "/api/v1/radio", Description: "24/7 station metadata, now playing, and schedules."},
 			{Name: "internetRadio", PathPrefix: "/api/v1/internet-radio", Description: "User-managed external internet radio streams."},
-			{Name: "subsonic", PathPrefix: "/rest", Description: "Subsonic/OpenSubsonic compatibility for existing music clients."},
 			{Name: "lastfm", PathPrefix: "/api/v1/lastfm", Description: "Last.fm account linking and native scrobbling."},
 		},
 		MetadataSets: []metadataSetManifest{
@@ -224,33 +236,6 @@ func (s *Server) catalogManifest(w http.ResponseWriter, r *http.Request) {
 				"GET /internet-radio/{id}/playlist.m3u",
 				"GET /internet-radio/{id}/stream",
 			},
-			"subsonic": {
-				"GET /rest/ping",
-				"GET /rest/getLicense",
-				"GET /rest/getMusicFolders",
-				"GET /rest/getIndexes",
-				"GET /rest/getArtists",
-				"GET /rest/getArtist?id=",
-				"GET /rest/getAlbum?id=",
-				"GET /rest/getAlbumList2",
-				"GET /rest/getMusicDirectory?id=",
-				"GET /rest/getSong?id=",
-				"GET /rest/search2?query=",
-				"GET /rest/search3?query=",
-				"GET /rest/getPlaylists",
-				"GET /rest/getPlaylist?id=",
-				"GET /rest/getStarred",
-				"GET /rest/getStarred2",
-				"GET /rest/star?id=",
-				"GET /rest/unstar?id=",
-				"GET /rest/setRating?id=&rating=",
-				"GET /rest/getRandomSongs",
-				"GET /rest/getOpenSubsonicExtensions",
-				"GET /rest/scrobble",
-				"GET /rest/updateNowPlaying",
-				"GET /rest/stream?id=",
-				"GET /rest/getCoverArt?id=",
-			},
 		},
 	})
 }
@@ -274,7 +259,28 @@ func readPage(r *http.Request) (catalog.PageRequest, error) {
 		page.Offset = offset
 	}
 
+	if rawSince := strings.TrimSpace(r.URL.Query().Get("updatedSince")); rawSince != "" {
+		since, err := parseUpdatedSince(rawSince)
+		if err != nil {
+			return catalog.PageRequest{}, err
+		}
+		page.UpdatedSince = since
+	}
+
 	return page, nil
+}
+
+// parseUpdatedSince accepts either unix milliseconds (what a JS client gets
+// from Date) or an RFC3339 timestamp (what SyncManifest.serverTime marshals
+// to). Both resolve to a UTC instant comparable against catalog UpdatedAt.
+func parseUpdatedSince(raw string) (time.Time, error) {
+	if ms, err := strconv.ParseInt(raw, 10, 64); err == nil {
+		return time.UnixMilli(ms).UTC(), nil
+	}
+	if ts, err := time.Parse(time.RFC3339Nano, raw); err == nil {
+		return ts.UTC(), nil
+	}
+	return time.Time{}, errors.New("updatedSince must be RFC3339 or unix milliseconds")
 }
 
 func writeCatalogError(w http.ResponseWriter, err error) {

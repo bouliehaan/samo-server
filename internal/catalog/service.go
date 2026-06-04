@@ -6,6 +6,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"time"
 )
 
 var ErrNotFound = errors.New("catalog item not found")
@@ -119,6 +120,74 @@ func (s *Service) Overview() Overview {
 	}
 }
 
+// SyncManifestIDs is the full set of current entity IDs per type. Clients use
+// it to reconcile deletions during an incremental sync: any locally-mirrored
+// row whose ID is absent here was removed server-side and should be dropped.
+// Playlist IDs are scoped to the requesting user's visibility.
+type SyncManifestIDs struct {
+	Artists    []string `json:"artists"`
+	Albums     []string `json:"albums"`
+	Tracks     []string `json:"tracks"`
+	Playlists  []string `json:"playlists"`
+	Audiobooks []string `json:"audiobooks"`
+	Podcasts   []string `json:"podcasts"`
+	Episodes   []string `json:"episodes"`
+}
+
+// SyncManifest is the deletion-reconciliation payload for incremental syncs.
+// ServerTime is truncated to whole seconds to match SQLite's second-precision
+// updated_at: a client that stores it and replays it as updatedSince gets a
+// <=1s boundary overlap (a few rows harmlessly re-sent) rather than risking a
+// change dropped exactly on the second boundary.
+type SyncManifest struct {
+	ServerTime time.Time       `json:"serverTime"`
+	Counts     map[string]int  `json:"counts"`
+	IDs        SyncManifestIDs `json:"ids"`
+}
+
+// SyncManifest returns every current entity ID (playlists scoped to userID)
+// plus the server clock, for delta-sync deletion reconciliation.
+func (s *Service) SyncManifest(userID string) SyncManifest {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	artists := idsOf(s.musicArtists, func(a MusicArtist) string { return a.ID })
+	albums := idsOf(s.musicAlbums, func(a MusicAlbum) string { return a.ID })
+	tracks := idsOf(s.musicTracks, func(t MusicTrack) string { return t.ID })
+	audiobooks := idsOf(s.audiobooks, func(a AudiobookItem) string { return a.ID })
+	podcasts := idsOf(s.podcasts, func(p PodcastItem) string { return p.ID })
+	episodes := idsOf(s.podcastEpisodes, func(e PodcastEpisode) string { return e.ID })
+
+	playlists := make([]string, 0, len(s.musicPlaylists))
+	for _, item := range s.musicPlaylists {
+		if PlaylistVisibleToUser(item, userID) {
+			playlists = append(playlists, item.ID)
+		}
+	}
+
+	return SyncManifest{
+		ServerTime: time.Now().UTC().Truncate(time.Second),
+		Counts: map[string]int{
+			"artists":    len(artists),
+			"albums":     len(albums),
+			"tracks":     len(tracks),
+			"playlists":  len(playlists),
+			"audiobooks": len(audiobooks),
+			"podcasts":   len(podcasts),
+			"episodes":   len(episodes),
+		},
+		IDs: SyncManifestIDs{
+			Artists:    artists,
+			Albums:     albums,
+			Tracks:     tracks,
+			Playlists:  playlists,
+			Audiobooks: audiobooks,
+			Podcasts:   podcasts,
+			Episodes:   episodes,
+		},
+	}
+}
+
 // -- Music ------------------------------------------------------------------
 
 func (s *Service) ListMusicArtists(page PageRequest) Page[MusicArtist] {
@@ -212,6 +281,7 @@ func (s *Service) ListMusicPlaylistsForUser(userID string, page PageRequest) Pag
 			items = append(items, item)
 		}
 	}
+	items = filterUpdatedSince(items, page.UpdatedSince, func(p MusicPlaylist) *time.Time { return p.UpdatedAt })
 	return paginate(items, page)
 }
 
@@ -254,7 +324,8 @@ func (s *Service) ListGenres(page PageRequest) Page[GenreSummary] {
 func (s *Service) ListAudiobooks(page PageRequest) Page[AudiobookItem] {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	return paginate(s.audiobooks, page)
+	items := filterUpdatedSince(s.audiobooks, page.UpdatedSince, func(a AudiobookItem) *time.Time { return a.UpdatedAt })
+	return paginate(items, page)
 }
 
 func (s *Service) Audiobook(id string) (AudiobookItem, error) {
@@ -385,7 +456,8 @@ func audiobookMatchesContributor(item AudiobookItem, contributorID string) bool 
 func (s *Service) ListPodcasts(page PageRequest) Page[PodcastItem] {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	return paginate(s.podcasts, page)
+	items := filterUpdatedSince(s.podcasts, page.UpdatedSince, func(p PodcastItem) *time.Time { return p.UpdatedAt })
+	return paginate(items, page)
 }
 
 func (s *Service) Podcast(id string) (PodcastItem, error) {
@@ -401,7 +473,8 @@ func (s *Service) Podcast(id string) (PodcastItem, error) {
 func (s *Service) ListPodcastEpisodes(page PageRequest) Page[PodcastEpisode] {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	return paginate(s.podcastEpisodes, page)
+	episodes := filterUpdatedSince(s.podcastEpisodes, page.UpdatedSince, func(e PodcastEpisode) *time.Time { return e.UpdatedAt })
+	return paginate(s.withEpisodePodcastTitles(episodes), page)
 }
 
 func (s *Service) PodcastEpisode(id string) (PodcastEpisode, error) {
@@ -411,7 +484,7 @@ func (s *Service) PodcastEpisode(id string) (PodcastEpisode, error) {
 	if !ok {
 		return PodcastEpisode{}, ErrNotFound
 	}
-	return item, nil
+	return s.enrichEpisodePodcastTitle(item), nil
 }
 
 // EpisodesForPodcast returns every episode whose PodcastID matches. Episodes
@@ -430,7 +503,28 @@ func (s *Service) EpisodesForPodcast(podcastID string, page PageRequest) (Page[P
 			matches = append(matches, episode)
 		}
 	}
-	return paginate(matches, page), nil
+	return paginate(s.withEpisodePodcastTitles(matches), page), nil
+}
+
+func (s *Service) enrichEpisodePodcastTitle(episode PodcastEpisode) PodcastEpisode {
+	if episode.PodcastID == "" {
+		return episode
+	}
+	if show, ok := s.podcastByID[episode.PodcastID]; ok {
+		episode.PodcastTitle = podcastTitle(show)
+	}
+	return episode
+}
+
+func (s *Service) withEpisodePodcastTitles(episodes []PodcastEpisode) []PodcastEpisode {
+	if len(episodes) == 0 {
+		return episodes
+	}
+	out := make([]PodcastEpisode, len(episodes))
+	for i, episode := range episodes {
+		out[i] = s.enrichEpisodePodcastTitle(episode)
+	}
+	return out
 }
 
 // -- Internal ---------------------------------------------------------------
@@ -586,6 +680,32 @@ func normalizePage(page PageRequest) PageRequest {
 		page.Offset = 0
 	}
 	return page
+}
+
+// filterUpdatedSince returns the entries whose UpdatedAt is at or after since.
+// A zero since returns items unchanged (no copy) so the non-delta list path is
+// untouched. A nil UpdatedAt is treated as "always changed" so a row predating
+// updated_at tracking is never hidden from a delta consumer.
+func filterUpdatedSince[T any](items []T, since time.Time, updatedAt func(T) *time.Time) []T {
+	if since.IsZero() {
+		return items
+	}
+	filtered := make([]T, 0, len(items))
+	for _, item := range items {
+		ts := updatedAt(item)
+		if ts == nil || !ts.Before(since) {
+			filtered = append(filtered, item)
+		}
+	}
+	return filtered
+}
+
+func idsOf[T any](items []T, id func(T) string) []string {
+	out := make([]string, 0, len(items))
+	for _, item := range items {
+		out = append(out, id(item))
+	}
+	return out
 }
 
 func audiobookTitle(item AudiobookItem) string {

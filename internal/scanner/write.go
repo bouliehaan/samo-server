@@ -520,13 +520,38 @@ func (s *Scanner) replaceAudiobookChapters(ctx context.Context, audiobookID stri
 		return fmt.Errorf("clear audiobook chapters: %w", err)
 	}
 	for _, chapter := range chapters {
-		chapter.ID = stableID("chapter", "audiobook", audiobookID, fmt.Sprint(chapter.Index), chapter.Title, fmt.Sprint(chapter.StartSeconds))
+		startMs, endMs := chapter.StartMs(), chapter.EndMs()
+		chapter.ID = stableID("chapter", "audiobook", audiobookID, fmt.Sprint(chapter.Index), chapter.Title, fmt.Sprint(startMs))
+		// start_seconds/end_seconds stay for back-compat reads; start_ms/end_ms
+		// are the precise canonical values the API now projects.
 		if _, err := s.db.ExecContext(ctx, `
-			INSERT INTO audiobook_chapters (id, audiobook_id, chapter_index, title, start_seconds, end_seconds)
-			VALUES (?, ?, ?, ?, ?, ?)`,
-			chapter.ID, audiobookID, chapter.Index, chapter.Title, chapter.StartSeconds, chapter.EndSeconds); err != nil {
+			INSERT INTO audiobook_chapters (id, audiobook_id, chapter_index, title, start_seconds, end_seconds, start_ms, end_ms)
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+			chapter.ID, audiobookID, chapter.Index, chapter.Title,
+			int(chapter.StartSeconds), int(chapter.EndSeconds), startMs, endMs); err != nil {
 			return fmt.Errorf("insert audiobook chapter %q: %w", chapter.Title, err)
 		}
+	}
+	return nil
+}
+
+// setAudiobookChapterProvenance records WHERE a book's chapters came from
+// (embedded/cue/file/none, or "audnexus"), the ASIN they were resolved from
+// when external, and when that sync happened. This is what makes a degraded
+// book queryable instead of invisible — and the hook the metadata-apply +
+// "refresh chapters" admin path will reuse. asin/syncedAt are empty/nil for
+// file-derived chapters.
+func (s *Scanner) setAudiobookChapterProvenance(ctx context.Context, audiobookID, source, asin string, syncedAt *time.Time) error {
+	var synced any
+	if syncedAt != nil {
+		synced = syncedAt.UTC().Format(time.RFC3339)
+	}
+	if _, err := s.db.ExecContext(ctx, `
+		UPDATE audiobooks
+		SET chapter_source = ?, chapter_asin = ?, chapter_synced_at = ?
+		WHERE id = ?`,
+		source, asin, synced, audiobookID); err != nil {
+		return fmt.Errorf("set audiobook chapter provenance for %q: %w", audiobookID, err)
 	}
 	return nil
 }
@@ -536,11 +561,13 @@ func (s *Scanner) replaceEpisodeChapters(ctx context.Context, episodeID string, 
 		return fmt.Errorf("clear episode chapters: %w", err)
 	}
 	for _, chapter := range chapters {
-		chapter.ID = stableID("chapter", "episode", episodeID, fmt.Sprint(chapter.Index), chapter.Title, fmt.Sprint(chapter.StartSeconds))
+		startMs, endMs := chapter.StartMs(), chapter.EndMs()
+		chapter.ID = stableID("chapter", "episode", episodeID, fmt.Sprint(chapter.Index), chapter.Title, fmt.Sprint(startMs))
 		if _, err := s.db.ExecContext(ctx, `
-			INSERT INTO episode_chapters (id, episode_id, chapter_index, title, start_seconds, end_seconds)
-			VALUES (?, ?, ?, ?, ?, ?)`,
-			chapter.ID, episodeID, chapter.Index, chapter.Title, chapter.StartSeconds, chapter.EndSeconds); err != nil {
+			INSERT INTO episode_chapters (id, episode_id, chapter_index, title, start_seconds, end_seconds, start_ms, end_ms)
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+			chapter.ID, episodeID, chapter.Index, chapter.Title,
+			int(chapter.StartSeconds), int(chapter.EndSeconds), startMs, endMs); err != nil {
 			return fmt.Errorf("insert episode chapter %q: %w", chapter.Title, err)
 		}
 	}
@@ -568,10 +595,10 @@ func (s *Scanner) upsertAudioFile(ctx context.Context, libraryID string, owner a
 		INSERT INTO media_files (
 		  id, library_id, audiobook_id, podcast_id, track_id, episode_id, path, relative_path, file_name, inode, size_bytes,
 		  modified_at, container, mime_type, codec, codec_profile, metadata_formats_json, bitrate, bit_depth, sample_rate, channels,
-		  channel_layout, duration_seconds, checksum, embedded_tags_json, track_pid, content_hash,
+		  channel_layout, duration_seconds, duration_ms, checksum, embedded_tags_json, track_pid, content_hash,
 		  missing, missing_detected_at, updated_at
 		)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, NULL, CURRENT_TIMESTAMP)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, NULL, CURRENT_TIMESTAMP)
 		ON CONFLICT(id) DO UPDATE SET
 		  library_id = excluded.library_id,
 		  audiobook_id = excluded.audiobook_id,
@@ -595,6 +622,7 @@ func (s *Scanner) upsertAudioFile(ctx context.Context, libraryID string, owner a
 		  channels = excluded.channels,
 		  channel_layout = excluded.channel_layout,
 		  duration_seconds = excluded.duration_seconds,
+		  duration_ms = excluded.duration_ms,
 		  checksum = excluded.checksum,
 		  embedded_tags_json = excluded.embedded_tags_json,
 		  track_pid = excluded.track_pid,
@@ -606,7 +634,7 @@ func (s *Scanner) upsertAudioFile(ctx context.Context, libraryID string, owner a
 		nullableString(owner.TrackID), nullableString(owner.EpisodeID),
 		file.Path, file.RelativePath, file.FileName, fileInode(file.Path), file.SizeBytes, timeString(file.ModifiedAt),
 		file.Container, file.MimeType, file.Codec, file.CodecProfile, jsonText(file.MetadataFormats), file.Bitrate, file.BitDepth, file.SampleRate,
-		file.Channels, file.ChannelLayout, file.DurationSeconds, file.Checksum, jsonText(file.EmbeddedTags),
+		file.Channels, file.ChannelLayout, file.DurationSeconds, durationMsValue(file), file.Checksum, jsonText(file.EmbeddedTags),
 		trackPID, contentHash)
 	if err != nil {
 		if strings.Contains(strings.ToLower(err.Error()), "unique") {
@@ -667,6 +695,7 @@ func (s *Scanner) reclaimMediaFileByPath(ctx context.Context, libraryID string, 
 		    channels = ?,
 		    channel_layout = ?,
 		    duration_seconds = ?,
+		    duration_ms = ?,
 		    checksum = ?,
 		    embedded_tags_json = ?,
 		    track_pid = ?,
@@ -679,7 +708,7 @@ func (s *Scanner) reclaimMediaFileByPath(ctx context.Context, libraryID string, 
 		nullableString(owner.TrackID), nullableString(owner.EpisodeID),
 		file.RelativePath, file.FileName, fileInode(file.Path), file.SizeBytes, timeString(file.ModifiedAt),
 		file.Container, file.MimeType, file.Codec, file.CodecProfile, jsonText(file.MetadataFormats), file.Bitrate, file.BitDepth, file.SampleRate,
-		file.Channels, file.ChannelLayout, file.DurationSeconds, file.Checksum, jsonText(file.EmbeddedTags),
+		file.Channels, file.ChannelLayout, file.DurationSeconds, durationMsValue(file), file.Checksum, jsonText(file.EmbeddedTags),
 		trackPID, contentHash, file.Path)
 	if err != nil {
 		return err
@@ -799,6 +828,15 @@ func (s *Scanner) refreshStats(ctx context.Context) error {
 		}
 	}
 	return nil
+}
+
+// durationMsValue returns the exact millisecond duration to persist, falling
+// back to whole seconds for files probed before ffprobe filled DurationMs.
+func durationMsValue(file catalog.AudioFile) int64 {
+	if file.DurationMs > 0 {
+		return file.DurationMs
+	}
+	return int64(file.DurationSeconds) * 1000
 }
 
 func boolInt(value bool) int {

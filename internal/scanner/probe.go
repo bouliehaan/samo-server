@@ -87,7 +87,12 @@ func (raw ffprobeResult) toProbeInfo(path string) probeInfo {
 		sizeBytes = parsed
 	}
 
-	duration := int(mathRound(parseFloat(raw.Format.Duration)))
+	durationSecondsFloat := parseFloat(raw.Format.Duration)
+	duration := int(mathRound(durationSecondsFloat))
+	var durationMs int64
+	if durationSecondsFloat > 0 {
+		durationMs = int64(durationSecondsFloat*1000 + 0.5)
+	}
 	bitrate := int(parseInt64(audioStream.BitRate))
 	if bitrate == 0 {
 		bitrate = int(parseInt64(raw.Format.BitRate))
@@ -112,6 +117,7 @@ func (raw ffprobeResult) toProbeInfo(path string) probeInfo {
 		Channels:        audioStream.Channels,
 		ChannelLayout:   audioStream.ChannelLayout,
 		DurationSeconds: duration,
+		DurationMs:      durationMs,
 		SizeBytes:       sizeBytes,
 		ModifiedAt:      modifiedAt,
 		Checksum:        fileChecksum(path, stat),
@@ -154,8 +160,8 @@ func (raw ffprobeResult) chapters() []catalog.AudioChapter {
 		chapters = append(chapters, catalog.AudioChapter{
 			Index:        index + 1,
 			Title:        title,
-			StartSeconds: int(mathRound(parseFloat(chapter.StartTime))),
-			EndSeconds:   int(mathRound(parseFloat(chapter.EndTime))),
+			StartSeconds: parseFloat(chapter.StartTime),
+			EndSeconds:   parseFloat(chapter.EndTime),
 		})
 	}
 	return chapters

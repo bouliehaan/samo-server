@@ -9,6 +9,13 @@ import (
 type PageRequest struct {
 	Limit  int
 	Offset int
+	// UpdatedSince, when non-zero, restricts list results to entities whose
+	// UpdatedAt is at or after this instant. It powers incremental ("delta")
+	// client syncs: a client replays its last sync watermark and receives only
+	// rows that changed since. Entities with a nil UpdatedAt are always
+	// included so a row predating updated_at tracking is never hidden from a
+	// delta consumer.
+	UpdatedSince time.Time
 }
 
 type Page[T any] struct {
@@ -85,36 +92,63 @@ type ExternalIDs struct {
 }
 
 type AudioFile struct {
-	ID              string     `json:"id"`
-	Path            string     `json:"path"`
-	RelativePath    string     `json:"relativePath,omitempty"`
-	FileName        string     `json:"fileName,omitempty"`
-	Container       string     `json:"container,omitempty"`
-	MimeType        string     `json:"mimeType,omitempty"`
-	Codec           string     `json:"codec,omitempty"`
-	CodecProfile    string     `json:"codecProfile,omitempty"`
-	MetadataFormats []string   `json:"metadataFormats,omitempty"`
-	Bitrate         int        `json:"bitrate,omitempty"`
-	BitDepth        int        `json:"bitDepth,omitempty"`
-	SampleRate      int        `json:"sampleRate,omitempty"`
-	Channels        int        `json:"channels,omitempty"`
-	ChannelLayout   string     `json:"channelLayout,omitempty"`
-	DurationSeconds int        `json:"durationSeconds"`
-	SizeBytes       int64      `json:"sizeBytes,omitempty"`
-	ModifiedAt      *time.Time `json:"modifiedAt,omitempty"`
-	Checksum        string     `json:"checksum,omitempty"`
-	EmbeddedTags    Tags       `json:"embeddedTags,omitempty"`
+	ID              string   `json:"id"`
+	Path            string   `json:"path"`
+	RelativePath    string   `json:"relativePath,omitempty"`
+	FileName        string   `json:"fileName,omitempty"`
+	Container       string   `json:"container,omitempty"`
+	MimeType        string   `json:"mimeType,omitempty"`
+	Codec           string   `json:"codec,omitempty"`
+	CodecProfile    string   `json:"codecProfile,omitempty"`
+	MetadataFormats []string `json:"metadataFormats,omitempty"`
+	Bitrate         int      `json:"bitrate,omitempty"`
+	BitDepth        int      `json:"bitDepth,omitempty"`
+	SampleRate      int      `json:"sampleRate,omitempty"`
+	Channels        int      `json:"channels,omitempty"`
+	ChannelLayout   string   `json:"channelLayout,omitempty"`
+	DurationSeconds int      `json:"durationSeconds"`
+	// DurationMs is the exact file duration in milliseconds. ffprobe reports
+	// fractional seconds; we keep them so multi-file audiobooks can compute
+	// book-global offsets without the integer rounding that used to make late
+	// chapters drift several seconds. Falls back to DurationSeconds*1000 for
+	// rows scanned before this field existed.
+	DurationMs int64 `json:"durationMs,omitempty"`
+	// StartOffsetSeconds is this file's start position on the book-global
+	// timeline (sum of every earlier file's exact duration). Always 0 for the
+	// first file, for music tracks, and for podcast episodes. Clients use it as
+	// the single source of truth for mapping book-time <-> (file, file-time) so
+	// they never re-accumulate per-file durations and drift.
+	StartOffsetSeconds float64    `json:"startOffsetSeconds,omitempty"`
+	SizeBytes          int64      `json:"sizeBytes,omitempty"`
+	ModifiedAt         *time.Time `json:"modifiedAt,omitempty"`
+	Checksum           string     `json:"checksum,omitempty"`
+	EmbeddedTags       Tags       `json:"embeddedTags,omitempty"`
 }
 
 type Tags map[string][]string
 
+// AudioChapter is one navigable chapter on the book-global timeline.
+//
+// Start/EndSeconds are fractional (float64) because retail audiobooks place
+// chapter boundaries at sub-second offsets and multi-file books accumulate
+// per-file durations — integer seconds drifted by up to a second per file,
+// which is why deep chapters used to land in the wrong place. The canonical
+// storage is integer milliseconds (audiobook_chapters.start_ms/end_ms); these
+// fields are ms/1000 and the JSON keys are unchanged so existing clients keep
+// reading them, now with full precision.
 type AudioChapter struct {
-	ID           string `json:"id,omitempty"`
-	Index        int    `json:"index"`
-	Title        string `json:"title"`
-	StartSeconds int    `json:"startSeconds"`
-	EndSeconds   int    `json:"endSeconds,omitempty"`
+	ID           string  `json:"id,omitempty"`
+	Index        int     `json:"index"`
+	Title        string  `json:"title"`
+	StartSeconds float64 `json:"startSeconds"`
+	EndSeconds   float64 `json:"endSeconds,omitempty"`
 }
+
+// StartMs returns the chapter start as exact integer milliseconds.
+func (c AudioChapter) StartMs() int64 { return int64(c.StartSeconds*1000 + 0.5) }
+
+// EndMs returns the chapter end as exact integer milliseconds.
+func (c AudioChapter) EndMs() int64 { return int64(c.EndSeconds*1000 + 0.5) }
 
 type PlaybackState struct {
 	UserID          string     `json:"userId,omitempty"`

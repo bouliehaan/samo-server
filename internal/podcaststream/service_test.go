@@ -9,6 +9,75 @@ import (
 	"testing"
 )
 
+func TestServeEnclosureResumesWhenRSSSizeMissing(t *testing.T) {
+	payload := []byte("0123456789abcdefghij")
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.Method {
+		case http.MethodHead:
+			w.Header().Set("Content-Length", "20")
+			w.WriteHeader(http.StatusOK)
+			return
+		}
+		if r.Header.Get("Range") != "bytes=10-" {
+			t.Fatalf("range = %q", r.Header.Get("Range"))
+		}
+		w.Header().Set("Content-Range", "bytes 10-19/20")
+		w.WriteHeader(http.StatusPartialContent)
+		_, _ = w.Write(payload[10:])
+	}))
+	defer upstream.Close()
+
+	service := New(ServiceOptions{AllowPrivateHosts: true})
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/stream", nil)
+	err := service.ServeEnclosure(context.Background(), Enclosure{
+		URL:             upstream.URL,
+		ContentType:     "audio/mpeg",
+		DurationSeconds: 10,
+		OffsetSeconds:   5,
+	}, rec, req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytesEqual(rec.Body.Bytes(), payload[10:]) {
+		t.Fatalf("body = %q", rec.Body.Bytes())
+	}
+}
+
+func TestServeEnclosureSkipsWhenUpstreamIgnoresRange(t *testing.T) {
+	payload := []byte("0123456789abcdefghij")
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodHead {
+			w.Header().Set("Content-Length", "20")
+			w.WriteHeader(http.StatusOK)
+			return
+		}
+		if r.Header.Get("Range") != "bytes=10-" {
+			t.Fatalf("range = %q", r.Header.Get("Range"))
+		}
+		w.Header().Set("Content-Length", "20")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write(payload)
+	}))
+	defer upstream.Close()
+
+	service := New(ServiceOptions{AllowPrivateHosts: true})
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/stream", nil)
+	err := service.ServeEnclosure(context.Background(), Enclosure{
+		URL:             upstream.URL,
+		ContentType:     "audio/mpeg",
+		DurationSeconds: 10,
+		OffsetSeconds:   5,
+	}, rec, req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytesEqual(rec.Body.Bytes(), payload[10:]) {
+		t.Fatalf("body = %q", rec.Body.Bytes())
+	}
+}
+
 func TestServeEnclosureProxiesBytes(t *testing.T) {
 	payload := []byte("0123456789abcdefghij")
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -85,6 +154,35 @@ func TestServeEnclosureForwardsClientRange(t *testing.T) {
 	body, _ := io.ReadAll(rec.Body)
 	if !bytesEqual(body, payload[2:6]) {
 		t.Fatalf("body = %q", body)
+	}
+}
+
+func TestServeEnclosureUsesHeadForClientHead(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodHead {
+			t.Fatalf("method = %s, want HEAD", r.Method)
+		}
+		w.Header().Set("Content-Length", "20")
+		w.Header().Set("Content-Type", "audio/mpeg")
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer upstream.Close()
+
+	service := New(ServiceOptions{AllowPrivateHosts: true})
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodHead, "/stream", nil)
+	if err := service.ServeEnclosure(context.Background(), Enclosure{
+		URL:         upstream.URL,
+		ContentType: "audio/mpeg",
+		SizeBytes:   20,
+	}, rec, req); err != nil {
+		t.Fatal(err)
+	}
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d", rec.Code)
+	}
+	if rec.Body.Len() != 0 {
+		t.Fatalf("body = %q, want empty", rec.Body.Bytes())
 	}
 }
 
