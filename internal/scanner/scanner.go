@@ -33,8 +33,12 @@ type Library struct {
 }
 
 type Options struct {
-	Covers              CoverResolver
-	FFprobePath         string
+	Covers      CoverResolver
+	FFprobePath string
+	// FFmpegPath is the ffmpeg binary used for audio-anchored chapter analysis
+	// (decoding each audiobook to a loudness envelope to find chapter silences).
+	// Optional; when empty, audio chapter analysis is unavailable.
+	FFmpegPath          string
 	PlaylistImport      PlaylistImporter
 	AutoImportPlaylists bool
 	ExternalScanner     bool
@@ -103,6 +107,7 @@ type ChapterLookup struct {
 type Scanner struct {
 	db                  *sql.DB
 	ffprobePath         string
+	ffmpegPath          string
 	covers              CoverResolver
 	playlistImport      PlaylistImporter
 	autoImportPlaylists bool
@@ -132,6 +137,7 @@ func NewWithOptions(db *sql.DB, options Options) *Scanner {
 	return &Scanner{
 		db:                  db,
 		ffprobePath:         ffprobePath,
+		ffmpegPath:          strings.TrimSpace(options.FFmpegPath),
 		covers:              options.Covers,
 		playlistImport:      options.PlaylistImport,
 		autoImportPlaylists: options.AutoImportPlaylists,

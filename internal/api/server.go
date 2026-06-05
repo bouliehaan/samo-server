@@ -157,6 +157,14 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("GET /setup/", s.setupPage)
 	s.mux.HandleFunc("GET /health", s.health)
 
+	// Browser favicon (public — fetched before login). Light/dark variants are
+	// selected by the <link media="(prefers-color-scheme:…)"> tags in the page
+	// heads; /favicon.ico is the bare-request fallback browsers ask for on every
+	// page, so it gets the full logo.
+	s.mux.HandleFunc("GET /favicon-light.png", serveFavicon(faviconLightPNG))
+	s.mux.HandleFunc("GET /favicon-dark.png", serveFavicon(faviconDarkPNG))
+	s.mux.HandleFunc("GET /favicon.ico", serveFavicon(faviconDarkPNG))
+
 	s.mux.HandleFunc("POST /api/v1/auth/login", s.loginUser)
 	s.handleAPI("POST /api/v1/auth/stream-token", s.issueStreamToken)
 

@@ -556,6 +556,22 @@ func (s *Scanner) setAudiobookChapterProvenance(ctx context.Context, audiobookID
 	return nil
 }
 
+// setAudioChapterMetrics records the audio chapter analysis confidence (0..1)
+// and the input signature the analysis ran on. The signature lets the analysis
+// pass skip a book whose files (and analyzer version) are unchanged, so the
+// expensive full-file decode happens once per file version rather than on every
+// scan.
+func (s *Scanner) setAudioChapterMetrics(ctx context.Context, audiobookID string, confidence float64, sig string) error {
+	if _, err := s.db.ExecContext(ctx, `
+		UPDATE audiobooks
+		SET chapter_confidence = ?, chapter_audio_sig = ?
+		WHERE id = ?`,
+		confidence, sig, audiobookID); err != nil {
+		return fmt.Errorf("set audio chapter metrics for %q: %w", audiobookID, err)
+	}
+	return nil
+}
+
 func (s *Scanner) replaceEpisodeChapters(ctx context.Context, episodeID string, chapters []catalog.AudioChapter) error {
 	if _, err := s.db.ExecContext(ctx, `DELETE FROM episode_chapters WHERE episode_id = ?`, episodeID); err != nil {
 		return fmt.Errorf("clear episode chapters: %w", err)

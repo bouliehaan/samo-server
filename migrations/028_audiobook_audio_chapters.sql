@@ -1,0 +1,21 @@
+-- Audio-anchored chapter alignment.
+--
+-- Chapter markers from embedded atoms and from Audnexus are both timed against a
+-- DIFFERENT master edition than the file on disk, so they drift — the deeper
+-- into the book, the worse. The audio itself doesn't lie: a narrator pauses
+-- between chapters, and those silences are real positions in THIS file. The
+-- analyzer (internal/chapteraudio) decodes each book, finds the significant
+-- silences with an adaptive, spectrum-aware detector, clusters the long gaps
+-- into chapter breaks, and borrows only the NAMES from existing metadata.
+--
+-- Two columns support that pass:
+--   chapter_confidence — 0..1 how strongly the audio supported the result, so a
+--                        weak/ambiguous book can be surfaced for review instead
+--                        of silently trusted.
+--   chapter_audio_sig  — a signature of the inputs the last analysis ran on
+--                        (file checksums + analyzer version). The pass skips a
+--                        book whose signature is unchanged, so the expensive
+--                        full-file decode runs once per file version, not every
+--                        scan. Empty string = never analyzed → eligible.
+ALTER TABLE audiobooks ADD COLUMN chapter_confidence REAL NOT NULL DEFAULT 0;
+ALTER TABLE audiobooks ADD COLUMN chapter_audio_sig TEXT NOT NULL DEFAULT '';

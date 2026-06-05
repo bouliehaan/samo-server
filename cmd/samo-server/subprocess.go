@@ -60,6 +60,7 @@ func runScanSubprocess(ctx context.Context, payloadPath string) {
 	scan := scanner.NewWithOptions(db, scanner.Options{
 		Covers:              coverService,
 		FFprobePath:         tools.FFprobe,
+		FFmpegPath:          tools.FFmpeg,
 		PlaylistImport:      playlistScanBridge{db: db, svc: playlistService},
 		AutoImportPlaylists: cfg.AutoImportPlaylists,
 		ExternalScanner:     false,

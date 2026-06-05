@@ -17,6 +17,15 @@ const (
 	chapterSourceCue      = "cue"      // markers read from a sidecar .cue
 	chapterSourceFile     = "file"     // degenerate one-chapter-per-file (navigationally useless)
 	chapterSourceNone     = "none"     // no chapters anywhere
+
+	// chapterSourceAudioAligned: boundaries derived from the audio's own silences,
+	// labelled with names borrowed from embedded/Audnexus metadata. The audio
+	// decided where (and how many); metadata only supplied the titles. This is the
+	// authoritative source — it can't drift, because it's measured from the file.
+	chapterSourceAudioAligned = "audio-aligned"
+	// chapterSourceAudioDetected: boundaries derived from the audio with NO
+	// metadata names available, so chapters are generically titled.
+	chapterSourceAudioDetected = "audio-detected"
 )
 
 // externalChaptersSafe calls the configured chapter provider but never lets a

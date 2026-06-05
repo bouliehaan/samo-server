@@ -28,6 +28,9 @@ const appHTML = `<!doctype html>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>SAMO SERVER</title>
+  <link rel="icon" type="image/png" href="/favicon-dark.png">
+  <link rel="icon" type="image/png" href="/favicon-light.png" media="(prefers-color-scheme: light)">
+  <link rel="icon" type="image/png" href="/favicon-dark.png" media="(prefers-color-scheme: dark)">
   <style>` + samoBaseCSS + `</style>
   <style>` + appCSS + `</style>
 </head>

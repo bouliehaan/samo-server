@@ -73,6 +73,10 @@ func TestStreamPodcastEpisodeProxiesRemoteEnclosure(t *testing.T) {
 		PodcastStream: podcaststream.New(podcaststream.ServiceOptions{AllowPrivateHosts: true}),
 	})
 
+	// Default request: NO offset query. The stored progress (5s) must NOT cause
+	// a server-side byte cut anymore — podcasts stream WHOLE and the client owns
+	// seeking. (The old size*offset/duration cut landed on the wrong byte for
+	// VBR/AAC and broke the seek bar.)
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/podcasts/episodes/ep-1/stream", nil)
 	rec := httptest.NewRecorder()
 	handler.ServeHTTP(rec, req)
@@ -83,7 +87,24 @@ func TestStreamPodcastEpisodeProxiesRemoteEnclosure(t *testing.T) {
 	if got := rec.Header().Get("X-Samo-Stream-Source"); got != "enclosure" {
 		t.Fatalf("source = %q", got)
 	}
-	if rec.Body.String() != string(payload[10:]) {
-		t.Fatalf("body = %q", rec.Body.Bytes())
+	if rec.Body.String() != string(payload) {
+		t.Fatalf("default request should serve the whole file, got %q", rec.Body.Bytes())
+	}
+
+	// Back-compat: an EXPLICIT offsetSeconds query still byte-resumes for older
+	// clients that haven't moved to client-owned seeking.
+	reqOffset := httptest.NewRequest(
+		http.MethodGet,
+		"/api/v1/podcasts/episodes/ep-1/stream?offsetSeconds=5",
+		nil,
+	)
+	recOffset := httptest.NewRecorder()
+	handler.ServeHTTP(recOffset, reqOffset)
+
+	if recOffset.Code != http.StatusOK && recOffset.Code != http.StatusPartialContent {
+		t.Fatalf("offset status = %d body = %s", recOffset.Code, recOffset.Body.String())
+	}
+	if recOffset.Body.String() != string(payload[10:]) {
+		t.Fatalf("explicit offset body = %q, want %q", recOffset.Body.Bytes(), payload[10:])
 	}
 }

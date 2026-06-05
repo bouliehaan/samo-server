@@ -116,18 +116,21 @@ func (s *Server) streamPodcastEpisode(w http.ResponseWriter, r *http.Request) {
 		s.streamPodcastEnclosure(w, r, episode)
 		return
 	}
-	playback := podcastStreamPlayback(r, episode.Progress)
+	playback := podcastStreamPlayback(r)
 	s.streamCatalogAudioFiles(w, r, audioFiles, playback, 0)
 }
 
-// podcastStreamPlayback applies an explicit stream offset query to on-disk files.
-// Remote enclosure streams use streamPodcastEnclosure + streamResumeSeconds instead.
-func podcastStreamPlayback(r *http.Request, saved catalog.PlaybackState) catalog.PlaybackState {
+// podcastStreamPlayback honors an EXPLICIT stream offset query (older desktop
+// clients doing server-side resume) but never falls back to saved progress: by
+// default we serve the whole file and let the player seek. The old saved-
+// progress fallback silently byte-sliced the stream (size*offset/duration),
+// which lands on the wrong byte for VBR/AAC.
+func podcastStreamPlayback(r *http.Request) catalog.PlaybackState {
 	query := catalog.StreamSelectQueryFromRequest(r)
 	if query.HasProgressSeconds {
 		return catalog.PlaybackState{ProgressSeconds: query.ProgressSeconds}
 	}
-	return saved
+	return catalog.PlaybackState{}
 }
 
 func (s *Server) filterReadablePodcastAudioFiles(ctx context.Context, files []catalog.AudioFile) []catalog.AudioFile {
@@ -193,7 +196,14 @@ func (s *Server) streamPodcastEnclosure(w http.ResponseWriter, r *http.Request, 
 		writeError(w, http.StatusNotFound, "no audio files available")
 		return
 	}
-	resume := streamResumeSeconds(r, episode.Progress.ProgressSeconds)
+	// Whole-file streaming by default: serve from byte 0 and let the player seek
+	// via HTTP Range (mirrors streamAudiobookFileWhole). Only an EXPLICIT
+	// offsetSeconds query still server-side resumes — for older clients (desktop)
+	// that haven't moved to client-owned seeking. The silent saved-progress
+	// fallback is gone: that size*offset/duration byte cut lands on the wrong
+	// byte for VBR/AAC and shears the container, the root cause of podcasts
+	// snapping back to where you started with a broken seek bar.
+	resume := streamResumeSeconds(r, 0)
 	if s.podcastCache != nil && s.podcastCache.Enabled() {
 		if cached, ok, err := s.podcastCache.Lookup(r.Context(), episode.ID, episode.EnclosureURL); err != nil {
 			writeError(w, http.StatusInternalServerError, err.Error())
