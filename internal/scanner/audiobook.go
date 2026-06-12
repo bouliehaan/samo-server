@@ -192,14 +192,34 @@ func (s *Scanner) persistAudiobookGroup(ctx context.Context, library Library, ro
 
 	if len(probes) > 0 || s.groupNeedsProbe(group.Files) {
 		chapters := flattenBookChapters(probes)
+		// "embedded" means a file actually carried chapter markers. The flatten
+		// step emits a whole-file placeholder chapter for files WITHOUT markers, so
+		// a non-zero chapter count alone proves nothing — a single-file book with
+		// no markers used to be mislabelled "embedded" here, get treated as real,
+		// and never consult Audnexus at all.
+		hasEmbedded := false
+		for _, probe := range probes {
+			if len(probe.Chapters) > 0 {
+				hasEmbedded = true
+				break
+			}
+		}
 		source := chapterSourceEmbedded
-		if len(chapters) == 0 {
+		switch {
+		case len(chapters) == 0:
 			if cue := readCueChapters(group.Root, probes); len(cue) > 0 {
 				chapters, source = cue, chapterSourceCue
 			} else {
 				source = chapterSourceNone
 			}
-		} else if isOneChapterPerFile(chapters, probes) {
+		case !hasEmbedded:
+			if cue := readCueChapters(group.Root, probes); len(cue) > 0 {
+				chapters, source = cue, chapterSourceCue
+			} else {
+				// Placeholder chapters only: a degenerate whole-file layout.
+				source = chapterSourceFile
+			}
+		case isOneChapterPerFile(chapters, probes):
 			source = chapterSourceFile
 		}
 

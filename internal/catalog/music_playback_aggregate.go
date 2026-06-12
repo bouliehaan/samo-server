@@ -79,6 +79,12 @@ func accumulatePlaybackState(current, add PlaybackState) PlaybackState {
 	if add.Rating > current.Rating {
 		current.Rating = add.Rating
 	}
+	if add.StateUpdatedAt != nil {
+		if current.StateUpdatedAt == nil || add.StateUpdatedAt.After(*current.StateUpdatedAt) {
+			t := *add.StateUpdatedAt
+			current.StateUpdatedAt = &t
+		}
+	}
 	return current
 }
 
@@ -106,6 +112,12 @@ func mergePlaybackStates(direct, rolled PlaybackState) PlaybackState {
 	out.Starred = out.Starred || rolled.Starred
 	if rolled.Rating > out.Rating {
 		out.Rating = rolled.Rating
+	}
+	if rolled.StateUpdatedAt != nil {
+		if out.StateUpdatedAt == nil || rolled.StateUpdatedAt.After(*out.StateUpdatedAt) {
+			t := *rolled.StateUpdatedAt
+			out.StateUpdatedAt = &t
+		}
 	}
 	return out
 }

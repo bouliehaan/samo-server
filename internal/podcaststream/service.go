@@ -21,7 +21,14 @@ var (
 )
 
 const (
-	maxRedirects          = 5
+	// Podcast enclosures route through stacked ad/analytics redirectors
+	// (podtrac → pdst.fm → mgln.ai → pscrb.fm → claritas → CDN …) before the
+	// actual audio. Real feeds measure 6-7 hops today (Audioboom and Megaphone
+	// shows both exceed the old cap of 5, which made every episode of those
+	// shows fail with "too many redirects"). 12 covers double the longest
+	// observed chain while still bounding redirect loops; every hop is also
+	// re-validated against the SSRF allowlist in CheckRedirect.
+	maxRedirects          = 12
 	defaultUserAgent      = "Mozilla/5.0 (compatible; Samo-Server/1.0)"
 	dialTimeout           = 15 * time.Second
 	tlsTimeout            = 15 * time.Second
@@ -139,9 +146,25 @@ func (s *Service) ServeEnclosure(ctx context.Context, enc Enclosure, w http.Resp
 		return fmt.Errorf("%w: status %d", ErrUpstream, resp.StatusCode)
 	}
 
+	upstreamContentType := strings.TrimSpace(resp.Header.Get("Content-Type"))
+	// A 200 carrying an HTML/JSON/XML body is an error or paywall page, not
+	// audio — common for premium or expired private feeds. The old path
+	// force-labeled it with the stored enclosure type (e.g. audio/mpeg) and
+	// streamed the HTML to the player, which surfaced as the misleading
+	// ExoPlayer "no supported source was found". Refuse it so the client gets a
+	// real, diagnosable error instead of a parse failure on garbage bytes.
+	if isHTMLorAPIErrorContentType(upstreamContentType) {
+		return fmt.Errorf("%w: upstream returned non-audio content (%s)", ErrUpstream, upstreamContentType)
+	}
+
 	copyResponseHeaders(w, resp)
-	if enc.ContentType != "" {
-		w.Header().Set("Content-Type", enc.ContentType)
+	// Prefer the CDN's actual audio Content-Type over the stored enclosure type
+	// (RSS feeds frequently declare the wrong one); fall back to the stored type
+	// only when the upstream's is missing or non-audio. Never force a non-audio
+	// type onto the response — that is what made the player pick the wrong
+	// extractor and fail.
+	if chosen := chooseEnclosureContentType(upstreamContentType, enc.ContentType); chosen != "" {
+		w.Header().Set("Content-Type", chosen)
 	}
 	if enc.OffsetSeconds > 0 {
 		w.Header().Set("X-Samo-Stream-Offset-Seconds", strconv.Itoa(enc.OffsetSeconds))
@@ -279,6 +302,53 @@ func forbiddenHost(host string) bool {
 		return ip.IsLoopback() || ip.IsPrivate() || ip.IsLinkLocalUnicast() || ip.IsUnspecified()
 	}
 	return false
+}
+
+func isAudioContentType(ct string) bool {
+	ct = strings.ToLower(strings.TrimSpace(ct))
+	if ct == "" {
+		return false
+	}
+	return strings.HasPrefix(ct, "audio/") ||
+		strings.Contains(ct, "mpeg") ||
+		strings.Contains(ct, "ogg")
+}
+
+// isHTMLorAPIErrorContentType reports content types that are definitively NOT
+// audio and signal an upstream error / paywall page. Deliberately conservative:
+// text/plain and application/octet-stream are intentionally NOT included, since
+// real publishers serve audio under them (or under no Content-Type at all,
+// which proxies auto-detect as text/plain).
+func isHTMLorAPIErrorContentType(ct string) bool {
+	ct = strings.ToLower(strings.TrimSpace(ct))
+	if ct == "" {
+		return false
+	}
+	return strings.Contains(ct, "html") ||
+		strings.HasPrefix(ct, "application/json") ||
+		strings.HasPrefix(ct, "application/xml") ||
+		strings.HasPrefix(ct, "text/xml") ||
+		strings.HasPrefix(ct, "application/rss")
+}
+
+// chooseEnclosureContentType picks the Content-Type to serve to the client,
+// preferring a real audio type from the CDN over a possibly-stale stored one,
+// and never forcing a non-audio label onto the stream.
+func chooseEnclosureContentType(upstream, stored string) string {
+	if isAudioContentType(upstream) {
+		return upstream
+	}
+	if isAudioContentType(stored) {
+		return stored
+	}
+	// Neither is clearly audio (e.g. application/octet-stream, text/plain, or a
+	// publisher that omitted the type). Keep whatever the upstream sent so the
+	// client can sniff the container from the bytes; fall back to the stored
+	// type only when the upstream gave us nothing.
+	if strings.TrimSpace(upstream) != "" {
+		return upstream
+	}
+	return stored
 }
 
 func copyResponseHeaders(w http.ResponseWriter, resp *http.Response) {

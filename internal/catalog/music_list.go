@@ -32,6 +32,22 @@ type MusicListOptions struct {
 	Playback  MusicListPlaybackOverlay
 }
 
+// latestTime returns the later of two optional timestamps — the effective
+// "this row changed" clock when an entity has both catalog metadata and a
+// per-user playback overlay.
+func latestTime(left, right *time.Time) *time.Time {
+	if left == nil {
+		return right
+	}
+	if right == nil {
+		return left
+	}
+	if right.After(*left) {
+		return right
+	}
+	return left
+}
+
 func (s *Service) ListMusicArtistsSorted(options MusicListOptions) Page[MusicArtist] {
 	s.mu.RLock()
 	items := append([]MusicArtist(nil), s.musicArtists...)
@@ -41,8 +57,14 @@ func (s *Service) ListMusicArtistsSorted(options MusicListOptions) Page[MusicArt
 	}
 	s.mu.RUnlock()
 
-	items = filterUpdatedSince(items, options.Page.UpdatedSince, func(a MusicArtist) *time.Time { return a.UpdatedAt })
+	// Overlay BEFORE the updatedSince filter: the served row includes the
+	// per-user playback fields, so "changed since" must mean EITHER catalog
+	// metadata or this user's playback moved — otherwise a delta-syncing
+	// client never re-receives a row whose only change is being played.
 	applyArtistPlaybackOverlay(items, options.Playback.ArtistStates, tracks, options.Playback.TrackStates)
+	items = filterUpdatedSince(items, options.Page.UpdatedSince, func(a MusicArtist) *time.Time {
+		return latestTime(a.UpdatedAt, a.Playback.StateUpdatedAt)
+	})
 	sortMusicArtistList(items, options)
 	return paginate(items, options.Page)
 }
@@ -56,8 +78,10 @@ func (s *Service) ListMusicAlbumsSorted(options MusicListOptions) Page[MusicAlbu
 	}
 	s.mu.RUnlock()
 
-	items = filterUpdatedSince(items, options.Page.UpdatedSince, func(a MusicAlbum) *time.Time { return a.UpdatedAt })
 	applyAlbumPlaybackOverlay(items, options.Playback.AlbumStates, tracks, options.Playback.TrackStates)
+	items = filterUpdatedSince(items, options.Page.UpdatedSince, func(a MusicAlbum) *time.Time {
+		return latestTime(a.UpdatedAt, a.Playback.StateUpdatedAt)
+	})
 	sortMusicAlbumList(items, options)
 	return paginate(items, options.Page)
 }
@@ -67,8 +91,10 @@ func (s *Service) ListMusicTracksSorted(options MusicListOptions) Page[MusicTrac
 	items := append([]MusicTrack(nil), s.musicTracks...)
 	s.mu.RUnlock()
 
-	items = filterUpdatedSince(items, options.Page.UpdatedSince, func(t MusicTrack) *time.Time { return t.UpdatedAt })
 	applyTrackPlaybackOverlay(items, options.Playback.TrackStates)
+	items = filterUpdatedSince(items, options.Page.UpdatedSince, func(t MusicTrack) *time.Time {
+		return latestTime(t.UpdatedAt, t.Playback.StateUpdatedAt)
+	})
 	sortMusicTrackList(items, options)
 	return paginate(items, options.Page)
 }

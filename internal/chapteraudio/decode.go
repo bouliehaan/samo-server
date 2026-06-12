@@ -85,6 +85,7 @@ func streamPCM(ctx context.Context, ffmpegPath, path string, onChunk func([]floa
 	if err := cmd.Start(); err != nil {
 		return fmt.Errorf("chapteraudio: start ffmpeg: %w", err)
 	}
+	deprioritizeDecoder(cmd)
 
 	readErr := decodeF32LE(bufio.NewReaderSize(stdout, 1<<16), onChunk)
 	// Always reap the child so we don't leak a zombie, even on a read error.

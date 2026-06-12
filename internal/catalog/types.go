@@ -161,6 +161,13 @@ type PlaybackState struct {
 	Completed       bool       `json:"completed"`
 	LastPlayedAt    *time.Time `json:"lastPlayedAt,omitempty"`
 	LastPositionAt  *time.Time `json:"lastPositionAt,omitempty"`
+	// StateUpdatedAt is the user_playback row's write clock — when THIS
+	// user's playback state for the entity last changed. List endpoints fold
+	// it into their updatedSince filter so a delta-syncing client re-receives
+	// rows whose playback overlay (playCount / lastPlayedAt / favorite)
+	// moved, not only rows whose catalog metadata changed. Without it, a
+	// client mirror's "most played" data silently freezes at first-sync.
+	StateUpdatedAt *time.Time `json:"stateUpdatedAt,omitempty"`
 }
 
 // ContributorRef is the inline "tag" form of a contributor — what you embed

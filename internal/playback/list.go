@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"strings"
+	"time"
 )
 
 // ListForUser returns playback states for one target kind keyed by catalog entity ID.
@@ -17,7 +18,7 @@ func (s *Service) ListForUser(ctx context.Context, userID string, kind TargetKin
 		return map[string]State{}, nil
 	}
 	rows, err := s.db.QueryContext(ctx, `
-		SELECT target_id, state_json
+		SELECT target_id, state_json, updated_at
 		FROM user_playback
 		WHERE user_id = ? AND target_kind = ?`, userID, string(kind))
 	if err != nil {
@@ -27,8 +28,8 @@ func (s *Service) ListForUser(ctx context.Context, userID string, kind TargetKin
 
 	out := map[string]State{}
 	for rows.Next() {
-		var targetID, raw string
-		if err := rows.Scan(&targetID, &raw); err != nil {
+		var targetID, raw, updatedAt string
+		if err := rows.Scan(&targetID, &raw, &updatedAt); err != nil {
 			return nil, err
 		}
 		state := State{UserID: userID}
@@ -36,7 +37,15 @@ func (s *Service) ListForUser(ctx context.Context, userID string, kind TargetKin
 			_ = json.Unmarshal([]byte(raw), &state)
 		}
 		state.UserID = userID
-		out[targetID] = normalizeState(state)
+		state = normalizeState(state)
+		// The row clock is authoritative over anything state_json carried.
+		if parsed, err := time.Parse(time.RFC3339, updatedAt); err == nil {
+			t := parsed
+			state.StateUpdatedAt = &t
+		} else {
+			state.StateUpdatedAt = nil
+		}
+		out[targetID] = state
 	}
 	return out, rows.Err()
 }

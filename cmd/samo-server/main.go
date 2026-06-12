@@ -234,13 +234,17 @@ func main() {
 		return nil
 	}
 	// Audio-anchored chapter analysis runs AFTER a scan, in the background — it
-	// decodes whole books, so it must never block the scan-complete callback. A
-	// single-flight guard means overlapping scans don't stack passes; the next
-	// completion catches up any books left stale. rootCtx outlives the per-scan
-	// callback ctx so a long pass isn't cancelled when the callback returns.
+	// decodes whole books, so it must never block the scan-complete callback and
+	// it NEVER runs at boot: a reboot must cost nothing when the library is
+	// already analyzed. Quick scans analyze only new/changed books; a FULL (or
+	// repair) scan is the explicit, user-initiated moment that also migrates the
+	// library onto a new analyzer version. A single-flight guard means
+	// overlapping scans don't stack passes; the next completion catches up any
+	// books left stale. rootCtx outlives the per-scan callback ctx so a long
+	// pass isn't cancelled when the callback returns.
 	rootCtx := ctx
 	var chapterPassMu sync.Mutex
-	runChapterPass := func() {
+	runChapterPass := func(scope scanner.ChapterPassScope) {
 		if !cfg.AudiobookChapterAnalysis || !scan.AudioChapterAnalysisEnabled() {
 			return
 		}
@@ -250,7 +254,7 @@ func main() {
 		}
 		go func() {
 			defer chapterPassMu.Unlock()
-			if _, _, err := scan.RunChapterAnalysisPass(rootCtx, false); err != nil {
+			if _, _, err := scan.RunChapterAnalysisPass(rootCtx, scope); err != nil {
 				log.Printf("audio chapter analysis: pass error: %v", err)
 			}
 		}()
@@ -260,7 +264,11 @@ func main() {
 			log.Printf("catalog reload after scan %s failed: %v", job.ID, err)
 		}
 		if job.Status == libraries.ScanStatusCompleted {
-			runChapterPass()
+			scope := scanner.ChapterPassChanged
+			if job.ScanMode == libraries.ScanModeFull || job.ScanMode == libraries.ScanModeRepair {
+				scope = scanner.ChapterPassMigrate
+			}
+			runChapterPass(scope)
 		}
 		if job.Status != libraries.ScanStatusCompleted || !cfg.ArtistImagesOnScan || !artistImageService.Enabled() {
 			return
@@ -275,11 +283,9 @@ func main() {
 			}
 		}
 	})
-	// Kick a chapter-analysis pass on startup too: most installs run with
-	// SAMO_SCAN_ON_START=false, so a scan-complete-only trigger would never fire
-	// and the feature would appear dead. The signature cache makes this cheap
-	// after the first boot (unchanged books are skipped without decoding).
-	runChapterPass()
+	// Deliberately NO chapter-analysis pass at startup. Booting the server must
+	// never re-decode the library: analysis happens only after scans (quick →
+	// changed books, full → version migration too) or via chapters-inspect --all.
 	if cfg.ScanOnStart {
 		log.Printf("scanning configured libraries on startup")
 		if _, err := libraryService.ScanAll(ctx, libraries.TriggerStartup, ""); err != nil {

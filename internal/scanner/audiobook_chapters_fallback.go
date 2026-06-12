@@ -37,14 +37,25 @@ func (s *Scanner) externalChaptersSafe(
 	ctx context.Context,
 	item catalog.AudiobookItem,
 	duration int,
-) (result ChapterResult) {
+) ChapterResult {
+	return s.providerChaptersSafe(ctx, s.chapterLookup(item, duration))
+}
+
+// providerChaptersSafe calls the configured chapter provider for an already-built
+// lookup, isolating any provider bug behind a recover so it can never take down
+// the scan or the analysis pass. On panic it returns a ChapterError result (not a
+// silent nil) so the caller still records that the lookup failed and why.
+func (s *Scanner) providerChaptersSafe(ctx context.Context, lookup ChapterLookup) (result ChapterResult) {
 	defer func() {
 		if r := recover(); r != nil {
 			log.Printf("scanner: external chapter provider panicked, keeping file chapters: %v", r)
 			result = ChapterResult{Outcome: ChapterError, Detail: fmt.Sprintf("panic: %v", r)}
 		}
 	}()
-	return s.chapterProvider.Chapters(ctx, s.chapterLookup(item, duration))
+	if s.chapterProvider == nil {
+		return ChapterResult{Outcome: ChapterError, Detail: "no chapter provider configured"}
+	}
+	return s.chapterProvider.Chapters(ctx, lookup)
 }
 
 // isOneChapterPerFile reports the degenerate shape flattenBookChapters produces

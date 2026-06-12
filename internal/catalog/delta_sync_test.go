@@ -168,3 +168,51 @@ func TestSyncManifest(t *testing.T) {
 		t.Fatalf("serverTime %v is not recent", manifest.ServerTime)
 	}
 }
+
+// TestListUpdatedSinceIncludesPlaybackOverlayChanges locks the delta contract
+// for per-user playback: a row whose catalog metadata is old but whose
+// playback state (play count / last played) moved past the watermark is
+// re-sent, including when the change arrives via the track→album rollup. A
+// client mirror's "most played" data goes permanently stale without this.
+func TestListUpdatedSinceIncludesPlaybackOverlayChanges(t *testing.T) {
+	since := time.Date(2026, 6, 1, 12, 0, 0, 0, time.UTC)
+	older := since.Add(-time.Hour)
+	playedAt := since.Add(time.Hour)
+
+	service := NewService(Seed{
+		MusicAlbums: []MusicAlbum{
+			{ID: "played-direct", Title: "A", UpdatedAt: timePtr(older)},
+			{ID: "played-via-track", Title: "B", UpdatedAt: timePtr(older)},
+			{ID: "untouched", Title: "C", UpdatedAt: timePtr(older)},
+		},
+		MusicTracks: []MusicTrack{
+			{ID: "t1", Title: "T1", AlbumID: "played-via-track", UpdatedAt: timePtr(older)},
+		},
+	})
+
+	delta := service.ListMusicAlbumsSorted(MusicListOptions{
+		Page: PageRequest{Limit: 100, UpdatedSince: since},
+		Playback: MusicListPlaybackOverlay{
+			AlbumStates: map[string]PlaybackState{
+				"played-direct": {PlayCount: 3, StateUpdatedAt: timePtr(playedAt)},
+			},
+			TrackStates: map[string]PlaybackState{
+				"t1": {PlayCount: 1, StateUpdatedAt: timePtr(playedAt)},
+			},
+		},
+	})
+
+	got := map[string]bool{}
+	for _, item := range delta.Items {
+		got[item.ID] = true
+	}
+	if !got["played-direct"] {
+		t.Fatalf("delta missing album whose direct playback state changed")
+	}
+	if !got["played-via-track"] {
+		t.Fatalf("delta missing album whose playback changed via track rollup")
+	}
+	if got["untouched"] {
+		t.Fatalf("delta included an album with no metadata or playback change")
+	}
+}
