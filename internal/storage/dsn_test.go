@@ -13,6 +13,9 @@ func TestOpenBusyTimeoutOnPooledConnection(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer db.Close()
+	if max := db.Stats().MaxOpenConnections; max != 16 {
+		t.Fatalf("max open connections = %d, want 16", max)
+	}
 
 	check := func(conn *sql.Conn) error {
 		var timeout int
@@ -23,7 +26,6 @@ func TestOpenBusyTimeoutOnPooledConnection(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer conn1.Close()
 	if err := check(conn1); err != nil {
 		t.Fatal(err)
 	}
@@ -33,6 +35,9 @@ func TestOpenBusyTimeoutOnPooledConnection(t *testing.T) {
 	}
 	if t1 < 60000 {
 		t.Fatalf("busy_timeout on conn1 = %d, want >= 60000", t1)
+	}
+	if err := conn1.Close(); err != nil {
+		t.Fatal(err)
 	}
 
 	conn2, err := db.Conn(ctx)

@@ -100,30 +100,131 @@ func (a *Analyzer) analyzeHardTarget(rep *Report, bookRungs []ladderRung, fileSt
 	rep.TargetCount = count
 	rep.HardTarget = true
 
-	// The expected chapter positions carry the metadata's own timing error. When
-	// the metadata's total runtime disagrees with the files (a slightly different
-	// cut of the same edition), every deep position is off by up to that delta —
-	// so the drift tolerance widens to absorb it rather than punishing every
-	// candidate for the edition gap.
+	need := count - 1
+	expected := expectedInternalStarts(meta)
+
+	// REGISTER the master chapter sequence onto this file before snapping. The
+	// Audnexus starts are MASTER-edition times; pasting them is the drift bug.
+	// Estimate the affine warp (head + scale) from the file's own candidate pauses
+	// and snap the WARPED predictions in a TIGHT window. The systematic head/scale
+	// offset is absorbed by the warp, not by a runtime-sized tolerance that lets a
+	// dramatic pause masquerade as a chapter break.
+	metaCov := metaCoverageSeconds(meta)
+
+	// REMOVE the accumulating per-file drift first. A CD rip's leading-silence
+	// priming makes the master→file map NONLINEAR — a single affine cannot follow
+	// it (that is why affine-only declines a stair rip). We measure each file's
+	// leading silence from its OWN audio (independent of the cumulative duration
+	// sum that embeds the drift) and shift every candidate into the de-drifted
+	// "master-content" clock, where one affine warp suffices. Chosen boundaries are
+	// converted back to real file time at the end. Inactive (identity) for
+	// single-file books and gapless rips.
+	dm := buildDriftModel(rep.Files)
+	rep.DriftSec = dm.total
+	wRungs, wFileStarts, wTotal := bookRungs, fileStarts, rep.DurationSec
+	// Drift correction is gated OFF by default: distinguishing inserted per-file
+	// padding (real drift) from a real pause that merely SPANS a file seam (not
+	// drift, the master carries it too) needs calibration against the golden set —
+	// counting a spanning pause as drift double-shifts and makes deep chapters
+	// worse. Until that's calibrated, the affine backbone ships alone and an
+	// accumulating-drift rip safely declines to the unregistered fallback.
+	useDrift := a.Params.DriftCorrection && dm.active()
+	if useDrift {
+		wRungs = dm.deDriftRungs(bookRungs)
+		wFileStarts = dm.deDriftedFileStarts()
+		wTotal = rep.DurationSec - dm.total
+	}
+
+	// REGISTER the master chapter sequence onto the (de-drifted) file timeline
+	// before snapping. The Audnexus starts are MASTER-edition times; pasting them is
+	// the drift bug. Fit against the strongest pauses only (seams + longest silences,
+	// ~3× the chapter count) so the registration locks onto real breaks, not the
+	// decoy cloud; the end-anchor uses the TRUE master runtime (Audnexus lengthMs).
+	candTimes := strongCandidateTimes(wRungs[0], wFileStarts, a.Params, wTotal, 3*need+4)
+	warp := estimateAffineWarp(expected, candTimes, metaRuntimeSeconds(meta), wTotal, a.Params.WarpInlierTolSec)
+	rep.HeadOffsetSec = warp.Head
+	rep.ScaleFactor = warp.Scale
+	rep.WarpInlierFrac = warp.inlierFraction()
+	rep.WarpTrusted = warp.Trusted
+
+	searchExpected := expected
+	// Fallback tolerance (registration NOT trusted): the metadata's own timing
+	// error widens the search so a deep position off by the edition gap still finds
+	// its candidate. Only used when the warp could not be fit confidently.
 	tolerance := a.Params.PositionDriftToleranceSec
-	if cov := metaCoverageSeconds(meta); cov > 0 && rep.DurationSec > 0 {
-		if delta := math.Abs(cov - rep.DurationSec); delta > tolerance {
+	if metaCov > 0 && wTotal > 0 {
+		if delta := math.Abs(metaCov - wTotal); delta > tolerance {
 			tolerance = delta
 		}
 	}
+	if warp.Trusted {
+		var chosen []chapterCandidate
+		var snapped int
+		note := ""
+		if useDrift {
+			// PER-FILE RIP with accumulating drift: the warp's drift correction is
+			// approximate, so pin each chapter to a real pause near its prediction —
+			// the silences carry the residual the warp couldn't model. Tight,
+			// fit-derived window; place-by-identity (interpolate a miss in place) so a
+			// nameless intro can't slide every later label one chapter over.
+			tolerance = clampF(4*warp.ResidualStd, a.Params.WarpSnapFloorSec, a.Params.WarpSnapCapSec)
+			pool := placementPool(wRungs[len(wRungs)-1], wFileStarts, a.Params, wTotal)
+			chosen, snapped = placeByWarp(warp, expected, pool, tolerance)
+			note = fmt.Sprintf("registered (drift %.2fs): head %+.2fs scale %.4f; placed %d/%d on a real pause (%d by warp)",
+				dm.total, warp.Head, warp.Scale, snapped, need, need-snapped)
+		} else {
+			// AFFINE MAP (single-file edition, clean re-encode, gapless rip): the warp
+			// maps each Audnexus marker — which Audible placed at the CHAPTER-NAME ONSET
+			// — straight onto this file. Do NOT snap to the nearest silence: that drags
+			// the boundary back to the start of the preceding pause, seconds off the
+			// name (the bug where single-file editions landed ~4s early and you missed
+			// "Chapter One"). Trust the registered position; it IS where Audible marks it.
+			chosen = placeAtWarpDirect(warp, expected)
+			snapped = len(expected)
+			note = fmt.Sprintf("registered (affine, no snap): head %+.2fs scale %.4f; placed %d Audnexus markers onto the file",
+				warp.Head, warp.Scale, need)
+		}
 
-	need := count - 1
-	expected := expectedInternalStarts(meta)
-	res := convergeBoundaries(bookRungs, fileStarts, expected, need, a.Params, rep.DurationSec, tolerance)
+		var cands []boundaryCand
+		for _, c := range chosen {
+			t := c.Time
+			if useDrift {
+				t = dm.reDrift(c.Time)
+			}
+			cands = append(cands, boundaryCand{Time: t, FromFile: c.FromFile})
+		}
+		merged := mergeBoundaries(cands, a.Params.MergeWithinSeconds, a.Params.EdgeMarginSeconds, rep.DurationSec)
+		exact := len(merged)+1 == count
+		a.fillBoundaries(rep, merged, meta, exact)
+		rep.CountMatched = exact
+		rep.GateOffsetDB = warp.Head // record the registration, not a gate
+		frac := 1.0
+		if need > 0 {
+			frac = float64(snapped) / float64(need)
+		}
+		rep.Confidence = clampF(0.55+0.4*frac, 0, 0.97)
+		rep.Notes = append(rep.Notes, note)
+		rep.Recommendation = a.recommendHard(rep)
+		return rep
+	}
+
+	// Registration not trusted: fall back to the loose nearest-candidate assignment
+	// with the wide tolerance, exactly as before the warp.
+	res := convergeBoundaries(wRungs, wFileStarts, searchExpected, need, a.Params, wTotal, tolerance)
 	rep.GateOffsetDB = res.gateOffsetDB
 	rep.SplitSeconds = res.cutoffSec
 	if res.note != "" {
 		rep.Notes = append(rep.Notes, res.note)
 	}
 
+	// Convert the chosen boundaries from the de-drifted clock back to real file time.
 	var cands []boundaryCand
 	for _, c := range res.chosen {
-		cands = append(cands, boundaryCand{Time: c.Time, FromFile: c.FromFile})
+		t := c.Time
+		if useDrift {
+			t = dm.reDrift(c.Time)
+		}
+		cands = append(cands, boundaryCand{Time: t, FromFile: c.FromFile})
 	}
 	// Selection already spaced and edge-trimmed the picks; merge is the shared
 	// final safety net (sort + collapse), kept so both paths emit through one door.
@@ -136,6 +237,78 @@ func (a *Analyzer) analyzeHardTarget(rep *Report, bookRungs []ladderRung, fileSt
 	rep.Confidence = hardConfidence(rep, res)
 	rep.Recommendation = a.recommendHard(rep)
 	return rep
+}
+
+// placementPool builds the candidate boundaries (file seams + valid silences at
+// the given rung) for warp-anchored per-chapter placement.
+func placementPool(rung ladderRung, fileStarts []float64, p Params, total float64) []chapterCandidate {
+	seams := seamCandidates(fileStarts, p, total)
+	seamTimes := make([]float64, len(seams))
+	for i, s := range seams {
+		seamTimes[i] = s.Time
+	}
+	pool := append([]chapterCandidate(nil), seams...)
+	for _, g := range validCandidates(rung.gaps, seamTimes, p, total) {
+		pool = append(pool, gapCandidate(g, p))
+	}
+	sort.Slice(pool, func(i, j int) bool { return pool[i].Time < pool[j].Time })
+	return pool
+}
+
+// placeAtWarpDirect places each chapter at its warped Audnexus position with NO
+// silence snapping — for affine maps where the warp is the truth and Audnexus
+// already sits at the chapter-name onset. Monotonic by construction (predictions
+// increase with the expected starts).
+func placeAtWarpDirect(w affineWarp, expected []float64) []chapterCandidate {
+	out := make([]chapterCandidate, 0, len(expected))
+	prev := math.Inf(-1)
+	for _, m := range expected {
+		t := w.predict(m)
+		if t <= prev {
+			t = prev + 0.001
+		}
+		out = append(out, chapterCandidate{Time: t, supported: true})
+		prev = t
+	}
+	return out
+}
+
+// placeByWarp places each expected chapter at its warped prediction, snapping to
+// the nearest pool candidate within tol that keeps the sequence strictly
+// increasing, else leaving it at the prediction (interpolated). Returns the chosen
+// candidates (time order) and how many snapped to a real pause. Because each
+// chapter is placed independently by its own identity, a chapter with no nearby
+// pause is interpolated in place rather than shifting every later chapter's label.
+func placeByWarp(w affineWarp, expected []float64, pool []chapterCandidate, tol float64) ([]chapterCandidate, int) {
+	chosen := make([]chapterCandidate, 0, len(expected))
+	snapped := 0
+	prev := math.Inf(-1)
+	for _, m := range expected {
+		p := w.predict(m)
+		best := -1
+		bestD := tol
+		for k, c := range pool {
+			if c.Time <= prev {
+				continue
+			}
+			if d := math.Abs(c.Time - p); d <= bestD {
+				bestD, best = d, k
+			}
+		}
+		if best >= 0 {
+			chosen = append(chosen, pool[best])
+			prev = pool[best].Time
+			snapped++
+			continue
+		}
+		t := p
+		if t <= prev {
+			t = prev + 0.001
+		}
+		chosen = append(chosen, chapterCandidate{Time: t, supported: false})
+		prev = t
+	}
+	return chosen, snapped
 }
 
 // convergeBoundaries is the heart of the count-driven detector. The metadata
@@ -342,6 +515,32 @@ func topCandidates(pool []chapterCandidate, need int, spacing float64) []chapter
 	return chosen
 }
 
+// strongCandidateTimes returns the candidate boundary times most likely to be
+// REAL chapter breaks — every file seam plus the `keep` longest detected silences
+// — for FITTING the affine warp. Fitting against only the strongest pauses keeps
+// the head/scale estimate from locking onto the dense cloud of short in-chapter
+// pauses: with enough decoys, almost any head fits "something" nearby, so an
+// unfiltered pool yields a confident-looking but wrong registration. (When chapter
+// pauses are NOT longer than paragraph pauses — e.g. a flat narrator — even this
+// is ambiguous; that is the case the per-file-onset drift and ASR tiers exist for.)
+func strongCandidateTimes(rung ladderRung, fileStarts []float64, p Params, total float64, keep int) []float64 {
+	seams := seamCandidates(fileStarts, p, total)
+	seamTimes := make([]float64, len(seams))
+	for i, s := range seams {
+		seamTimes[i] = s.Time
+	}
+	out := append([]float64(nil), seamTimes...)
+	gaps := validCandidates(rung.gaps, seamTimes, p, total)
+	sort.Slice(gaps, func(i, j int) bool { return gaps[i].Duration > gaps[j].Duration })
+	if keep > len(gaps) {
+		keep = len(gaps)
+	}
+	for _, g := range gaps[:keep] {
+		out = append(out, gapCandidate(g, p).Time)
+	}
+	return out
+}
+
 // seamCandidates turns the file seams into boundary candidates: exact split
 // offsets, edge-trimmed and deduped. Their rank (for the no-positions fallback)
 // is seamBaseScore; under assignment their advantage is the distance discount.
@@ -408,6 +607,17 @@ func expectedInternalStarts(meta []catalog.AudioChapter) []float64 {
 	}
 	sort.Float64s(out)
 	return out
+}
+
+// metaRuntimeSeconds is the master edition's TRUE total runtime: the last
+// chapter's end (Audnexus lengthMs). Unlike metaCoverageSeconds it does NOT fall
+// back to the last start — a fabricated runtime would corrupt the warp's
+// end-anchor — so it returns 0 when end times are absent, signalling "no anchor".
+func metaRuntimeSeconds(meta []catalog.AudioChapter) float64 {
+	if len(meta) == 0 {
+		return 0
+	}
+	return meta[len(meta)-1].EndSeconds
 }
 
 // metaCoverageSeconds is the metadata's own total runtime (last chapter end,

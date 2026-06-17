@@ -47,6 +47,10 @@ func (s *Scanner) scanAudiobookLibrary(ctx context.Context, library Library, roo
 }
 
 func (s *Scanner) scanAudiobook(ctx context.Context, library Library, root string, group groupedAudio) error {
+	if !s.groupNeedsProbe(group.Files) {
+		s.markAudiobookGroupSeen(library.ID, group)
+		return nil
+	}
 	probes, err := s.probeGroup(ctx, library.ID, root, group.Files, "audiobook_id")
 	if err != nil {
 		return err
@@ -190,84 +194,6 @@ func (s *Scanner) persistAudiobookGroup(ctx context.Context, library Library, ro
 		return err
 	}
 
-	if len(probes) > 0 || s.groupNeedsProbe(group.Files) {
-		chapters := flattenBookChapters(probes)
-		// "embedded" means a file actually carried chapter markers. The flatten
-		// step emits a whole-file placeholder chapter for files WITHOUT markers, so
-		// a non-zero chapter count alone proves nothing — a single-file book with
-		// no markers used to be mislabelled "embedded" here, get treated as real,
-		// and never consult Audnexus at all.
-		hasEmbedded := false
-		for _, probe := range probes {
-			if len(probe.Chapters) > 0 {
-				hasEmbedded = true
-				break
-			}
-		}
-		source := chapterSourceEmbedded
-		switch {
-		case len(chapters) == 0:
-			if cue := readCueChapters(group.Root, probes); len(cue) > 0 {
-				chapters, source = cue, chapterSourceCue
-			} else {
-				source = chapterSourceNone
-			}
-		case !hasEmbedded:
-			if cue := readCueChapters(group.Root, probes); len(cue) > 0 {
-				chapters, source = cue, chapterSourceCue
-			} else {
-				// Placeholder chapters only: a degenerate whole-file layout.
-				source = chapterSourceFile
-			}
-		case isOneChapterPerFile(chapters, probes):
-			source = chapterSourceFile
-		}
-
-		// Audible-authoritative chapters. When we can VERIFY an Audible edition
-		// (title + author + runtime), its authored markers REPLACE whatever the
-		// files carried — Audible is the source of truth, not a last resort. When
-		// no match verifies we keep the file chapters, but we ALWAYS log the
-		// outcome so a book that fell back is visible, never silently wrong.
-		var asin string
-		var syncedAt *time.Time
-		// Real in-file markers (embedded chapter atoms or a .cue sidecar) are
-		// positions in the ACTUAL audio, so they cannot drift. Audnexus markers
-		// are timed against the Audible master edition; when they REPLACE real
-		// markers they reintroduce a cumulative offset that grows the deeper you
-		// get — the "first chapters are fine, then it drifts further and further
-		// off" bug. So Audnexus is consulted ONLY when the files gave us nothing
-		// navigable (a whole-book or one-chapter-per-file degenerate layout).
-		// This mirrors Audiobookshelf, which trusts the embedded chapters and
-		// uses an Audnexus lookup only to FILL IN chapters that aren't on disk.
-		fileChaptersAreReal := source == chapterSourceEmbedded || source == chapterSourceCue
-		if s.chapterProvider != nil && !fileChaptersAreReal {
-			result := s.externalChaptersSafe(ctx, item, duration)
-			if result.Outcome == ChapterApplied && len(result.Chapters) > 0 {
-				chapters = fixChapterEndTimes(result.Chapters, float64(duration))
-				source, asin = result.Source, result.ASIN
-				now := time.Now().UTC()
-				syncedAt = &now
-				log.Printf("scanner: audiobook %q: applied %d Audnexus chapter(s) (%s)",
-					group.Root, len(chapters), result.Detail)
-			} else {
-				log.Printf("scanner: audiobook %q: kept %s chapters — Audnexus did not apply: %s (%s)",
-					group.Root, source, result.Outcome, result.Detail)
-			}
-		} else if s.chapterProvider != nil {
-			log.Printf("scanner: audiobook %q: kept %d real in-file %s chapter(s); Audnexus not consulted (on-disk markers are authoritative)",
-				group.Root, len(chapters), source)
-		}
-
-		// Always rewrite chapter rows on a successful probe so stale markers from
-		// older scans do not linger in the API, and record where they came from.
-		if err := s.replaceAudiobookChapters(ctx, item.ID, chapters); err != nil {
-			return err
-		}
-		if err := s.setAudiobookChapterProvenance(ctx, item.ID, source, asin, syncedAt); err != nil {
-			return err
-		}
-	}
-
 	if len(probes) > 0 {
 		for _, probed := range probes {
 			file := probed.AudioFile
@@ -277,6 +203,30 @@ func (s *Scanner) persistAudiobookGroup(ctx context.Context, library Library, ro
 				continue
 			}
 		}
+
+		chapters := flattenBookChapters(probes)
+		source := chapterSourceFile
+		hasEmbedded := false
+		for _, probe := range probes {
+			if len(probe.Chapters) > 0 {
+				hasEmbedded = true
+				break
+			}
+		}
+		if hasEmbedded {
+			source = chapterSourceEmbedded
+		} else if cue := readCueChapters(group.Root, probes); len(cue) > 0 {
+			chapters = fixChapterEndTimes(cue, float64(duration))
+			source = chapterSourceCue
+		}
+
+		if err := s.replaceAudiobookChapters(ctx, item.ID, chapters); err != nil {
+			return err
+		}
+		if err := s.setAudiobookChapterProvenance(ctx, item.ID, source, "", nil); err != nil {
+			log.Printf("scanner: warning: could not set chapter provenance: %v", err)
+		}
+
 		return nil
 	}
 	for _, path := range group.Files {

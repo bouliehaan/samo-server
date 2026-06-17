@@ -9,6 +9,7 @@ import (
 
 type Service struct {
 	db              *sql.DB
+	readDB          *sql.DB
 	legacyAPIToken  string
 	legacyTokenHash string
 	streamTokens    *streamTokenStore
@@ -16,17 +17,30 @@ type Service struct {
 
 type ServiceOptions struct {
 	DB             *sql.DB
+	ReadDB         *sql.DB
 	LegacyAPIToken string
 }
 
 func New(options ServiceOptions) *Service {
 	token := strings.TrimSpace(options.LegacyAPIToken)
+	readDB := options.ReadDB
+	if readDB == nil {
+		readDB = options.DB
+	}
 	return &Service{
 		db:              options.DB,
+		readDB:          readDB,
 		legacyAPIToken:  token,
 		legacyTokenHash: hashToken(token),
 		streamTokens:    newStreamTokenStore(),
 	}
+}
+
+func (s *Service) dbForRead() *sql.DB {
+	if s.readDB != nil {
+		return s.readDB
+	}
+	return s.db
 }
 
 func (s *Service) Enabled() bool {
@@ -57,7 +71,7 @@ func (s *Service) AuthenticateStreamToken(ctx context.Context, token string) (Pr
 	if !ok {
 		return Principal{}, ErrUnauthorized
 	}
-	user, err := loadUserByID(ctx, s.db, userID)
+	user, err := loadUserByID(ctx, s.dbForRead(), userID)
 	if err != nil {
 		return Principal{}, ErrUnauthorized
 	}
@@ -85,13 +99,13 @@ func (s *Service) AuthenticateToken(ctx context.Context, token string) (Principa
 		return Principal{}, ErrUnauthorized
 	}
 	if s.legacyAPIToken != "" && token == s.legacyAPIToken {
-		user, err := loadUserByID(ctx, s.db, BootstrapUserID)
+		user, err := loadUserByID(ctx, s.dbForRead(), BootstrapUserID)
 		if err != nil {
 			return Principal{}, err
 		}
 		return Principal{User: user}, nil
 	}
-	user, _, err := loadUserByTokenHash(ctx, s.db, hashToken(token))
+	user, _, err := loadUserByTokenHash(ctx, s.dbForRead(), hashToken(token))
 	if err != nil {
 		return Principal{}, ErrUnauthorized
 	}
@@ -102,7 +116,7 @@ func (s *Service) AuthenticateCredentials(ctx context.Context, username, passwor
 	if !s.Enabled() {
 		return Principal{}, ErrDisabled
 	}
-	user, passwordHash, err := loadUserByUsername(ctx, s.db, strings.TrimSpace(username))
+	user, passwordHash, err := loadUserByUsername(ctx, s.dbForRead(), strings.TrimSpace(username))
 	if err != nil {
 		return Principal{}, ErrUnauthorized
 	}
@@ -113,16 +127,16 @@ func (s *Service) AuthenticateCredentials(ctx context.Context, username, passwor
 }
 
 func (s *Service) Get(ctx context.Context, id string) (User, error) {
-	return loadUserByID(ctx, s.db, strings.TrimSpace(id))
+	return loadUserByID(ctx, s.dbForRead(), strings.TrimSpace(id))
 }
 
 func (s *Service) GetByUsername(ctx context.Context, username string) (User, error) {
-	user, _, err := loadUserByUsername(ctx, s.db, strings.TrimSpace(username))
+	user, _, err := loadUserByUsername(ctx, s.dbForRead(), strings.TrimSpace(username))
 	return user, err
 }
 
 func (s *Service) List(ctx context.Context) ([]User, error) {
-	return listUsers(ctx, s.db)
+	return listUsers(ctx, s.dbForRead())
 }
 
 func (s *Service) Create(ctx context.Context, actor Principal, input CreateUserInput) (User, error) {
@@ -198,7 +212,7 @@ func (s *Service) IssueToken(ctx context.Context, actor Principal, input CreateT
 	if err := insertToken(ctx, s.db, tokenID, actor.User.ID, label, hashToken(secret)); err != nil {
 		return TokenIssue{}, err
 	}
-	tokens, err := listTokens(ctx, s.db, actor.User.ID)
+	tokens, err := listTokens(ctx, s.dbForRead(), actor.User.ID)
 	if err != nil {
 		return TokenIssue{}, err
 	}
@@ -213,7 +227,7 @@ func (s *Service) IssueToken(ctx context.Context, actor Principal, input CreateT
 }
 
 func (s *Service) ListTokens(ctx context.Context, actor Principal) ([]Token, error) {
-	return listTokens(ctx, s.db, actor.User.ID)
+	return listTokens(ctx, s.dbForRead(), actor.User.ID)
 }
 
 func (s *Service) RevokeToken(ctx context.Context, actor Principal, tokenID string) error {

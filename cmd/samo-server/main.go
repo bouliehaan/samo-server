@@ -6,8 +6,10 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"os/signal"
 	"path/filepath"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/bouliehaan/samo-server/internal/api"
@@ -37,7 +39,8 @@ import (
 )
 
 func main() {
-	ctx := context.Background()
+	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer cancel()
 
 	if payload := scanner.PayloadPathFromArgs(os.Args[1:]); payload != "" {
 		runScanSubprocess(ctx, payload)
@@ -62,6 +65,12 @@ func main() {
 	if err := storage.ApplyMigrations(ctx, db, migrations.Files); err != nil {
 		log.Fatal(err)
 	}
+
+	readDB, err := storage.OpenReadOnly(ctx, cfg.DBPath)
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer readDB.Close()
 
 	tools, err := toolchain.Resolve(toolchain.Options{DataDir: cfg.DataDir})
 	if err != nil {
@@ -116,7 +125,7 @@ func main() {
 		log.Printf("startup stat refresh failed: %v", err)
 	}
 
-	catalogSeed, err := catalog.LoadSeedFromDB(ctx, db)
+	catalogSeed, err := catalog.LoadSeedFromDB(ctx, readDB)
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -132,7 +141,7 @@ func main() {
 	}
 
 	catalogService := catalog.NewService(catalogSeed)
-	playbackService := playback.New(db)
+	playbackService := playback.NewWithReadDB(db, readDB)
 	metadataService := metadata.NewDefaultService(cfg.MetadataProviders, cfg.MetadataUserAgent)
 	coverService.SetRemoteOptions(covers.RemoteOptions{})
 	metadataApplyService := metadata.NewMetadataApplyServiceWithOptions(db, metadata.MetadataApplyOptions{
@@ -142,7 +151,7 @@ func main() {
 	podcastStreamService := podcaststream.New()
 	searchService := search.New()
 	searchService.Rebuild(catalogSeed)
-	bookmarksService := bookmarks.New(db)
+	bookmarksService := bookmarks.New(db, readDB)
 	podcastCacheService, err := podcastcache.New(db, podcastcache.Options{
 		CacheDir:     filepath.Join(cfg.DataDir, "podcast-cache"),
 		Enabled:      cfg.PodcastCache,
@@ -162,6 +171,7 @@ func main() {
 	})
 	userService := users.New(users.ServiceOptions{
 		DB:             db,
+		ReadDB:         readDB,
 		LegacyAPIToken: cfg.APIToken,
 	})
 	// Bootstrap only creates an admin when env vars supply credentials. When
@@ -225,50 +235,21 @@ func main() {
 	reloadCatalog := func(ctx context.Context) error {
 		catalogReloadMu.Lock()
 		defer catalogReloadMu.Unlock()
-		seed, err := catalog.LoadSeedFromDB(ctx, db)
-		if err != nil {
+		var seed catalog.Seed
+		if err := storage.Retry(ctx, 8, func() error {
+			var loadErr error
+			seed, loadErr = catalog.LoadSeedFromDB(ctx, readDB)
+			return loadErr
+		}); err != nil {
 			return err
 		}
 		catalogService.Replace(seed)
 		searchService.Rebuild(seed)
 		return nil
 	}
-	// Audio-anchored chapter analysis runs AFTER a scan, in the background — it
-	// decodes whole books, so it must never block the scan-complete callback and
-	// it NEVER runs at boot: a reboot must cost nothing when the library is
-	// already analyzed. Quick scans analyze only new/changed books; a FULL (or
-	// repair) scan is the explicit, user-initiated moment that also migrates the
-	// library onto a new analyzer version. A single-flight guard means
-	// overlapping scans don't stack passes; the next completion catches up any
-	// books left stale. rootCtx outlives the per-scan callback ctx so a long
-	// pass isn't cancelled when the callback returns.
-	rootCtx := ctx
-	var chapterPassMu sync.Mutex
-	runChapterPass := func(scope scanner.ChapterPassScope) {
-		if !cfg.AudiobookChapterAnalysis || !scan.AudioChapterAnalysisEnabled() {
-			return
-		}
-		if !chapterPassMu.TryLock() {
-			log.Printf("audio chapter analysis: a pass is already running; will catch up after the next scan")
-			return
-		}
-		go func() {
-			defer chapterPassMu.Unlock()
-			if _, _, err := scan.RunChapterAnalysisPass(rootCtx, scope); err != nil {
-				log.Printf("audio chapter analysis: pass error: %v", err)
-			}
-		}()
-	}
 	libraryService.OnScanComplete(func(ctx context.Context, job libraries.ScanJob, stats scanner.ScanStats) {
 		if err := reloadCatalog(ctx); err != nil {
 			log.Printf("catalog reload after scan %s failed: %v", job.ID, err)
-		}
-		if job.Status == libraries.ScanStatusCompleted {
-			scope := scanner.ChapterPassChanged
-			if job.ScanMode == libraries.ScanModeFull || job.ScanMode == libraries.ScanModeRepair {
-				scope = scanner.ChapterPassMigrate
-			}
-			runChapterPass(scope)
 		}
 		if job.Status != libraries.ScanStatusCompleted || !cfg.ArtistImagesOnScan || !artistImageService.Enabled() {
 			return
@@ -283,9 +264,9 @@ func main() {
 			}
 		}
 	})
-	// Deliberately NO chapter-analysis pass at startup. Booting the server must
-	// never re-decode the library: analysis happens only after scans (quick →
-	// changed books, full → version migration too) or via chapters-inspect --all.
+	// Deliberately no audiobook chapter analysis is attached to server scans.
+	// Chapter tooling remains isolated for explicit/manual use, but library scans
+	// should be strict metadata/file scans and must not rewrite navigation data.
 	if cfg.ScanOnStart {
 		log.Printf("scanning configured libraries on startup")
 		if _, err := libraryService.ScanAll(ctx, libraries.TriggerStartup, ""); err != nil {
@@ -422,9 +403,27 @@ func main() {
 		log.Printf("last.fm scrobbling: disabled (set SAMO_LASTFM_API_KEY and SAMO_LASTFM_SHARED_SECRET)")
 	}
 
-	if err := http.Serve(listener, handler); err != nil {
-		log.Fatal(err)
+	srv := &http.Server{
+		Handler: handler,
 	}
+
+	go func() {
+		if err := srv.Serve(listener); err != nil && err != http.ErrServerClosed {
+			log.Fatalf("http server error: %v", err)
+		}
+	}()
+
+	<-ctx.Done()
+	log.Println("shutting down gracefully...")
+
+	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer shutdownCancel()
+
+	if err := srv.Shutdown(shutdownCtx); err != nil {
+		log.Printf("http server shutdown error: %v", err)
+	}
+
+	log.Println("samo-server stopped")
 }
 
 // podcastCacheAdapter satisfies channels.EpisodeCacheLookup by forwarding

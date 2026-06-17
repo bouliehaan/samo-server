@@ -81,10 +81,42 @@ func (s *Server) streamAudiobookFileWhole(w http.ResponseWriter, r *http.Request
 	if target.StartOffsetMs > 0 {
 		w.Header().Set("X-Samo-Stream-File-Offset-Ms", strconv.FormatInt(target.StartOffsetMs, 10))
 	}
-	// offsetSeconds is hard-wired to 0: serve the whole file, let the player seek.
+	// `at` (book-global seconds) requests a frame-accurate seek for formats the
+	// player can't seek precisely on its own (VBR MP3, where the Xing table lands
+	// 20-70s off). Convert to a file-local second and serve from the exact frame;
+	// absent/zero falls back to whole-file serving with the player seeking.
+	if at := audiobookSeekSeconds(r); at > 0 {
+		fileAt := at - float64(target.StartOffsetMs)/1000
+		if fileAt < 0 {
+			fileAt = 0
+		}
+		if err := s.filesService().ServeMediaFileAtSeconds(r.Context(), target.FileID, fileAt, w, r); err != nil {
+			writeFilesError(w, err)
+		}
+		return
+	}
 	if err := s.filesService().ServeMediaFileAt(r.Context(), target.FileID, 0, w, r); err != nil {
 		writeFilesError(w, err)
 	}
+}
+
+// audiobookSeekSeconds reads the optional book-global seek position the client
+// encodes in the stream URL. It accepts the same keys the file selector does
+// (`at`, `offsetSeconds`, `progressSeconds`) so a single param both picks the
+// file and frame-accurately seeks within it. Returns 0 when absent or invalid.
+func audiobookSeekSeconds(r *http.Request) float64 {
+	for _, key := range []string{"at", "offsetSeconds", "progressSeconds"} {
+		raw := r.URL.Query().Get(key)
+		if raw == "" {
+			continue
+		}
+		v, err := strconv.ParseFloat(raw, 64)
+		if err != nil || v < 0 {
+			continue
+		}
+		return v
+	}
+	return 0
 }
 
 func (s *Server) streamPodcastEpisode(w http.ResponseWriter, r *http.Request) {

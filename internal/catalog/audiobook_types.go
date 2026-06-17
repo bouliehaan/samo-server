@@ -26,9 +26,16 @@ type AudiobookItem struct {
 	Book            *BookMetadata  `json:"book,omitempty"`
 	AudioFiles      []AudioFile    `json:"audioFiles,omitempty"`
 	Chapters        []AudioChapter `json:"chapters,omitempty"`
-	AddedAt         *time.Time     `json:"addedAt,omitempty"`
-	UpdatedAt       *time.Time     `json:"updatedAt,omitempty"`
-	LastScanAt      *time.Time     `json:"lastScanAt,omitempty"`
+	// Chapter provenance, so clients can show how a book was chaptered and flag the
+	// uncertain ones for review instead of trusting every marker equally.
+	// ChapterSource: embedded | cue | audnexus | audio-aligned | file | none.
+	// ChapterConfidence: 0..1 from the audio registration (0 for embedded/file).
+	ChapterSource     string     `json:"chapterSource,omitempty"`
+	ChapterConfidence float64    `json:"chapterConfidence,omitempty"`
+	ChapterASIN       string     `json:"chapterAsin,omitempty"`
+	AddedAt           *time.Time `json:"addedAt,omitempty"`
+	UpdatedAt         *time.Time `json:"updatedAt,omitempty"`
+	LastScanAt        *time.Time `json:"lastScanAt,omitempty"`
 }
 
 // BookMetadata is the book-specific metadata embedded in an AudiobookItem.

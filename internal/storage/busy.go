@@ -12,7 +12,13 @@ func IsBusy(err error) bool {
 		return false
 	}
 	msg := strings.ToLower(err.Error())
-	return strings.Contains(msg, "database is locked") || strings.Contains(msg, "sqlite_busy")
+	return strings.Contains(msg, "database is locked") ||
+		strings.Contains(msg, "database table is locked") ||
+		strings.Contains(msg, "database schema is locked") ||
+		strings.Contains(msg, "sqlite_busy") ||
+		strings.Contains(msg, "sqlite_locked") ||
+		strings.Contains(msg, "code 5") ||
+		strings.Contains(msg, "code 6")
 }
 
 // Retry runs fn until it succeeds, ctx is done, or attempts is exhausted. Busy errors

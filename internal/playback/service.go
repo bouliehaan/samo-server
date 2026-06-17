@@ -7,11 +7,19 @@ import (
 )
 
 type Service struct {
-	db *sql.DB
+	db     *sql.DB
+	readDB *sql.DB
 }
 
 func New(db *sql.DB) *Service {
-	return &Service{db: db}
+	return &Service{db: db, readDB: db}
+}
+
+func NewWithReadDB(db, readDB *sql.DB) *Service {
+	if readDB == nil {
+		readDB = db
+	}
+	return &Service{db: db, readDB: readDB}
 }
 
 func (s *Service) Get(ctx context.Context, userID string, kind TargetKind, id string) (State, error) {
@@ -23,7 +31,7 @@ func (s *Service) Get(ctx context.Context, userID string, kind TargetKind, id st
 	if userID == "" || id == "" {
 		return State{}, ErrNotFound
 	}
-	return loadState(ctx, s.db, userID, kind, id)
+	return loadState(ctx, s.readDB, userID, kind, id)
 }
 
 func (s *Service) Put(ctx context.Context, userID string, kind TargetKind, id string, state State) (State, error) {

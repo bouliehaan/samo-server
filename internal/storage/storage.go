@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"time"
 
 	// modernc.org/sqlite is a pure-Go SQLite driver — no CGO, no libc
 	// dependency. This is what lets samo-server ship as a single statically-
@@ -17,35 +18,74 @@ import (
 	_ "modernc.org/sqlite"
 )
 
+type OpenOptions struct {
+	ReadOnly     bool
+	MaxOpenConns int
+	MaxIdleConns int
+	BusyTimeout  time.Duration
+	ForeignKeys  bool
+	JournalMode  string
+	Synchronous  string
+	CacheShared  bool
+}
+
+var defaultOpenOptions = OpenOptions{
+	MaxOpenConns: 16,
+	MaxIdleConns: 8,
+	BusyTimeout:  60 * time.Second,
+	ForeignKeys:  true,
+	JournalMode:  "WAL",
+	Synchronous:  "NORMAL",
+	CacheShared:  false,
+}
+
 func Open(ctx context.Context, path string) (*sql.DB, error) {
+	return OpenWithOptions(ctx, path, defaultOpenOptions)
+}
+
+func OpenReadOnly(ctx context.Context, path string) (*sql.DB, error) {
+	opts := defaultOpenOptions
+	opts.ReadOnly = true
+	return OpenWithOptions(ctx, path, opts)
+}
+
+func OpenWithOptions(ctx context.Context, path string, opts OpenOptions) (*sql.DB, error) {
 	path = strings.TrimSpace(path)
 	if path == "" {
 		return nil, fmt.Errorf("database path cannot be empty")
 	}
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
-		return nil, fmt.Errorf("create database directory: %w", err)
+	if !opts.ReadOnly {
+		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+			return nil, fmt.Errorf("create database directory: %w", err)
+		}
 	}
 
 	// _pragma query params apply to every connection in the pool. Exec'ing PRAGMA
 	// once after Open only affects the first pooled connection, which caused
 	// SQLITE_BUSY under scan load when progress and catalog writes used other conns.
-	db, err := sql.Open("sqlite", sqliteDSN(path))
+	db, err := sql.Open("sqlite", sqliteDSN(path, opts))
 	if err != nil {
 		return nil, fmt.Errorf("open sqlite database: %w", err)
 	}
-	// WAL allows concurrent readers while a scan or catalog reload writes.
-	db.SetMaxOpenConns(4)
+	if opts.MaxOpenConns > 0 {
+		db.SetMaxOpenConns(opts.MaxOpenConns)
+	}
+	if opts.MaxIdleConns > 0 {
+		db.SetMaxIdleConns(opts.MaxIdleConns)
+	}
 
 	// Ensure WAL on existing databases created before DSN pragmas.
-	if _, err := db.ExecContext(ctx, `PRAGMA journal_mode = WAL`); err != nil {
-		db.Close()
-		return nil, fmt.Errorf("apply sqlite journal_mode: %w", err)
+	if !opts.ReadOnly {
+		if _, err := db.ExecContext(ctx, `PRAGMA journal_mode = WAL`); err != nil {
+			db.Close()
+			return nil, fmt.Errorf("apply sqlite journal_mode: %w", err)
+		}
 	}
 
 	return db, nil
 }
 
-func sqliteDSN(path string) string {
+func sqliteDSN(path string, opts OpenOptions) string {
 	abs := path
 	if a, err := filepath.Abs(path); err == nil {
 		abs = a
@@ -55,12 +95,28 @@ func sqliteDSN(path string) string {
 		Path:   filepath.ToSlash(abs),
 	}
 	q := url.Values{}
-	q.Add("_pragma", "busy_timeout(60000)")
-	q.Add("_pragma", "journal_mode(WAL)")
-	q.Add("_pragma", "foreign_keys(ON)")
-	q.Add("_pragma", "synchronous(NORMAL)")
+	q.Add("_pragma", fmt.Sprintf("busy_timeout(%d)", int(opts.BusyTimeout.Milliseconds())))
+	q.Add("_pragma", fmt.Sprintf("foreign_keys(%s)", boolToOnOff(opts.ForeignKeys)))
+	if opts.ReadOnly {
+		q.Add("mode", "ro")
+		q.Add("_pragma", "query_only(ON)")
+	} else {
+		q.Add("_pragma", fmt.Sprintf("journal_mode(%s)", opts.JournalMode))
+		q.Add("_pragma", fmt.Sprintf("synchronous(%s)", opts.Synchronous))
+		q.Add("_txlock", "immediate")
+	}
+	if opts.CacheShared {
+		q.Add("cache", "shared")
+	}
 	u.RawQuery = q.Encode()
 	return u.String()
+}
+
+func boolToOnOff(value bool) string {
+	if value {
+		return "ON"
+	}
+	return "OFF"
 }
 
 func ApplyMigrations(ctx context.Context, db *sql.DB, migrationFS fs.FS) error {

@@ -30,7 +30,7 @@ func (s *Service) ListBookmarks(ctx context.Context, userID, audiobookID string)
 	if userID == "" || audiobookID == "" {
 		return nil, ErrInvalidInput
 	}
-	rows, err := s.db.QueryContext(ctx, `
+	rows, err := s.dbForRead().QueryContext(ctx, `
 		SELECT id, user_id, audiobook_id, title, note, position_seconds, chapter_id, created_at, updated_at
 		FROM bookmarks
 		WHERE user_id = ? AND audiobook_id = ?
@@ -59,7 +59,7 @@ func (s *Service) ListUserBookmarks(ctx context.Context, userID string, limit in
 	if limit > 500 {
 		limit = 500
 	}
-	rows, err := s.db.QueryContext(ctx, `
+	rows, err := s.dbForRead().QueryContext(ctx, `
 		SELECT id, user_id, audiobook_id, title, note, position_seconds, chapter_id, created_at, updated_at
 		FROM bookmarks
 		WHERE user_id = ?
@@ -162,7 +162,7 @@ func (s *Service) loadBookmark(ctx context.Context, userID, id string) (Bookmark
 	var item Bookmark
 	var chapterID sql.NullString
 	var createdAt, updatedAt sql.NullString
-	err := s.db.QueryRowContext(ctx, `
+	err := s.dbForRead().QueryRowContext(ctx, `
 		SELECT id, user_id, audiobook_id, title, note, position_seconds, chapter_id, created_at, updated_at
 		FROM bookmarks
 		WHERE id = ?`, id).

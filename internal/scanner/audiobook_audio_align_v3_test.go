@@ -103,12 +103,84 @@ func TestApplyRefusesUnanchoredReport(t *testing.T) {
 			{Index: 2, Title: "Guess 2", StartSec: 300, EndSec: 600},
 		},
 	}
-	wrote, err := s.ApplyAudioChapterReport(context.Background(), bookID, rep, files, "")
+	wrote, err := s.ApplyAudioChapterReport(context.Background(), bookID, rep, files, "", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if wrote {
 		t.Fatalf("unanchored report must not be written")
+	}
+	count, source := chapterRows(t, db, bookID)
+	if count != 1 || source != chapterSourceEmbedded {
+		t.Fatalf("embedded chapters disturbed: count=%d source=%q", count, source)
+	}
+}
+
+// THE fix for "chapters are all wrong": when the audio cannot confidently
+// converge to the verified count, the book must NOT fall back to one-chapter-per-
+// file. A resolved Audnexus edition's named markers are written instead — they
+// beat track splits even though the audio could not refine them.
+func TestApplyWritesAudnexusEditionWhenAudioCannotConverge(t *testing.T) {
+	root := t.TempDir()
+	files := []catalog.AudioFile{
+		{Path: filepath.Join(root, "cd1.mp3"), RelativePath: "cd1.mp3", DurationMs: 600_000, DurationSeconds: 600},
+		{Path: filepath.Join(root, "cd2.mp3"), RelativePath: "cd2.mp3", DurationMs: 600_000, DurationSeconds: 600},
+	}
+	// Book is currently stuck on degenerate one-chapter-per-file ("file") chapters.
+	s, db, bookID := alignTestDB(t, "ffmpeg", root, files, chapterSourceFile, junkChapters(2))
+
+	// The audio analysis ran with a hard target but could not match the count.
+	rep := &chapteraudio.Report{Recommendation: chapteraudio.RecommendReview, HardTarget: true, Confidence: 0.3, AudioCount: 5, TargetCount: 3, DurationSec: 1200}
+	anchor := []catalog.AudioChapter{
+		{Index: 1, Title: "Opening Credits", StartSeconds: 0, EndSeconds: 30},
+		{Index: 2, Title: "A Twin Disaster", StartSeconds: 30, EndSeconds: 700},
+		{Index: 3, Title: "The Council of Elders", StartSeconds: 700, EndSeconds: 1180},
+	}
+	dbFiles, err := catalog.AudiobookAudioFiles(context.Background(), db, bookID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wrote, err := s.ApplyAudioChapterReport(context.Background(), bookID, rep, dbFiles, "B002UZKL7A", anchor)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !wrote {
+		t.Fatalf("a verified Audnexus edition must be written over weak file chapters")
+	}
+	count, source := chapterRows(t, db, bookID)
+	if count != 3 || source != ChapterSourceAudnexus {
+		t.Fatalf("expected 3 Audnexus chapters (source %q), got count=%d source=%q", ChapterSourceAudnexus, count, source)
+	}
+	// The last chapter end is anchored to the real runtime.
+	var lastEnd float64
+	if err := db.QueryRowContext(context.Background(),
+		`SELECT end_seconds FROM audiobook_chapters WHERE audiobook_id = ? ORDER BY start_seconds DESC LIMIT 1`, bookID).Scan(&lastEnd); err != nil {
+		t.Fatal(err)
+	}
+	if lastEnd != 1200 {
+		t.Fatalf("last chapter end = %v, want 1200 (anchored to file runtime)", lastEnd)
+	}
+}
+
+// The Audnexus fallback must never DOWNGRADE authoritative in-file markers: a
+// book on real embedded chapters keeps them even when an edition resolves and the
+// audio declined to converge (embedded positions are real and cannot drift).
+func TestApplyAudnexusFallbackNeverOverwritesEmbedded(t *testing.T) {
+	files := []catalog.AudioFile{{Path: "/books/b/book.m4b", DurationMs: 1_200_000, DurationSeconds: 1200}}
+	s, db, bookID := alignTestDB(t, "ffmpeg", "/books/b", files, chapterSourceEmbedded,
+		[]catalog.AudioChapter{{Index: 1, Title: "Real Embedded", StartSeconds: 0, EndSeconds: 1200}})
+
+	rep := &chapteraudio.Report{Recommendation: chapteraudio.RecommendReview, HardTarget: true, Confidence: 0.3, DurationSec: 1200}
+	anchor := []catalog.AudioChapter{
+		{Index: 1, Title: "Audnexus 1", StartSeconds: 0, EndSeconds: 600},
+		{Index: 2, Title: "Audnexus 2", StartSeconds: 600, EndSeconds: 1200},
+	}
+	wrote, err := s.ApplyAudioChapterReport(context.Background(), bookID, rep, files, "B000", anchor)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if wrote {
+		t.Fatalf("must not overwrite authoritative embedded chapters with the Audnexus fallback")
 	}
 	count, source := chapterRows(t, db, bookID)
 	if count != 1 || source != chapterSourceEmbedded {
@@ -132,7 +204,7 @@ func TestApplyHealsStaleAudioGuessChapters(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	wrote, err := s.ApplyAudioChapterReport(context.Background(), bookID, rep, dbFiles, "")
+	wrote, err := s.ApplyAudioChapterReport(context.Background(), bookID, rep, dbFiles, "", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -146,7 +218,7 @@ func TestApplyHealsStaleAudioGuessChapters(t *testing.T) {
 	}
 
 	// Second decline is a no-op: provenance is no longer audio-derived.
-	if _, err := s.ApplyAudioChapterReport(context.Background(), bookID, rep, dbFiles, ""); err != nil {
+	if _, err := s.ApplyAudioChapterReport(context.Background(), bookID, rep, dbFiles, "", nil); err != nil {
 		t.Fatal(err)
 	}
 	count2, source2 := chapterRows(t, db, bookID)
@@ -174,6 +246,39 @@ func TestLookupReusesVerifiedChapterASIN(t *testing.T) {
 	}
 }
 
+// THE library-wide identification bug: the clean title + matched ASIN live in a
+// metadata override (what the catalog/API serves), while raw book_json holds only
+// the folder name and no ASIN. The chapter lookup must apply the override, or it
+// searches Audible for "Eragon - Inheritance Book 01" and finds nothing — leaving
+// the whole library on file chapters despite Samo already knowing every ASIN.
+func TestChapterLookupAppliesMetadataOverride(t *testing.T) {
+	files := []catalog.AudioFile{{Path: "/books/eragon/01.mp3", DurationMs: 600_000, DurationSeconds: 600}}
+	s, db, bookID := alignTestDB(t, "ffmpeg", "/books/eragon", files, "", nil)
+	if _, err := db.ExecContext(context.Background(),
+		`UPDATE audiobooks SET book_json = ? WHERE id = ?`,
+		`{"title":"Eragon - Inheritance Book 01"}`, bookID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.ExecContext(context.Background(),
+		`INSERT INTO metadata_overrides (target_kind, target_id, fields_json) VALUES ('audiobook', ?, ?)`,
+		bookID,
+		`{"title":"Eragon","authors":[{"name":"Christopher Paolini"}],"externalIds":{"asin":"B002UZKL7A","audibleAsin":"B002UZKL7A"}}`,
+	); err != nil {
+		t.Fatal(err)
+	}
+
+	lookup := s.audiobookChapterLookup(context.Background(), bookID, files)
+	if lookup.ASIN != "B002UZKL7A" {
+		t.Fatalf("lookup.ASIN = %q, want B002UZKL7A from the override (raw book_json has none)", lookup.ASIN)
+	}
+	if lookup.Title != "Eragon" {
+		t.Fatalf("lookup.Title = %q, want the override title \"Eragon\"", lookup.Title)
+	}
+	if lookup.Author != "Christopher Paolini" {
+		t.Fatalf("lookup.Author = %q, want Christopher Paolini from the override", lookup.Author)
+	}
+}
+
 // THE feedback-loop regression: with no provider (or a provider miss), stored
 // chapters must NOT become the convergence target — the analyzer runs blind
 // (diagnostic), so yesterday's wrong count can never launder itself into
@@ -190,12 +295,15 @@ func TestAnalyzeWithoutAnchorIgnoresStoredChapters(t *testing.T) {
 	files := []catalog.AudioFile{{Path: wav, RelativePath: "book.wav", DurationMs: 30_000, DurationSeconds: 30}}
 	s, _, bookID := alignTestDB(t, ffmpeg, root, files, chapterSourceAudioDetected, junkChapters(150))
 
-	rep, _, asin, err := s.AnalyzeAudiobookChapters(context.Background(), bookID)
+	rep, _, asin, anchor, err := s.AnalyzeAudiobookChapters(context.Background(), bookID)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if asin != "" {
 		t.Fatalf("no provider configured, asin should be empty, got %q", asin)
+	}
+	if len(anchor) != 0 {
+		t.Fatalf("no provider configured, anchor should be empty, got %d", len(anchor))
 	}
 	if rep.HardTarget {
 		t.Fatalf("no provider configured, report must not claim a hard target")

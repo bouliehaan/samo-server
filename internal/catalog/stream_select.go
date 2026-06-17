@@ -121,11 +121,14 @@ func StreamSelectQueryFromRequest(r *http.Request) StreamSelectQuery {
 		if raw == "" {
 			continue
 		}
-		seconds, err := strconv.Atoi(raw)
+		// Accept a fractional value: the client may send a sub-second seek
+		// position (e.g. 502.982). File selection only needs whole-second
+		// granularity, so truncate — but parsing must not reject the decimal.
+		seconds, err := strconv.ParseFloat(raw, 64)
 		if err != nil || seconds < 0 {
 			continue
 		}
-		query.ProgressSeconds = seconds
+		query.ProgressSeconds = int(seconds)
 		query.HasProgressSeconds = true
 		break
 	}

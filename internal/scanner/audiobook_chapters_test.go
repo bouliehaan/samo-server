@@ -9,7 +9,7 @@ import (
 	"github.com/bouliehaan/samo-server/migrations"
 )
 
-func TestPersistAudiobookGroupClearsStaleChaptersWhenProbeEmpty(t *testing.T) {
+func TestPersistAudiobookGroupPreservesExistingChapters(t *testing.T) {
 	ctx := context.Background()
 	db, err := storage.Open(ctx, t.TempDir()+"/samo.db")
 	if err != nil {
@@ -55,8 +55,8 @@ func TestPersistAudiobookGroupClearsStaleChaptersWhenProbeEmpty(t *testing.T) {
 	if err := db.QueryRowContext(ctx, `SELECT COUNT(*) FROM audiobook_chapters WHERE audiobook_id = ?`, bookID).Scan(&count); err != nil {
 		t.Fatal(err)
 	}
-	if count != 0 {
-		t.Fatalf("chapter rows = %d, want 0 (stale markers cleared)", count)
+	if count != 1 {
+		t.Fatalf("chapter rows = %d, want 1 (scan must not rewrite audiobook chapters)", count)
 	}
 }
 

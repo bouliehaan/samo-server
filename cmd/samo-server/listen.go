@@ -23,6 +23,11 @@ func listenWithFallback(requested string, attempts int) (net.Listener, error) {
 		return nil, err
 	}
 
+	// If host is empty (bare :port), try IPv4 explicitly first on dual-stack systems
+	if host == "" {
+		host = "0.0.0.0"
+	}
+
 	var lastErr error
 	for i := 0; i < attempts; i++ {
 		addr := joinAddr(host, port+i)

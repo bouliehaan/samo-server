@@ -65,6 +65,26 @@ type Params struct {
 	// a silence being far from any expected chapter position. 0 disables the
 	// position prior entirely (pure "longest silences win").
 	PositionPenaltyPerSec float64
+
+	// --- registration (master→file warp) --------------------------------------
+	// WarpInlierTolSec is the master→nearest-candidate distance within which a
+	// chapter counts as explained while FITTING the affine warp — generous enough
+	// to gather true chapters across a missing brand intro, tight enough that
+	// decoy pauses don't dominate the head estimate.
+	WarpInlierTolSec float64
+	// WarpSnapFloorSec / WarpSnapCapSec bound the snap window used AFTER a trusted
+	// registration: the warp removed the systematic offset, so the window is tight
+	// (floor handles detector quantization; cap stops a dramatic pause being
+	// grabbed). Replaces the old flat 90s / runtime-delta tolerance for fitted books.
+	WarpSnapFloorSec float64
+	WarpSnapCapSec   float64
+
+	// DriftCorrection enables the per-file-onset drift removal (Phase 2). OFF by
+	// default: it needs golden-set calibration to tell inserted padding from a real
+	// pause spanning a seam, and miscounting the latter makes deep chapters worse.
+	// The affine backbone ships without it; an accumulating-drift rip declines to
+	// the unregistered fallback rather than risk a wrong de-drift.
+	DriftCorrection bool
 }
 
 // DefaultParams returns sane starting values. The inspector can override them on
@@ -79,6 +99,10 @@ func DefaultParams() Params {
 		MinChapterRatio:           1.6,
 		PositionDriftToleranceSec: 90,
 		PositionPenaltyPerSec:     0.01,
+		WarpInlierTolSec:          1.5,
+		WarpSnapFloorSec:          0.75,
+		WarpSnapCapSec:            4.0,
+		DriftCorrection:           true,
 	}
 }
 
@@ -104,7 +128,19 @@ type FileAnalysis struct {
 	Separation  float64
 	GapCount    int
 	LongestGap  float64
-	Err         string
+	// SpeechOnsetSec is the file-local time at which real content begins — the
+	// length of the leading silence at the file's head, 0 when it opens straight
+	// into narration. Measured from the file's OWN audio, it is independent of the
+	// cumulative container-duration sum that embeds CD-rip drift, so summing it
+	// across files recovers the per-file priming the seams cannot reveal.
+	SpeechOnsetSec float64
+	// TrailingSilenceSec is the length of the silence the file ENDS in (0 when it
+	// ends mid-speech). It disambiguates the onset: a leading silence is added
+	// drift only when the PREVIOUS file ended in speech; if the previous file
+	// ended in silence, this file's leading silence is the tail of a real pause
+	// that merely spans the seam (the master carries it too), not padding.
+	TrailingSilenceSec float64
+	Err                string
 }
 
 // ProposedChapter is one chapter the analyzer would write.
@@ -147,6 +183,21 @@ type Report struct {
 	// file's own adaptive floor to surface enough silences to reach the target. 0
 	// means the file's natural floor was already enough.
 	GateOffsetDB float64
+
+	// --- registration diagnostics ---------------------------------------------
+	// The affine master→file warp the hard-target path fitted before snapping.
+	// HeadOffsetSec is how far the file is shifted vs the master (negative = the
+	// file lacks head content like a brand intro); ScaleFactor is the time ratio
+	// (≈1); WarpInlierFrac is the fraction of chapters the fit explained;
+	// WarpTrusted reports whether registration was used (vs the raw-prior fallback).
+	HeadOffsetSec  float64
+	ScaleFactor    float64
+	WarpInlierFrac float64
+	WarpTrusted    bool
+	// DriftSec is the total accumulating per-file leading-silence drift removed
+	// before registration (0 for single-file books or gapless rips) — the CD-rip
+	// signal recovered from per-file speech onsets, not from the seams.
+	DriftSec float64
 }
 
 // Analyzer derives chapters from audio. Construct with NewAnalyzer; it's
@@ -358,7 +409,57 @@ func (a *Analyzer) analyzeFile(ctx context.Context, f FileInput, offset float64,
 			fa.LongestGap = g.Duration
 		}
 	}
+	fa.SpeechOnsetSec = leadingSilence(baseGaps, fa.DurationSec)
+	fa.TrailingSilenceSec = trailingSilence(baseGaps, fa.DurationSec)
 	return fa, rungs, nil
+}
+
+// trailingSilence is the length of a silence run reaching (within a frame of) the
+// file's end — the head of a pause that may span the seam into the next file, 0
+// when the file ends in speech. Capped like leadingSilence.
+func trailingSilence(gaps []Gap, durationSec float64) float64 {
+	if len(gaps) == 0 || durationSec <= 0 {
+		return 0
+	}
+	g := gaps[len(gaps)-1]
+	if g.EndSec < durationSec-2*HopSeconds {
+		return 0 // ends in speech, not a tail silence
+	}
+	tail := g.Duration
+	if tail > 0.5*durationSec {
+		return 0
+	}
+	const tailCapSec = 8.0
+	if tail > tailCapSec {
+		return tailCapSec
+	}
+	return tail
+}
+
+// leadingSilence is the file-local time at which content begins: the end of a
+// silence run sitting at (within a frame of) the file's head, else 0 when the
+// file opens straight into narration. This is the per-file drift signal —
+// accumulated across files it recovers the CD-rip priming delay. Guarded so a
+// degenerate near-silent file cannot inject a huge phantom drift, and capped
+// because a multi-second head gap is more likely a real chapter break that the
+// master also carries than added padding (the golden set calibrates this).
+func leadingSilence(gaps []Gap, durationSec float64) float64 {
+	if len(gaps) == 0 {
+		return 0
+	}
+	g := gaps[0]
+	if g.StartSec > 2*HopSeconds {
+		return 0 // opens with content, not a head silence
+	}
+	onset := g.EndSec
+	if durationSec > 0 && onset > 0.5*durationSec {
+		return 0 // essentially all silence — not priming
+	}
+	const onsetCapSec = 8.0
+	if onset > onsetCapSec {
+		return onsetCapSec
+	}
+	return onset
 }
 
 // blendConfidence pulls the gap-cluster confidence upward when boundaries come

@@ -29,7 +29,7 @@ func (s *Service) ListCollections(ctx context.Context, userID string) ([]Collect
 	if userID == "" {
 		return nil, ErrInvalidInput
 	}
-	rows, err := s.db.QueryContext(ctx, `
+	rows, err := s.dbForRead().QueryContext(ctx, `
 		SELECT id, user_id, name, description, public, created_at, updated_at
 		FROM collections
 		WHERE user_id = ?
@@ -197,7 +197,7 @@ func (s *Service) loadCollection(ctx context.Context, userID, id string) (Collec
 	var item Collection
 	var public int
 	var createdAt, updatedAt sql.NullString
-	err := s.db.QueryRowContext(ctx, `
+	err := s.dbForRead().QueryRowContext(ctx, `
 		SELECT id, user_id, name, description, public, created_at, updated_at
 		FROM collections
 		WHERE id = ?`, id).
@@ -223,7 +223,7 @@ func (s *Service) loadCollection(ctx context.Context, userID, id string) (Collec
 }
 
 func (s *Service) loadCollectionAudiobookIDs(ctx context.Context, collectionID string) ([]string, error) {
-	rows, err := s.db.QueryContext(ctx, `
+	rows, err := s.dbForRead().QueryContext(ctx, `
 		SELECT audiobook_id
 		FROM collection_audiobooks
 		WHERE collection_id = ?

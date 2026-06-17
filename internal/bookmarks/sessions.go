@@ -62,7 +62,7 @@ func (s *Service) ListSessionsForAudiobook(ctx context.Context, userID, audioboo
 	if limit > 500 {
 		limit = 500
 	}
-	rows, err := s.db.QueryContext(ctx, `
+	rows, err := s.dbForRead().QueryContext(ctx, `
 		SELECT id, user_id, audiobook_id, started_at, ended_at,
 		       start_position_seconds, end_position_seconds, duration_seconds, completed
 		FROM listening_sessions
@@ -86,7 +86,7 @@ func (s *Service) ListRecentSessions(ctx context.Context, userID string, limit i
 	if limit > 500 {
 		limit = 500
 	}
-	rows, err := s.db.QueryContext(ctx, `
+	rows, err := s.dbForRead().QueryContext(ctx, `
 		SELECT id, user_id, audiobook_id, started_at, ended_at,
 		       start_position_seconds, end_position_seconds, duration_seconds, completed
 		FROM listening_sessions
@@ -104,7 +104,7 @@ func (s *Service) loadSession(ctx context.Context, userID, id string) (Listening
 	var item ListeningSession
 	var completed int
 	var startedAt, endedAt sql.NullString
-	err := s.db.QueryRowContext(ctx, `
+	err := s.dbForRead().QueryRowContext(ctx, `
 		SELECT id, user_id, audiobook_id, started_at, ended_at,
 		       start_position_seconds, end_position_seconds, duration_seconds, completed
 		FROM listening_sessions

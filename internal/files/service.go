@@ -160,6 +160,40 @@ func (s *Service) ServeMediaFileAt(ctx context.Context, id string, offsetSeconds
 	return serveFileAt(w, r, absolute, info, contentType, item.DurationSeconds, offsetSeconds)
 }
 
+// ServeMediaFileAtSeconds streams a media file beginning at a precise playback
+// second. For MP3 it resolves a frame-accurate byte offset by parsing the frame
+// headers, rather than the size*sec/duration estimate that lands VBR seeks
+// 20-70s off mid-sentence; other containers (M4B/MP4/AAC) keep whole-file
+// serving and let the player seek via their own sample tables. The exact frame
+// start is reported in X-Samo-Stream-Offset-Ms so the client can baseline its
+// book-global position.
+func (s *Service) ServeMediaFileAtSeconds(ctx context.Context, id string, seconds float64, w http.ResponseWriter, r *http.Request) error {
+	if s == nil || s.db == nil {
+		return ErrDisabled
+	}
+	item, err := s.GetMediaFile(ctx, id)
+	if err != nil {
+		return err
+	}
+	absolute, info, err := s.ValidateLocalPath(ctx, item.Path)
+	if err != nil {
+		return err
+	}
+	contentType := strings.TrimSpace(item.MimeType)
+	if contentType == "" {
+		contentType = mimeTypeForPath(absolute, item.Container)
+	}
+	// A sub-second target is effectively the start; serving from a mid-header byte
+	// would drop the ID3/Xing tag for no benefit, so fall through to whole-file.
+	// (A normal multi-file play resolves to fileAt≈0 and must keep the whole file.)
+	if seconds > 0.5 && isMP3(contentType, absolute) {
+		if startByte, startMs, ok := mp3ByteForSeconds(absolute, seconds); ok && startByte > 0 {
+			return serveFileFromByte(w, r, absolute, info, contentType, startByte, startMs)
+		}
+	}
+	return serveFileAt(w, r, absolute, info, contentType, item.DurationSeconds, 0)
+}
+
 func serveFile(w http.ResponseWriter, r *http.Request, path string, info os.FileInfo, contentType string) error {
 	return serveFileAt(w, r, path, info, contentType, 0, 0)
 }
@@ -199,6 +233,36 @@ func serveFileAt(w http.ResponseWriter, r *http.Request, path string, info os.Fi
 	}
 
 	http.ServeContent(w, r, filepath.Base(path), info.ModTime(), file)
+	return nil
+}
+
+// serveFileFromByte streams a file from a precomputed byte offset as a
+// standalone resource — the frame-accurate counterpart to serveFileAt's
+// second-based (and VBR-inaccurate) path. The section is presented as its own
+// stream so the player decodes from the first frame at startByte.
+func serveFileFromByte(w http.ResponseWriter, r *http.Request, path string, info os.FileInfo, contentType string, startByte, startMs int64) error {
+	file, err := os.Open(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return ErrMissing
+		}
+		return fmt.Errorf("open file: %w", err)
+	}
+	defer file.Close()
+
+	if contentType != "" {
+		w.Header().Set("Content-Type", contentType)
+	}
+	w.Header().Set("Accept-Ranges", "bytes")
+	w.Header().Set("Cache-Control", "private, max-age=3600")
+	w.Header().Set("X-Samo-Stream-Offset-Ms", strconv.FormatInt(startMs, 10))
+
+	remaining := info.Size() - startByte
+	if remaining < 0 {
+		remaining = 0
+	}
+	section := io.NewSectionReader(file, startByte, remaining)
+	http.ServeContent(w, r, filepath.Base(path), info.ModTime(), section)
 	return nil
 }
 

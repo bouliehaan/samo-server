@@ -49,6 +49,10 @@ type Options struct {
 	// usable embedded markers (e.g. a multi-MP3 book that would otherwise become
 	// one fake chapter per file). Optional; nil disables the network fallback.
 	ChapterProvider ChapterProvider
+	// DisableAudioChapterDrift turns OFF the per-file-onset drift removal in the
+	// chapter analyzer (which is on by default). Used by chapters-inspect --no-drift
+	// to A/B the affine-only registration against the full drift-corrected engine.
+	DisableAudioChapterDrift bool
 }
 
 // ChapterProvider fetches authored chapter markers for an audiobook from an
@@ -105,24 +109,25 @@ type ChapterLookup struct {
 }
 
 type Scanner struct {
-	db                  *sql.DB
-	ffprobePath         string
-	ffmpegPath          string
-	covers              CoverResolver
-	playlistImport      PlaylistImporter
-	autoImportPlaylists bool
-	externalScanner     bool
-	useFFprobeForScan   bool
-	chapterProvider     ChapterProvider
-	activeScan          *scanAccumulator
-	onWalkProgress      func(int)
-	onActivity          func(string)
-	onFileActive        func(path string)
-	overrideIndex       *catalog.OverrideIndex
-	scanMode            string
-	scanSubpaths        []string
-	fileIndex           map[string]indexedFile
-	trackIDMigrations   map[string]string
+	db                   *sql.DB
+	ffprobePath          string
+	ffmpegPath           string
+	covers               CoverResolver
+	playlistImport       PlaylistImporter
+	autoImportPlaylists  bool
+	externalScanner      bool
+	useFFprobeForScan    bool
+	chapterProvider      ChapterProvider
+	audioChapterDriftOff bool
+	activeScan           *scanAccumulator
+	onWalkProgress       func(int)
+	onActivity           func(string)
+	onFileActive         func(path string)
+	overrideIndex        *catalog.OverrideIndex
+	scanMode             string
+	scanSubpaths         []string
+	fileIndex            map[string]indexedFile
+	trackIDMigrations    map[string]string
 }
 
 func New(db *sql.DB) *Scanner {
@@ -135,15 +140,16 @@ func NewWithOptions(db *sql.DB, options Options) *Scanner {
 		ffprobePath = "ffprobe"
 	}
 	return &Scanner{
-		db:                  db,
-		ffprobePath:         ffprobePath,
-		ffmpegPath:          strings.TrimSpace(options.FFmpegPath),
-		covers:              options.Covers,
-		playlistImport:      options.PlaylistImport,
-		autoImportPlaylists: options.AutoImportPlaylists,
-		externalScanner:     options.ExternalScanner,
-		useFFprobeForScan:   options.UseFFprobeForScan,
-		chapterProvider:     options.ChapterProvider,
+		db:                   db,
+		ffprobePath:          ffprobePath,
+		ffmpegPath:           strings.TrimSpace(options.FFmpegPath),
+		covers:               options.Covers,
+		playlistImport:       options.PlaylistImport,
+		autoImportPlaylists:  options.AutoImportPlaylists,
+		externalScanner:      options.ExternalScanner,
+		audioChapterDriftOff: options.DisableAudioChapterDrift,
+		useFFprobeForScan:    options.UseFFprobeForScan,
+		chapterProvider:      options.ChapterProvider,
 	}
 }
 
@@ -280,24 +286,17 @@ func (s *Scanner) probe(ctx context.Context, path string) (probeInfo, error) {
 	return finalizeProbeInfo(info), nil
 }
 
-// probeAudiobook reads tags natively, supplements technical fields via ffprobe,
-// and loads embedded chapter markers from .m4b/.m4a when present.
+// probeAudiobook reads tags natively and supplements technical fields via
+// ffprobe. It also reads embedded chapters so we can persist them.
 func (s *Scanner) probeAudiobook(ctx context.Context, path string) (probeInfo, error) {
 	info, err := s.probeMediaHybrid(ctx, path, true)
 	if err != nil {
 		return probeInfo{}, err
 	}
-	// Tag-only OverDrive markers are not playback-accurate; embedded atoms are.
-	info.Chapters = nil
-
-	if chapters := s.probeAudiobookChapterMarkers(ctx, path); len(chapters) > 0 {
-		info.Chapters = chapters
-	}
-
 	probeSize, analyzeDuration := audiobookChapterProbeLimits(path)
-	ff, ffErr := s.probeMediaFFprobeWithTimeout(ctx, path, false, probeSize, analyzeDuration, probeFileTimeout)
+	ff, ffErr := s.probeMediaFFprobeWithTimeout(ctx, path, true, probeSize, analyzeDuration, probeFileTimeout)
 	if ffErr == nil {
-		info = mergeProbeInfo(info, ff, false)
+		info = mergeProbeInfo(info, ff, true)
 	} else {
 		log.Printf("scanner: audiobook technical ffprobe failed for %q: %v", path, ffErr)
 	}
@@ -334,7 +333,9 @@ func (s *Scanner) probeMediaHybrid(ctx context.Context, path string, includeChap
 		return finalizeProbeInfo(ff), nil
 	}
 	if !probeNeedsTechnicalSupplement(native) {
-		return finalizeProbeInfo(native), nil
+		if !includeChapters || len(native.Chapters) > 0 {
+			return finalizeProbeInfo(native), nil
+		}
 	}
 
 	logFFprobeFallback(path, "incomplete technical metadata")

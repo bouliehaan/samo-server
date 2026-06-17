@@ -13,9 +13,20 @@ package bookmarks
 import "database/sql"
 
 type Service struct {
-	db *sql.DB
+	db     *sql.DB
+	readDB *sql.DB
 }
 
-func New(db *sql.DB) *Service {
-	return &Service{db: db}
+func New(db, readDB *sql.DB) *Service {
+	if readDB == nil {
+		readDB = db
+	}
+	return &Service{db: db, readDB: readDB}
+}
+
+func (s *Service) dbForRead() *sql.DB {
+	if s.readDB != nil {
+		return s.readDB
+	}
+	return s.db
 }

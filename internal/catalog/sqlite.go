@@ -289,7 +289,8 @@ func loadAudiobooks(ctx context.Context, db *sql.DB) ([]AudiobookItem, error) {
 	rows, err := db.QueryContext(ctx, `
 		SELECT id, library_id, path, folder_id, inode, size_bytes, missing, invalid,
 		       cover_json, tags_json, genres_json, duration_seconds, progress_json, book_json,
-		       added_at, updated_at, last_scan_at
+		       added_at, updated_at, last_scan_at,
+		       COALESCE(chapter_source,''), COALESCE(chapter_confidence,0), COALESCE(chapter_asin,'')
 		FROM audiobooks`)
 	if err != nil {
 		return nil, fmt.Errorf("load audiobooks: %w", err)
@@ -305,7 +306,8 @@ func loadAudiobooks(ctx context.Context, db *sql.DB) ([]AudiobookItem, error) {
 		var addedAt, updatedAt, lastScanAt sql.NullString
 		if err := rows.Scan(&item.ID, &item.LibraryID, &item.Path, &item.FolderID,
 			&item.Inode, &item.SizeBytes, &missing, &invalid, &coverJSON, &tagsJSON, &genresJSON,
-			&item.DurationSeconds, &progressJSON, &bookJSON, &addedAt, &updatedAt, &lastScanAt); err != nil {
+			&item.DurationSeconds, &progressJSON, &bookJSON, &addedAt, &updatedAt, &lastScanAt,
+			&item.ChapterSource, &item.ChapterConfidence, &item.ChapterASIN); err != nil {
 			return nil, fmt.Errorf("scan audiobook: %w", err)
 		}
 		item.Missing = missing != 0
