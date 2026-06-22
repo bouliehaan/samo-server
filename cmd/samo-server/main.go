@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"net"
 	"net/http"
 	"os"
 	"os/signal"
@@ -14,11 +15,13 @@ import (
 
 	"github.com/bouliehaan/samo-server/internal/api"
 	"github.com/bouliehaan/samo-server/internal/artistimages"
+	"github.com/bouliehaan/samo-server/internal/artistmeta"
 	"github.com/bouliehaan/samo-server/internal/bookmarks"
 	"github.com/bouliehaan/samo-server/internal/catalog"
 	"github.com/bouliehaan/samo-server/internal/channels"
 	"github.com/bouliehaan/samo-server/internal/config"
 	"github.com/bouliehaan/samo-server/internal/covers"
+	"github.com/bouliehaan/samo-server/internal/discovery"
 	"github.com/bouliehaan/samo-server/internal/files"
 	"github.com/bouliehaan/samo-server/internal/lastfm"
 	"github.com/bouliehaan/samo-server/internal/libraries"
@@ -153,12 +156,13 @@ func main() {
 	searchService.Rebuild(catalogSeed)
 	bookmarksService := bookmarks.New(db, readDB)
 	podcastCacheService, err := podcastcache.New(db, podcastcache.Options{
-		CacheDir:     filepath.Join(cfg.DataDir, "podcast-cache"),
-		Enabled:      cfg.PodcastCache,
-		MaxBytes:     cfg.PodcastCacheMaxBytes,
-		MaxAge:       cfg.PodcastCacheMaxAge,
-		MaxFileBytes: cfg.PodcastCacheMaxFile,
-		Stream:       podcastStreamService,
+		CacheDir:            filepath.Join(cfg.DataDir, "podcast-cache"),
+		Enabled:             cfg.PodcastCache,
+		MaxBytes:            cfg.PodcastCacheMaxBytes,
+		MaxAge:              cfg.PodcastCacheMaxAge,
+		MaxFileBytes:        cfg.PodcastCacheMaxFile,
+		DefaultPrewarmCount: cfg.PodcastPrewarmCount,
+		Stream:              podcastStreamService,
 	})
 	if err != nil {
 		log.Fatal(err)
@@ -231,6 +235,13 @@ func main() {
 		Logger:  log.Printf,
 	})
 	artistImageService.SetBackgroundContext(ctx)
+	artistMetaService := artistmeta.NewService(artistmeta.ServiceOptions{
+		DB:      db,
+		LastFM:  lastfmService,
+		Catalog: catalogService,
+		Logger:  log.Printf,
+	})
+	artistMetaService.SetBackgroundContext(ctx)
 	var catalogReloadMu sync.Mutex
 	reloadCatalog := func(ctx context.Context) error {
 		catalogReloadMu.Lock()
@@ -251,7 +262,23 @@ func main() {
 		if err := reloadCatalog(ctx); err != nil {
 			log.Printf("catalog reload after scan %s failed: %v", job.ID, err)
 		}
-		if job.Status != libraries.ScanStatusCompleted || !cfg.ArtistImagesOnScan || !artistImageService.Enabled() {
+		if job.Status != libraries.ScanStatusCompleted {
+			return
+		}
+		// Artist biographies + similar artists: warm new artists, backfill the
+		// long tail on a full scan. Runs in the background so scans stay fast.
+		if artistMetaService.Enabled() {
+			if len(stats.NewArtistIDs) > 0 {
+				go artistMetaService.FetchArtistsByIDs(ctx, stats.NewArtistIDs)
+			} else if job.ScanMode == libraries.ScanModeFull {
+				go func() {
+					if err := artistMetaService.BackfillMissing(ctx); err != nil {
+						log.Printf("artist meta backfill after full scan failed: %v", err)
+					}
+				}()
+			}
+		}
+		if !cfg.ArtistImagesOnScan || !artistImageService.Enabled() {
 			return
 		}
 		if len(stats.NewArtistIDs) > 0 {
@@ -301,6 +328,7 @@ func main() {
 		Sources:       sourceService,
 		LastFM:        lastfmService,
 		ArtistImages:  artistImageService,
+		ArtistMeta:    artistMetaService,
 		Users:         userService,
 		Channels:      channelsService,
 		ReloadCatalog: reloadCatalog,
@@ -401,6 +429,18 @@ func main() {
 		log.Printf("last.fm scrobbling: enabled")
 	} else {
 		log.Printf("last.fm scrobbling: disabled (set SAMO_LASTFM_API_KEY and SAMO_LASTFM_SHARED_SECRET)")
+	}
+
+	_, portStr, err := net.SplitHostPort(actualAddr)
+	var serverPort int
+	if err == nil {
+		fmt.Sscanf(portStr, "%d", &serverPort)
+		broadcaster := discovery.NewBroadcaster(serverPort)
+		go func() {
+			if err := broadcaster.Run(ctx); err != nil && err != context.Canceled {
+				log.Printf("discovery broadcaster stopped: %v", err)
+			}
+		}()
 	}
 
 	srv := &http.Server{

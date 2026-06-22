@@ -91,3 +91,59 @@ func TestHasEmbeddedCoverDetectsPicardStyleEmbed(t *testing.T) {
 		t.Fatalf("expected extracted cover file, got %#v", image)
 	}
 }
+
+func createSolidColorImage(t *testing.T, color, path string) {
+	cmd := exec.Command("ffmpeg", "-hide_banner", "-loglevel", "error", "-y",
+		"-f", "lavfi", "-i", "color=c="+color+":s=300x300", "-frames:v", "1", path)
+	if output, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("create test image: %v: %s", err, output)
+	}
+}
+
+func TestComposite(t *testing.T) {
+	if _, err := exec.LookPath("ffmpeg"); err != nil {
+		t.Skip("ffmpeg not available")
+	}
+
+	root := t.TempDir()
+	ctx := context.Background()
+	db, err := storage.Open(ctx, filepath.Join(root, "samo.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	if err := storage.ApplyMigrations(ctx, db, migrations.Files); err != nil {
+		t.Fatal(err)
+	}
+	service, err := New(db, Options{CoverDir: filepath.Join(root, "covers")})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	p1 := filepath.Join(root, "1.jpg")
+	p2 := filepath.Join(root, "2.jpg")
+	p3 := filepath.Join(root, "3.jpg")
+	p4 := filepath.Join(root, "4.jpg")
+
+	createSolidColorImage(t, "red", p1)
+	createSolidColorImage(t, "green", p2)
+	createSolidColorImage(t, "blue", p3)
+	createSolidColorImage(t, "yellow", p4)
+
+	image, err := service.Composite(ctx, "playlist-1", "hash-123", []string{p1, p2, p3, p4})
+	if err != nil {
+		t.Fatalf("Composite: %v", err)
+	}
+	if image == nil || !fileExists(image.Path) {
+		t.Fatalf("expected composite cover file, got %#v", image)
+	}
+
+	// Should load from cache
+	image2, err := service.Composite(ctx, "playlist-1", "hash-123", []string{p1, p2, p3, p4})
+	if err != nil {
+		t.Fatalf("Composite (cached): %v", err)
+	}
+	if image2.Path != image.Path {
+		t.Fatalf("expected cached image path %q, got %q", image.Path, image2.Path)
+	}
+}

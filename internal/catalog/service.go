@@ -47,6 +47,7 @@ type Service struct {
 	podcastEpisodes []PodcastEpisode
 
 	musicArtistByID         map[string]MusicArtist
+	musicArtistIDByName     map[string]string
 	musicAlbumByID          map[string]MusicAlbum
 	musicTrackByID          map[string]MusicTrack
 	playlistByID            map[string]MusicPlaylist
@@ -232,6 +233,64 @@ func (s *Service) SetMusicArtistImages(artistID string, images []Image) {
 		}
 	}
 	registerCatalogImages(s.imageByID, filtered)
+}
+
+// MusicArtistIDByName resolves a (possibly external) artist name to a LOCAL
+// catalog artist ID, or "" when this library has no such artist. Used by the
+// artistmeta enrichment service to keep only navigable "similar" artists.
+func (s *Service) MusicArtistIDByName(name string) (string, bool) {
+	key := normalizeArtistNameKey(name)
+	if key == "" {
+		return "", false
+	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	id, ok := s.musicArtistIDByName[key]
+	return id, ok
+}
+
+// SetMusicArtistMeta patches a biography and/or resolved similar-artist list
+// onto an artist (the artistmeta enrichment twin of SetMusicArtistImages).
+// Empty inputs are ignored so a partial provider result never erases prior data.
+func (s *Service) SetMusicArtistMeta(artistID, biography string, similar []SimilarArtistRef) {
+	artistID = strings.TrimSpace(artistID)
+	if artistID == "" {
+		return
+	}
+	biography = strings.TrimSpace(biography)
+	if biography == "" && len(similar) == 0 {
+		return
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	artist, ok := s.musicArtistByID[artistID]
+	if !ok {
+		return
+	}
+	apply := func(target *MusicArtist) {
+		if biography != "" {
+			target.Biography = biography
+		}
+		if len(similar) > 0 {
+			target.SimilarArtists = similar
+		}
+	}
+	apply(&artist)
+	s.musicArtistByID[artistID] = artist
+	for index := range s.musicArtists {
+		if s.musicArtists[index].ID == artistID {
+			apply(&s.musicArtists[index])
+			break
+		}
+	}
+}
+
+// normalizeArtistNameKey folds an artist name to a case-insensitive,
+// whitespace-collapsed key for cross-provider name matching.
+func normalizeArtistNameKey(name string) string {
+	return strings.Join(strings.Fields(strings.ToLower(strings.TrimSpace(name))), " ")
 }
 
 func (s *Service) ListMusicAlbums(page PageRequest) Page[MusicAlbum] {
@@ -531,6 +590,7 @@ func (s *Service) withEpisodePodcastTitles(episodes []PodcastEpisode) []PodcastE
 
 func (s *Service) reindex() {
 	s.musicArtistByID = map[string]MusicArtist{}
+	s.musicArtistIDByName = map[string]string{}
 	s.musicAlbumByID = map[string]MusicAlbum{}
 	s.musicTrackByID = map[string]MusicTrack{}
 	s.playlistByID = map[string]MusicPlaylist{}
@@ -545,6 +605,12 @@ func (s *Service) reindex() {
 
 	for _, item := range s.musicArtists {
 		s.musicArtistByID[item.ID] = item
+		if key := normalizeArtistNameKey(item.Name); key != "" {
+			// First write wins so a stable artist owns the name on collisions.
+			if _, exists := s.musicArtistIDByName[key]; !exists {
+				s.musicArtistIDByName[key] = item.ID
+			}
+		}
 		registerCatalogImages(s.imageByID, item.Images)
 	}
 	for _, item := range s.musicAlbums {

@@ -2,6 +2,19 @@ package lastfm
 
 import "testing"
 
+func TestCleanLastFMBioStripsAttributionLink(t *testing.T) {
+	raw := "Phoebe Bridgers is an American singer-songwriter. <a href=\"https://www.last.fm/music/Phoebe+Bridgers\">Read more on Last.fm</a>"
+	got := cleanLastFMBio(raw)
+	want := "Phoebe Bridgers is an American singer-songwriter."
+	if got != want {
+		t.Fatalf("got %q want %q", got, want)
+	}
+
+	if got := cleanLastFMBio("   plain bio, no link   "); got != "plain bio, no link" {
+		t.Fatalf("plain bio = %q", got)
+	}
+}
+
 func TestPickLastFMArtistImageURLSkipsPlaceholder(t *testing.T) {
 	images := []struct {
 		Text string `json:"#text"`

@@ -1,6 +1,9 @@
 package catalog
 
-import "strings"
+import (
+	"sort"
+	"strings"
+)
 
 func (s *Service) MusicAlbumsForArtist(artistID string) []MusicAlbum {
 	artistID = strings.TrimSpace(artistID)
@@ -60,6 +63,64 @@ func musicTrackMatchesArtistLocked(s *Service, track MusicTrack, artistID string
 		return false
 	}
 	return musicAlbumMatchesArtist(album, artistID)
+}
+
+// MusicArtistAppearsOnAlbums returns albums the artist appears ON without being
+// the album artist — features, guest spots, and compilations. The rule: the
+// artist is credited on at least one TRACK of the album (track.ArtistIDs) but is
+// NOT one of the album's album-artists. That excludes the artist's own
+// discography (already shown in the main album grid) and surfaces only the
+// "appears on" long tail. Results are de-duped by album and ordered newest-first.
+func (s *Service) MusicArtistAppearsOnAlbums(artistID string) []MusicAlbum {
+	artistID = strings.TrimSpace(artistID)
+	if artistID == "" {
+		return nil
+	}
+
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	seen := make(map[string]struct{})
+	items := make([]MusicAlbum, 0)
+	for _, track := range s.musicTracks {
+		if !trackCreditsArtist(track, artistID) {
+			continue
+		}
+		albumID := strings.TrimSpace(track.AlbumID)
+		if albumID == "" {
+			continue
+		}
+		if _, ok := seen[albumID]; ok {
+			continue
+		}
+		album, ok := s.musicAlbumByID[albumID]
+		if !ok || album.TrackCount <= 0 {
+			continue
+		}
+		// The artist's OWN albums belong in the main grid, not "Appears On".
+		if musicAlbumMatchesArtist(album, artistID) {
+			continue
+		}
+		seen[albumID] = struct{}{}
+		items = append(items, album)
+	}
+
+	sort.SliceStable(items, func(i, j int) bool {
+		return items[i].ReleaseYear > items[j].ReleaseYear
+	})
+	return items
+}
+
+// trackCreditsArtist reports whether the artist is a CREDITED track artist
+// (track.ArtistIDs) — not merely an album-artist of the track's album. This is
+// the signal "Appears On" needs: a guest/feature credit on the track itself.
+func trackCreditsArtist(track MusicTrack, artistID string) bool {
+	for _, id := range track.ArtistIDs {
+		if id == artistID {
+			return true
+		}
+	}
+	return false
 }
 
 func (s *Service) MusicTracksForAlbum(albumID string) []MusicTrack {

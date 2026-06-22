@@ -3179,7 +3179,8 @@ const appJS = `
   function playlistList(items) {
     if (items.length === 0) return '<div class="empty-state">// no playlists yet - create one or import from csv/m3u/text/youtube metadata</div>';
     return '<div class="list">' + items.map((playlist, idx) => {
-      const cover = playlist.id ? musicPlaylistCoverURL(playlist.id) : "";
+      const bust = (playlist.images && playlist.images.length > 0) ? playlist.images[0].id : null;
+      const cover = playlist.id ? musicPlaylistCoverURL(playlist.id, bust) : "";
       const thumbStyle = cover ? 'style="background-image:url(&quot;' + attr(cover) + '&quot;)"' : "";
       return '<div class="list-row clickable" data-action="open-playlist" data-id="' + attr(playlist.id) + '">' +
         '<div class="list-thumb ' + (cover ? "" : "empty") + '" ' + thumbStyle + '></div>' +
@@ -3382,7 +3383,7 @@ const appJS = `
           ownerActions +
         '</div></div>' +
         '<div class="detail-shell">' +
-          playlistCoverBlock(playlist.id, musicPlaylistCoverURL(playlist.id), canEdit) +
+          playlistCoverBlock(playlist.id, musicPlaylistCoverURL(playlist.id, (playlist.images && playlist.images.length > 0) ? playlist.images[0].id : null), canEdit) +
           '<div class="detail-meta">' +
             '<div class="card-head"><span class="caret">&gt;</span> PLAYLIST</div>' +
             '<h2>' + escapeHTML(playlist.name || "Untitled Playlist") + '</h2>' +

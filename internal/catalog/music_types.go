@@ -3,24 +3,45 @@ package catalog
 import "time"
 
 type MusicArtist struct {
-	ID              string        `json:"id"`
-	Name            string        `json:"name"`
-	SortName        string        `json:"sortName,omitempty"`
-	Disambiguation  string        `json:"disambiguation,omitempty"`
-	Biography       string        `json:"biography,omitempty"`
-	Country         string        `json:"country,omitempty"`
-	Genres          []string      `json:"genres,omitempty"`
-	Styles          []string      `json:"styles,omitempty"`
-	Moods           []string      `json:"moods,omitempty"`
-	Links           []string      `json:"links,omitempty"`
-	Images          []Image       `json:"images,omitempty"`
-	ExternalIDs     ExternalIDs   `json:"externalIds,omitempty"`
-	AlbumCount      int           `json:"albumCount"`
-	TrackCount      int           `json:"trackCount"`
-	DurationSeconds int           `json:"durationSeconds"`
-	Playback        PlaybackState `json:"playback"`
-	AddedAt         *time.Time    `json:"addedAt,omitempty"`
-	UpdatedAt       *time.Time    `json:"updatedAt,omitempty"`
+	ID              string      `json:"id"`
+	Name            string      `json:"name"`
+	SortName        string      `json:"sortName,omitempty"`
+	Disambiguation  string      `json:"disambiguation,omitempty"`
+	Biography       string      `json:"biography,omitempty"`
+	Country         string      `json:"country,omitempty"`
+	Genres          []string    `json:"genres,omitempty"`
+	Styles          []string    `json:"styles,omitempty"`
+	Moods           []string    `json:"moods,omitempty"`
+	Links           []string    `json:"links,omitempty"`
+	Images          []Image     `json:"images,omitempty"`
+	ExternalIDs     ExternalIDs `json:"externalIds,omitempty"`
+	AlbumCount      int         `json:"albumCount"`
+	TrackCount      int         `json:"trackCount"`
+	DurationSeconds int         `json:"durationSeconds"`
+	// SimilarArtists are populated by the artistmeta enrichment service. Refs
+	// that match a LOCAL catalog artist carry that artist's ID + images (the
+	// client navigates to them); refs for artists absent from this library are
+	// flagged External and carry an ImageURL from the external provider (the
+	// client shows the tile and routes a tap to search). Empty until the
+	// service runs.
+	SimilarArtists []SimilarArtistRef `json:"similarArtists,omitempty"`
+	Playback       PlaybackState      `json:"playback"`
+	AddedAt        *time.Time         `json:"addedAt,omitempty"`
+	UpdatedAt      *time.Time         `json:"updatedAt,omitempty"`
+}
+
+// SimilarArtistRef is a reference shown in the "Similar Artists" rail. When the
+// artist exists in this library, ID points at the real catalog artist and Images
+// carries its cover(s) so tiles render without a second lookup. When the artist
+// is NOT in this library, External is true, ID is empty, and ImageURL holds the
+// external provider's artist picture (the client renders the tile and routes a
+// tap to a search rather than a detail fetch that would 404).
+type SimilarArtistRef struct {
+	ID       string  `json:"id"`
+	Name     string  `json:"name"`
+	Images   []Image `json:"images,omitempty"`
+	ImageURL string  `json:"imageUrl,omitempty"`
+	External bool    `json:"external,omitempty"`
 }
 
 type MusicAlbum struct {

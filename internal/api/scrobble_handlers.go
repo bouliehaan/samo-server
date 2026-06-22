@@ -3,6 +3,7 @@ package api
 import (
 	"context"
 	"net/http"
+	"time"
 
 	"github.com/bouliehaan/samo-server/internal/catalog"
 	"github.com/bouliehaan/samo-server/internal/lastfm"
@@ -10,7 +11,6 @@ import (
 )
 
 func (s *Server) notifyMusicTrackLastFM(
-	ctx context.Context,
 	userID string,
 	trackID string,
 	before catalog.PlaybackState,
@@ -26,15 +26,27 @@ func (s *Server) notifyMusicTrackLastFM(
 	if err != nil {
 		return
 	}
-	if resumeSeconds > 0 && source == "stream" {
-		s.lastfm.HandleStreamStart(ctx, userID, track, resumeSeconds)
-		return
-	}
+
+	var safePatch *playback.PatchInput
 	if patch != nil {
-		s.lastfm.HandlePlaybackUpdate(ctx, userID, track, before, after, *patch)
-		return
+		p := *patch
+		safePatch = &p
 	}
-	s.lastfm.HandlePlaybackPut(ctx, userID, track, before, after)
+
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+		defer cancel()
+
+		if resumeSeconds > 0 && source == "stream" {
+			s.lastfm.HandleStreamStart(ctx, userID, track, resumeSeconds)
+			return
+		}
+		if safePatch != nil {
+			s.lastfm.HandlePlaybackUpdate(ctx, userID, track, before, after, *safePatch)
+			return
+		}
+		s.lastfm.HandlePlaybackPut(ctx, userID, track, before, after)
+	}()
 }
 
 func (s *Server) postScrobbleEvent(w http.ResponseWriter, r *http.Request) {

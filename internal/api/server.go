@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/bouliehaan/samo-server/internal/artistimages"
+	"github.com/bouliehaan/samo-server/internal/artistmeta"
 	"github.com/bouliehaan/samo-server/internal/bookmarks"
 	"github.com/bouliehaan/samo-server/internal/catalog"
 	"github.com/bouliehaan/samo-server/internal/channels"
@@ -51,6 +52,7 @@ type ServerOptions struct {
 	Sources       *sources.Service
 	LastFM        *lastfm.Service
 	ArtistImages  *artistimages.Service
+	ArtistMeta    *artistmeta.Service
 	Users         *users.Service
 	Channels      *channels.Service
 	ReloadCatalog func(context.Context) error
@@ -80,6 +82,7 @@ type Server struct {
 	sources                          *sources.Service
 	lastfm                           *lastfm.Service
 	artistImages                     *artistimages.Service
+	artistMeta                       *artistmeta.Service
 	users                            *users.Service
 	channels                         *channels.Service
 	reloadCatalog                    func(context.Context) error
@@ -130,6 +133,7 @@ func NewServer(options ServerOptions) http.Handler {
 		sources:                          options.Sources,
 		lastfm:                           options.LastFM,
 		artistImages:                     options.ArtistImages,
+		artistMeta:                       options.ArtistMeta,
 		users:                            options.Users,
 		channels:                         options.Channels,
 		reloadCatalog:                    options.ReloadCatalog,
@@ -260,6 +264,12 @@ func (s *Server) routes() {
 	s.handleAPI("GET /api/v1/podcasts/episodes/{id}/stream", s.streamPodcastEpisode)
 	s.handleAPI("GET /api/v1/podcasts/cache", s.getPodcastCacheSummary)
 	s.handleAPI("DELETE /api/v1/podcasts/cache", s.clearPodcastCache)
+	s.handleAPI("GET /api/v1/podcasts/prewarm", s.getPodcastPrewarm)
+	s.handleAPI("PUT /api/v1/podcasts/prewarm", s.setPodcastPrewarm)
+	s.handleAPI("GET /api/v1/podcasts/cache/limit", s.getPodcastCacheLimit)
+	s.handleAPI("PUT /api/v1/podcasts/cache/limit", s.setPodcastCacheLimit)
+	s.handleAPI("GET /api/v1/podcasts/shows/{id}/prewarm", s.getPodcastShowPrewarm)
+	s.handleAPI("PUT /api/v1/podcasts/shows/{id}/prewarm", s.setPodcastShowPrewarm)
 	s.handleAPI("GET /api/v1/podcasts/episodes/{id}/cache", s.getPodcastEpisodeCache)
 	s.handleAPI("POST /api/v1/podcasts/episodes/{id}/cache", s.cachePodcastEpisode)
 	s.handleAPI("DELETE /api/v1/podcasts/episodes/{id}/cache", s.deletePodcastEpisodeCache)
@@ -275,6 +285,8 @@ func (s *Server) routes() {
 	s.handleAPI("GET /api/v1/music/artists", s.listMusicArtists)
 	s.handleAPI("GET /api/v1/music/artists/{id}", s.getMusicArtist)
 	s.handleAPI("GET /api/v1/music/artists/{id}/albums", s.listMusicArtistAlbums)
+	s.handleAPI("GET /api/v1/music/artists/{id}/top-tracks", s.listMusicArtistTopTracks)
+	s.handleAPI("GET /api/v1/music/artists/{id}/appears-on", s.listMusicArtistAppearsOn)
 	s.handleAPI("GET /api/v1/music/artists/{id}/cover", s.serveMusicArtistCover)
 	s.handleAPI("POST /api/v1/music/artists/images/backfill", s.startArtistImageBackfill)
 	s.handleAPI("GET /api/v1/music/artists/images/backfill", s.getArtistImageBackfill)

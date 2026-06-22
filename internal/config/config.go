@@ -43,6 +43,7 @@ type Config struct {
 	PodcastCacheMaxBytes   int64
 	PodcastCacheMaxAge     time.Duration
 	PodcastCacheMaxFile    int64
+	PodcastPrewarmCount    int
 	PodcastAutoDownload    bool
 	InternetRadioProbe     bool
 	InternetRadioProbeTick time.Duration
@@ -95,6 +96,7 @@ func LoadEnv() (Config, error) {
 		PodcastCacheMaxBytes:   envInt64("SAMO_PODCAST_CACHE_MAX_BYTES", 10<<30),
 		PodcastCacheMaxAge:     envDuration("SAMO_PODCAST_CACHE_MAX_AGE", 30*24*time.Hour),
 		PodcastCacheMaxFile:    envInt64("SAMO_PODCAST_CACHE_MAX_FILE_BYTES", 500<<20),
+		PodcastPrewarmCount:    int(envInt64("SAMO_PODCAST_PREWARM_COUNT", 3)),
 		PodcastAutoDownload:    envBool("SAMO_PODCAST_AUTO_DOWNLOAD", false),
 		InternetRadioProbe:     envBool("SAMO_INTERNET_RADIO_PROBE", true),
 		InternetRadioProbeTick: envDuration("SAMO_INTERNET_RADIO_PROBE_TICK", time.Minute),

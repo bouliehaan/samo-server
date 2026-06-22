@@ -40,7 +40,7 @@ func (s *Server) streamMusicTrack(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	resume := streamResumeSeconds(r, track.Playback.ProgressSeconds)
-	s.notifyMusicTrackLastFM(r.Context(), principal.User.ID, track.ID, catalog.PlaybackState{}, catalog.PlaybackState{ProgressSeconds: resume}, nil, "stream", resume)
+	s.notifyMusicTrackLastFM(principal.User.ID, track.ID, catalog.PlaybackState{}, catalog.PlaybackState{ProgressSeconds: resume}, nil, "stream", resume)
 	s.streamCatalogAudioFiles(w, r, track.AudioFiles, track.Playback, track.DiscNumber)
 }
 

@@ -2,6 +2,7 @@ package api
 
 import (
 	"net/http"
+	"sort"
 
 	"github.com/bouliehaan/samo-server/internal/catalog"
 	"github.com/bouliehaan/samo-server/internal/playback"
@@ -26,6 +27,11 @@ func (s *Server) getMusicArtist(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		writeCatalogError(w, err)
 		return
+	}
+	// Merge cached bio + similar artists (and self-heal on a miss). Non-blocking:
+	// fresh lookups land via a background resolve, surfaced on the next read/sync.
+	if s.artistMeta != nil {
+		s.artistMeta.Hydrate(r.Context(), &item)
 	}
 	if principal, ok := s.currentUser(r); ok {
 		item, err = s.musicArtistWithUserPlayback(r.Context(), principal.User.ID, item)
@@ -54,6 +60,50 @@ func (s *Server) listMusicArtistAlbums(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusInternalServerError, err.Error())
 			return
 		}
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"items": albums, "total": len(albums)})
+}
+
+// listMusicArtistTopTracks returns the artist's most-played tracks for the
+// "Top Tracks" rail. Ranking is by THIS user's play count, so the overlay must
+// run before the sort; without a user it falls back to the catalog's order.
+func (s *Server) listMusicArtistTopTracks(w http.ResponseWriter, r *http.Request) {
+	artistID := r.PathValue("id")
+	if _, err := s.catalog.MusicArtist(artistID); err != nil {
+		writeCatalogError(w, err)
+		return
+	}
+	tracks := s.catalog.MusicTracksForArtist(artistID)
+	if principal, ok := s.currentUser(r); ok {
+		var err error
+		tracks, err = s.musicTracksWithUserPlayback(r.Context(), principal.User.ID, tracks)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+	}
+	sort.SliceStable(tracks, func(i, j int) bool {
+		return tracks[i].Playback.PlayCount > tracks[j].Playback.PlayCount
+	})
+	limit := readLimitParam(r, 5, 50)
+	if len(tracks) > limit {
+		tracks = tracks[:limit]
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"items": tracks, "total": len(tracks)})
+}
+
+// listMusicArtistAppearsOn returns albums the artist features on without being
+// the album artist (see catalog.MusicArtistAppearsOnAlbums).
+func (s *Server) listMusicArtistAppearsOn(w http.ResponseWriter, r *http.Request) {
+	artistID := r.PathValue("id")
+	if _, err := s.catalog.MusicArtist(artistID); err != nil {
+		writeCatalogError(w, err)
+		return
+	}
+	albums := s.catalog.MusicArtistAppearsOnAlbums(artistID)
+	limit := readLimitParam(r, 20, 100)
+	if len(albums) > limit {
+		albums = albums[:limit]
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"items": albums, "total": len(albums)})
 }

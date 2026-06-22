@@ -9,7 +9,24 @@ import (
 	"time"
 
 	"github.com/bouliehaan/samo-server/internal/catalog"
+	"github.com/bouliehaan/samo-server/internal/storage"
 )
+
+// execWrite runs a catalog write with SQLITE_BUSY retry. Catalog upserts share
+// the pool with progress writes, the parallel music phase, and background
+// enrichment (artist images/meta); under that contention a single
+// "database is locked (5)" used to fail the whole scan mid-artist-upsert.
+// Retrying transient busy errors (same policy as the progress writer) keeps the
+// scan resilient instead of aborting.
+func (s *Scanner) execWrite(ctx context.Context, query string, args ...any) (sql.Result, error) {
+	var result sql.Result
+	err := storage.Retry(ctx, 8, func() error {
+		var execErr error
+		result, execErr = s.db.ExecContext(ctx, query, args...)
+		return execErr
+	})
+	return result, err
+}
 
 func (s *Scanner) upsertMusicArtist(ctx context.Context, artist catalog.MusicArtist) error {
 	if s.overrideIndex != nil {
@@ -23,7 +40,7 @@ func (s *Scanner) upsertMusicArtist(ctx context.Context, artist catalog.MusicArt
 	if err := s.db.QueryRowContext(ctx, `SELECT 1 FROM music_artists WHERE id = ? LIMIT 1`, artist.ID).Scan(new(int)); err == nil {
 		existed = true
 	}
-	_, err := s.db.ExecContext(ctx, `
+	_, err := s.execWrite(ctx, `
 		INSERT INTO music_artists (id, name, sort_name, genres_json, images_json, external_ids_json, updated_at)
 		VALUES (?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
 		ON CONFLICT(id) DO UPDATE SET
@@ -55,7 +72,7 @@ func (s *Scanner) upsertMusicAlbum(ctx context.Context, album catalog.MusicAlbum
 			return err
 		}
 	}
-	_, err := s.db.ExecContext(ctx, `
+	_, err := s.execWrite(ctx, `
 		INSERT INTO music_albums (
 		  id, title, sort_title, version, display_artist, release_date, original_release_date, release_year, release_type,
 		  release_status, compilation, record_label, catalog_number, barcode, genres_json, styles_json, moods_json,
@@ -147,11 +164,11 @@ func (s *Scanner) setAlbumArtists(ctx context.Context, albumID string, artists [
 			return nil
 		}
 	}
-	if _, err := s.db.ExecContext(ctx, `DELETE FROM music_album_artists WHERE album_id = ?`, albumID); err != nil {
+	if _, err := s.execWrite(ctx, `DELETE FROM music_album_artists WHERE album_id = ?`, albumID); err != nil {
 		return fmt.Errorf("clear album artists: %w", err)
 	}
 	for index, artist := range artists {
-		if _, err := s.db.ExecContext(ctx, `
+		if _, err := s.execWrite(ctx, `
 			INSERT INTO music_album_artists (album_id, artist_id, position)
 			VALUES (?, ?, ?)`,
 			albumID, artist.ID, index); err != nil {
@@ -169,7 +186,7 @@ func (s *Scanner) upsertMusicTrack(ctx context.Context, track catalog.MusicTrack
 			return err
 		}
 	}
-	_, err := s.db.ExecContext(ctx, `
+	_, err := s.execWrite(ctx, `
 		INSERT INTO music_tracks (
 		  id, title, sort_title, subtitle, display_artist, album_id, album_title, disc_number, track_number, total_discs,
 		  total_tracks, release_date, release_year, genres_json, moods_json, tags_json, duration_seconds,
@@ -219,11 +236,11 @@ func (s *Scanner) setTrackArtists(ctx context.Context, trackID string, artists [
 	if s.overrideIndex != nil && s.overrideIndex.HasField(catalog.OverrideKindMusicTrack, trackID, "artists") {
 		return nil
 	}
-	if _, err := s.db.ExecContext(ctx, `DELETE FROM music_track_artists WHERE track_id = ?`, trackID); err != nil {
+	if _, err := s.execWrite(ctx, `DELETE FROM music_track_artists WHERE track_id = ?`, trackID); err != nil {
 		return fmt.Errorf("clear track artists: %w", err)
 	}
 	for index, artist := range artists {
-		if _, err := s.db.ExecContext(ctx, `
+		if _, err := s.execWrite(ctx, `
 			INSERT INTO music_track_artists (track_id, artist_id, role, position)
 			VALUES (?, ?, 'artist', ?)`,
 			trackID, artist.ID, index); err != nil {
@@ -250,7 +267,7 @@ func (s *Scanner) upsertAudiobook(ctx context.Context, item catalog.AudiobookIte
 		bookJSON = jsonText(item.Book)
 	}
 
-	_, err := s.db.ExecContext(ctx, `
+	_, err := s.execWrite(ctx, `
 		INSERT INTO audiobooks (
 		  id, library_id, path, folder_id, inode, size_bytes, missing, invalid,
 		  cover_json, tags_json, genres_json, duration_seconds, progress_json, book_json,
@@ -289,7 +306,7 @@ func (s *Scanner) upsertAudiobook(ctx context.Context, item catalog.AudiobookIte
 	if err := s.db.QueryRowContext(ctx, `SELECT id FROM audiobooks WHERE path = ?`, item.Path).Scan(&existingID); err != nil {
 		return "", fmt.Errorf("resolve audiobook id by path %q: %w", item.Path, err)
 	}
-	_, err = s.db.ExecContext(ctx, `
+	_, err = s.execWrite(ctx, `
 		UPDATE audiobooks
 		SET library_id = ?, folder_id = ?, inode = ?, size_bytes = ?, missing = ?, invalid = ?,
 		    cover_json = ?, tags_json = ?, genres_json = ?, duration_seconds = ?, book_json = ?,
@@ -321,7 +338,7 @@ func (s *Scanner) upsertPodcast(ctx context.Context, item catalog.PodcastItem) e
 		podcastJSON = jsonText(item.Podcast)
 	}
 
-	_, err := s.db.ExecContext(ctx, `
+	_, err := s.execWrite(ctx, `
 		INSERT INTO podcasts (
 		  id, library_id, path, folder_id, inode, size_bytes, missing, invalid,
 		  cover_json, tags_json, genres_json, duration_seconds, progress_json, podcast_json,
@@ -353,7 +370,7 @@ func (s *Scanner) upsertPodcast(ctx context.Context, item catalog.PodcastItem) e
 		return fmt.Errorf("upsert podcast %q: %w", item.ID, err)
 	}
 	// Path UNIQUE collision — see upsertAudiobook for context.
-	_, err = s.db.ExecContext(ctx, `
+	_, err = s.execWrite(ctx, `
 		UPDATE podcasts
 		SET library_id = ?, folder_id = ?, inode = ?, size_bytes = ?, missing = ?, invalid = ?,
 		    cover_json = ?, tags_json = ?, genres_json = ?, duration_seconds = ?, podcast_json = ?,
@@ -372,7 +389,7 @@ func (s *Scanner) upsertPodcast(ctx context.Context, item catalog.PodcastItem) e
 // the audiobook scanner to ensure authors / narrators exist before we link
 // them. Idempotent.
 func (s *Scanner) upsertContributor(ctx context.Context, contributor catalog.Contributor) error {
-	_, err := s.db.ExecContext(ctx, `
+	_, err := s.execWrite(ctx, `
 		INSERT INTO contributors (id, name, sort_name, description, images_json, external_ids_json)
 		VALUES (?, ?, ?, ?, ?, ?)
 		ON CONFLICT(id) DO UPDATE SET
@@ -402,7 +419,7 @@ func (s *Scanner) setAudiobookContributors(ctx context.Context, audiobookID stri
 			return nil
 		}
 	}
-	if _, err := s.db.ExecContext(ctx, `DELETE FROM audiobook_contributors WHERE audiobook_id = ?`, audiobookID); err != nil {
+	if _, err := s.execWrite(ctx, `DELETE FROM audiobook_contributors WHERE audiobook_id = ?`, audiobookID); err != nil {
 		return fmt.Errorf("clear audiobook contributors: %w", err)
 	}
 	for _, ref := range contributors {
@@ -421,7 +438,7 @@ func (s *Scanner) setAudiobookContributors(ctx context.Context, audiobookID stri
 		if ref.ID == "" {
 			continue
 		}
-		if _, err := s.db.ExecContext(ctx, `
+		if _, err := s.execWrite(ctx, `
 			INSERT INTO audiobook_contributors (audiobook_id, contributor_id, role, position)
 			VALUES (?, ?, ?, ?)`,
 			audiobookID, ref.ID, ref.Role, index); err != nil {
@@ -432,7 +449,7 @@ func (s *Scanner) setAudiobookContributors(ctx context.Context, audiobookID stri
 }
 
 func (s *Scanner) upsertSeries(ctx context.Context, series catalog.Series) error {
-	_, err := s.db.ExecContext(ctx, `
+	_, err := s.execWrite(ctx, `
 		INSERT INTO series (id, name, description, authors_json, item_ids_json, external_ids_json)
 		VALUES (?, ?, ?, ?, ?, ?)
 		ON CONFLICT(id) DO UPDATE SET
@@ -453,14 +470,14 @@ func (s *Scanner) setAudiobookSeries(ctx context.Context, audiobookID string, se
 	if s.overrideIndex != nil && s.overrideIndex.HasField(catalog.OverrideKindAudiobook, audiobookID, "series") {
 		return nil
 	}
-	if _, err := s.db.ExecContext(ctx, `DELETE FROM audiobook_series WHERE audiobook_id = ?`, audiobookID); err != nil {
+	if _, err := s.execWrite(ctx, `DELETE FROM audiobook_series WHERE audiobook_id = ?`, audiobookID); err != nil {
 		return fmt.Errorf("clear audiobook series: %w", err)
 	}
 	for _, entry := range series {
 		if entry.ID == "" {
 			continue
 		}
-		if _, err := s.db.ExecContext(ctx, `
+		if _, err := s.execWrite(ctx, `
 			INSERT INTO audiobook_series (audiobook_id, series_id, sequence, sequence_text)
 			VALUES (?, ?, ?, ?)`,
 			audiobookID, entry.ID, entry.Sequence, entry.SequenceText); err != nil {
@@ -478,7 +495,7 @@ func (s *Scanner) upsertPodcastEpisode(ctx context.Context, episode catalog.Podc
 			return err
 		}
 	}
-	_, err := s.db.ExecContext(ctx, `
+	_, err := s.execWrite(ctx, `
 		INSERT INTO podcast_episodes (
 		  id, library_id, podcast_id, title, subtitle, description, published_at, season, episode,
 		  episode_type, duration_seconds, explicit, enclosure_url, enclosure_type, enclosure_bytes,
@@ -516,7 +533,7 @@ func (s *Scanner) upsertPodcastEpisode(ctx context.Context, episode catalog.Podc
 // books and podcast episodes have separate chapter tables now (was: shared
 // shelf_chapters) so the two flows do not race each other.
 func (s *Scanner) replaceAudiobookChapters(ctx context.Context, audiobookID string, chapters []catalog.AudioChapter) error {
-	if _, err := s.db.ExecContext(ctx, `DELETE FROM audiobook_chapters WHERE audiobook_id = ?`, audiobookID); err != nil {
+	if _, err := s.execWrite(ctx, `DELETE FROM audiobook_chapters WHERE audiobook_id = ?`, audiobookID); err != nil {
 		return fmt.Errorf("clear audiobook chapters: %w", err)
 	}
 	for _, chapter := range chapters {
@@ -524,7 +541,7 @@ func (s *Scanner) replaceAudiobookChapters(ctx context.Context, audiobookID stri
 		chapter.ID = stableID("chapter", "audiobook", audiobookID, fmt.Sprint(chapter.Index), chapter.Title, fmt.Sprint(startMs))
 		// start_seconds/end_seconds stay for back-compat reads; start_ms/end_ms
 		// are the precise canonical values the API now projects.
-		if _, err := s.db.ExecContext(ctx, `
+		if _, err := s.execWrite(ctx, `
 			INSERT INTO audiobook_chapters (id, audiobook_id, chapter_index, title, start_seconds, end_seconds, start_ms, end_ms)
 			VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
 			chapter.ID, audiobookID, chapter.Index, chapter.Title,
@@ -546,7 +563,7 @@ func (s *Scanner) setAudiobookChapterProvenance(ctx context.Context, audiobookID
 	if syncedAt != nil {
 		synced = syncedAt.UTC().Format(time.RFC3339)
 	}
-	if _, err := s.db.ExecContext(ctx, `
+	if _, err := s.execWrite(ctx, `
 		UPDATE audiobooks
 		SET chapter_source = ?, chapter_asin = ?, chapter_synced_at = ?
 		WHERE id = ?`,
@@ -562,7 +579,7 @@ func (s *Scanner) setAudiobookChapterProvenance(ctx context.Context, audiobookID
 // expensive full-file decode happens once per file version rather than on every
 // scan.
 func (s *Scanner) setAudioChapterMetrics(ctx context.Context, audiobookID string, confidence float64, sig string) error {
-	if _, err := s.db.ExecContext(ctx, `
+	if _, err := s.execWrite(ctx, `
 		UPDATE audiobooks
 		SET chapter_confidence = ?, chapter_audio_sig = ?
 		WHERE id = ?`,
@@ -573,13 +590,13 @@ func (s *Scanner) setAudioChapterMetrics(ctx context.Context, audiobookID string
 }
 
 func (s *Scanner) replaceEpisodeChapters(ctx context.Context, episodeID string, chapters []catalog.AudioChapter) error {
-	if _, err := s.db.ExecContext(ctx, `DELETE FROM episode_chapters WHERE episode_id = ?`, episodeID); err != nil {
+	if _, err := s.execWrite(ctx, `DELETE FROM episode_chapters WHERE episode_id = ?`, episodeID); err != nil {
 		return fmt.Errorf("clear episode chapters: %w", err)
 	}
 	for _, chapter := range chapters {
 		startMs, endMs := chapter.StartMs(), chapter.EndMs()
 		chapter.ID = stableID("chapter", "episode", episodeID, fmt.Sprint(chapter.Index), chapter.Title, fmt.Sprint(startMs))
-		if _, err := s.db.ExecContext(ctx, `
+		if _, err := s.execWrite(ctx, `
 			INSERT INTO episode_chapters (id, episode_id, chapter_index, title, start_seconds, end_seconds, start_ms, end_ms)
 			VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
 			chapter.ID, episodeID, chapter.Index, chapter.Title,
@@ -607,7 +624,7 @@ func (s *Scanner) upsertAudioFile(ctx context.Context, libraryID string, owner a
 	}
 	file = finalizeAudioFile(file)
 
-	_, err = s.db.ExecContext(ctx, `
+	_, err = s.execWrite(ctx, `
 		INSERT INTO media_files (
 		  id, library_id, audiobook_id, podcast_id, track_id, episode_id, path, relative_path, file_name, inode, size_bytes,
 		  modified_at, container, mime_type, codec, codec_profile, metadata_formats_json, bitrate, bit_depth, sample_rate, channels,
@@ -688,7 +705,7 @@ func (s *Scanner) reclaimMediaFileByPath(ctx context.Context, libraryID string, 
 		return err
 	}
 	file = finalizeAudioFile(file)
-	_, err = s.db.ExecContext(ctx, `
+	_, err = s.execWrite(ctx, `
 		UPDATE media_files
 		SET library_id = ?,
 		    audiobook_id = ?,
@@ -751,7 +768,7 @@ func (s *Scanner) upsertGenre(ctx context.Context, kind string, name string) err
 	if name == "" {
 		return nil
 	}
-	_, err := s.db.ExecContext(ctx, `
+	_, err := s.execWrite(ctx, `
 		INSERT INTO genres (name, kind)
 		VALUES (?, ?)
 		ON CONFLICT(name, kind) DO NOTHING`,
@@ -839,7 +856,7 @@ func (s *Scanner) refreshStats(ctx context.Context) error {
 		 END`,
 	}
 	for _, statement := range statements {
-		if _, err := s.db.ExecContext(ctx, statement); err != nil {
+		if _, err := s.execWrite(ctx, statement); err != nil {
 			return fmt.Errorf("refresh scanner stats: %w", err)
 		}
 	}

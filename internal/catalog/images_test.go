@@ -244,6 +244,74 @@ func TestMusicPlaylistCoverImagesPrefersCustomUpload(t *testing.T) {
 	}
 }
 
+func TestMusicPlaylistCoverImagesGathersUpTo4DistinctCovers(t *testing.T) {
+	album1 := writeTestImageFile(t, "1.jpg")
+	album2 := writeTestImageFile(t, "2.jpg")
+	album3 := writeTestImageFile(t, "3.jpg")
+	album4 := writeTestImageFile(t, "4.jpg")
+
+	service := NewService(Seed{
+		MusicPlaylists: []MusicPlaylist{{
+			ID:       "pl-1",
+			Name:     "Mix",
+			TrackIDs: []string{"t1", "t2", "t3", "t3-dup", "t4", "t5"},
+		}},
+		MusicAlbums: []MusicAlbum{
+			{ID: "a1", Images: []Image{{ID: "c1", Path: album1}}},
+			{ID: "a2", Images: []Image{{ID: "c2", Path: album2}}},
+			{ID: "a3", Images: []Image{{ID: "c3", Path: album3}}},
+			{ID: "a4", Images: []Image{{ID: "c4", Path: album4}}},
+		},
+		MusicTracks: []MusicTrack{
+			{ID: "t1", AlbumID: "a1"},
+			{ID: "t2", AlbumID: "a2"},
+			{ID: "t3", AlbumID: "a3"},
+			{ID: "t3-dup", AlbumID: "a3"},
+			{ID: "t4", AlbumID: "a4"},
+			{ID: "t5", AlbumID: "a1"},
+		},
+	})
+
+	images := service.MusicPlaylistCoverImages("pl-1")
+	if len(images) != 4 {
+		t.Fatalf("MusicPlaylistCoverImages length = %d, want 4", len(images))
+	}
+	if images[0].ID != "c1" || images[1].ID != "c2" || images[2].ID != "c3" || images[3].ID != "c4" {
+		t.Fatalf("MusicPlaylistCoverImages = %#v, want c1, c2, c3, c4", images)
+	}
+}
+
+func TestMusicPlaylistCoverImagesDuplicatesWhen2Or3(t *testing.T) {
+	album1 := writeTestImageFile(t, "a1.jpg")
+	album2 := writeTestImageFile(t, "a2.jpg")
+	defer os.Remove(album1)
+	defer os.Remove(album2)
+
+	service := NewService(Seed{
+		MusicPlaylists: []MusicPlaylist{{
+			ID:       "pl-1",
+			Name:     "Mix",
+			TrackIDs: []string{"t1", "t2"},
+		}},
+		MusicAlbums: []MusicAlbum{
+			{ID: "a1", Images: []Image{{ID: "c1", Path: album1}}},
+			{ID: "a2", Images: []Image{{ID: "c2", Path: album2}}},
+		},
+		MusicTracks: []MusicTrack{
+			{ID: "t1", AlbumID: "a1"},
+			{ID: "t2", AlbumID: "a2"},
+		},
+	})
+
+	images := service.MusicPlaylistCoverImages("pl-1")
+	if len(images) != 4 {
+		t.Fatalf("MusicPlaylistCoverImages length = %d, want 4", len(images))
+	}
+	if images[0].ID != "c1" || images[1].ID != "c2" || images[2].ID != "c1" || images[3].ID != "c2" {
+		t.Fatalf("MusicPlaylistCoverImages = %v, want c1, c2, c1, c2", images)
+	}
+}
+
 func writeTestImageFile(t *testing.T, name string) string {
 	t.Helper()
 	path := t.TempDir() + "/" + name

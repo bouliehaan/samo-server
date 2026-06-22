@@ -324,3 +324,49 @@ func fileExists(path string) bool {
 	info, err := os.Stat(path)
 	return err == nil && !info.IsDir() && info.Size() > 0
 }
+
+func compositeID(playlistID, hash string) string {
+	h := sha256.New()
+	h.Write([]byte(playlistID + ":" + hash))
+	h.Write([]byte{0})
+	return "cover_" + hex.EncodeToString(h.Sum(nil)[:12])
+}
+
+func (s *Service) Composite(ctx context.Context, playlistID, imagesHash string, sourcePaths []string) (*catalog.Image, error) {
+	if s == nil || s.db == nil {
+		return nil, ErrDisabled
+	}
+	if len(sourcePaths) != 4 {
+		return nil, fmt.Errorf("composite requires exactly 4 images")
+	}
+
+	id := compositeID(playlistID, imagesHash)
+
+	if existing, err := s.Get(ctx, id); err == nil && fileExists(existing.Path) {
+		return &existing, nil
+	}
+
+	dest := filepath.Join(s.coverDir, id+".jpg")
+
+	filter := "[0:v]scale=300:300:force_original_aspect_ratio=increase,crop=300:300,setsar=1/1[v0];" +
+		"[1:v]scale=300:300:force_original_aspect_ratio=increase,crop=300:300,setsar=1/1[v1];" +
+		"[2:v]scale=300:300:force_original_aspect_ratio=increase,crop=300:300,setsar=1/1[v2];" +
+		"[3:v]scale=300:300:force_original_aspect_ratio=increase,crop=300:300,setsar=1/1[v3];" +
+		"[v0][v1]hstack[top];" +
+		"[v2][v3]hstack[bottom];" +
+		"[top][bottom]vstack[out]"
+
+	args := []string{"-hide_banner", "-loglevel", "error", "-nostdin", "-y"}
+	for _, sp := range sourcePaths {
+		args = append(args, "-i", sp)
+	}
+	args = append(args, "-filter_complex", filter, "-map", "[out]", "-frames:v", "1", dest)
+
+	cmd := exec.CommandContext(ctx, s.ffmpegPath, args...)
+	if output, err := cmd.CombinedOutput(); err != nil {
+		_ = os.Remove(dest)
+		return nil, fmt.Errorf("ffmpeg composite failed: %w, output: %s", err, string(output))
+	}
+
+	return s.finalizeExtract(ctx, "composite:"+playlistID, imagesHash, id, dest)
+}

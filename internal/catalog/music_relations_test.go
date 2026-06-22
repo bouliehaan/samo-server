@@ -20,6 +20,71 @@ func TestMusicAlbumsForArtistMatchesAlbumArtistOnly(t *testing.T) {
 	}
 }
 
+func TestMusicArtistAppearsOnAlbums(t *testing.T) {
+	service := NewService(Seed{
+		MusicAlbums: []MusicAlbum{
+			// Artist's own album — must NOT appear in "Appears On".
+			{ID: "own", Title: "Own", AlbumArtistIDs: []string{"artist-1"}, TrackCount: 2, ReleaseYear: 2018},
+			// Compilation: artist credited on a track, not the album artist.
+			{ID: "comp", Title: "Comp", AlbumArtistIDs: []string{"various"}, TrackCount: 12, ReleaseYear: 2022},
+			// Feature on someone else's album.
+			{ID: "feat", Title: "Feat", AlbumArtistIDs: []string{"artist-2"}, TrackCount: 10, ReleaseYear: 2020},
+			// Album the artist has nothing to do with.
+			{ID: "other", Title: "Other", AlbumArtistIDs: []string{"artist-3"}, TrackCount: 9, ReleaseYear: 2021},
+		},
+		MusicTracks: []MusicTrack{
+			{ID: "t-own", AlbumID: "own", ArtistIDs: []string{"artist-1"}},
+			{ID: "t-comp", AlbumID: "comp", ArtistIDs: []string{"artist-1"}},
+			{ID: "t-feat", AlbumID: "feat", ArtistIDs: []string{"artist-2", "artist-1"}},
+			{ID: "t-other", AlbumID: "other", ArtistIDs: []string{"artist-3"}},
+		},
+	})
+
+	albums := service.MusicArtistAppearsOnAlbums("artist-1")
+	if len(albums) != 2 {
+		t.Fatalf("appears-on count = %d, want 2 (comp + feat); got %#v", len(albums), albums)
+	}
+	// Ordered newest-first: comp (2022) before feat (2020).
+	if albums[0].ID != "comp" || albums[1].ID != "feat" {
+		t.Fatalf("appears-on order = [%q, %q], want [comp, feat]", albums[0].ID, albums[1].ID)
+	}
+}
+
+func TestSetMusicArtistMetaAndNameLookup(t *testing.T) {
+	service := NewService(Seed{
+		MusicArtists: []MusicArtist{
+			{ID: "artist-1", Name: "Phoebe Bridgers"},
+			{ID: "artist-2", Name: "boygenius"},
+		},
+	})
+
+	if id, ok := service.MusicArtistIDByName("  PHOEBE   bridgers "); !ok || id != "artist-1" {
+		t.Fatalf("name lookup = %q %v, want artist-1 true", id, ok)
+	}
+	if _, ok := service.MusicArtistIDByName("Nobody"); ok {
+		t.Fatalf("unknown name resolved unexpectedly")
+	}
+
+	service.SetMusicArtistMeta("artist-1", "A short bio.", []SimilarArtistRef{{ID: "artist-2", Name: "boygenius"}})
+	artist, err := service.MusicArtist("artist-1")
+	if err != nil {
+		t.Fatalf("MusicArtist: %v", err)
+	}
+	if artist.Biography != "A short bio." {
+		t.Fatalf("biography = %q", artist.Biography)
+	}
+	if len(artist.SimilarArtists) != 1 || artist.SimilarArtists[0].ID != "artist-2" {
+		t.Fatalf("similar = %#v", artist.SimilarArtists)
+	}
+
+	// Empty inputs must not erase existing data.
+	service.SetMusicArtistMeta("artist-1", "", nil)
+	artist, _ = service.MusicArtist("artist-1")
+	if artist.Biography != "A short bio." || len(artist.SimilarArtists) != 1 {
+		t.Fatalf("empty patch erased data: %#v", artist)
+	}
+}
+
 func TestMusicTracksForAlbumAndPlaylist(t *testing.T) {
 	service := NewService(Seed{
 		MusicTracks: []MusicTrack{

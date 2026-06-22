@@ -324,20 +324,66 @@ func (s *Service) resolvedImagesLocked(images []Image) []Image {
 }
 
 func (s *Service) musicPlaylistAutoCoverImagesLocked(playlist MusicPlaylist) []Image {
+	var results []Image
+	seen := make(map[string]bool)
+
+	addUnique := func(images []Image) bool {
+		for _, img := range images {
+			key := img.ID
+			if key == "" {
+				key = img.Path
+			}
+			if key == "" {
+				key = img.URL
+			}
+			if key == "" || seen[key] {
+				continue
+			}
+			seen[key] = true
+			results = append(results, img)
+			if len(results) == 4 {
+				return true
+			}
+		}
+		return false
+	}
+
 	for _, trackID := range playlist.TrackIDs {
 		track, ok := s.musicTrackByID[trackID]
 		if !ok {
 			continue
 		}
 		if images := s.resolvedImagesLocked(track.Images); len(images) > 0 {
-			return images
+			if addUnique(images) {
+				break
+			}
+			continue
 		}
 		if images := s.musicAlbumCoverImagesLocked(track.AlbumID); len(images) > 0 {
-			return images
+			if addUnique(images) {
+				break
+			}
+			continue
 		}
 		if image, ok := s.lookupTrackExtractedCover(track); ok {
-			return []Image{image}
+			if addUnique([]Image{image}) {
+				break
+			}
 		}
+	}
+
+	if len(results) > 1 && len(results) < 4 {
+		orig := len(results)
+		for i := orig; i < 4; i++ {
+			results = append(results, results[i%orig])
+		}
+	}
+
+	if len(results) == 4 {
+		return results
+	}
+	if len(results) > 0 {
+		return results[:1]
 	}
 	return nil
 }

@@ -243,8 +243,11 @@ func signParams(secret string, params map[string]string) string {
 	}
 	sort.Strings(keys)
 
+	// Last.fm signature: concatenate name+value for each param in ascending key
+	// order (excluding `format`/`callback`/`api_sig`), then append the shared
+	// secret ONCE at the END, then md5. A leading secret too (the old bug) makes
+	// every signed call fail with error 13 "Invalid method signature supplied".
 	var builder strings.Builder
-	builder.WriteString(secret)
 	for _, key := range keys {
 		builder.WriteString(key)
 		builder.WriteString(params[key])

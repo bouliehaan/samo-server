@@ -27,15 +27,16 @@ var (
 const defaultMaxFileBytes = 500 << 20
 
 type Service struct {
-	db           *sql.DB
-	cacheDir     string
-	enabled      bool
-	maxBytes     int64
-	maxAge       time.Duration
-	maxFileBytes int64
-	stream       *podcaststream.Service
-	mu           sync.Mutex
-	inflight     map[string]struct{}
+	db                  *sql.DB
+	cacheDir            string
+	enabled             bool
+	maxBytes            int64
+	maxAge              time.Duration
+	maxFileBytes        int64
+	defaultPrewarmCount int
+	stream              *podcaststream.Service
+	mu                  sync.Mutex
+	inflight            map[string]struct{}
 }
 
 type Options struct {
@@ -44,7 +45,10 @@ type Options struct {
 	MaxBytes     int64
 	MaxAge       time.Duration
 	MaxFileBytes int64
-	Stream       *podcaststream.Service
+	// DefaultPrewarmCount is how many newest episodes to keep warm per show when
+	// neither a per-show nor a global override is set (env SAMO_PODCAST_PREWARM_COUNT).
+	DefaultPrewarmCount int
+	Stream              *podcaststream.Service
 }
 
 func New(db *sql.DB, options Options) (*Service, error) {
@@ -67,15 +71,20 @@ func New(db *sql.DB, options Options) (*Service, error) {
 	if maxFileBytes <= 0 {
 		maxFileBytes = defaultMaxFileBytes
 	}
+	defaultPrewarmCount := options.DefaultPrewarmCount
+	if defaultPrewarmCount < 0 {
+		defaultPrewarmCount = 0
+	}
 	return &Service{
-		db:           db,
-		cacheDir:     absolute,
-		enabled:      options.Enabled,
-		maxBytes:     options.MaxBytes,
-		maxAge:       options.MaxAge,
-		maxFileBytes: maxFileBytes,
-		stream:       stream,
-		inflight:     map[string]struct{}{},
+		db:                  db,
+		cacheDir:            absolute,
+		enabled:             options.Enabled,
+		maxBytes:            options.MaxBytes,
+		maxAge:              options.MaxAge,
+		maxFileBytes:        maxFileBytes,
+		defaultPrewarmCount: defaultPrewarmCount,
+		stream:              stream,
+		inflight:            map[string]struct{}{},
 	}, nil
 }
 
@@ -101,6 +110,7 @@ type Summary struct {
 	Enabled      bool  `json:"enabled"`
 	EpisodeCount int   `json:"episodeCount"`
 	TotalBytes   int64 `json:"totalBytes"`
+	MaxBytes     int64 `json:"maxBytes"`
 }
 
 // ClearResult reports how much cache was removed by ClearAll.
@@ -194,6 +204,7 @@ func (s *Service) Summary(ctx context.Context) (Summary, error) {
 		Enabled:      true,
 		EpisodeCount: count,
 		TotalBytes:   total,
+		MaxBytes:     s.CacheMaxBytes(ctx),
 	}, nil
 }
 

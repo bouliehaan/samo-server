@@ -71,6 +71,13 @@ func TestGetSessionSignature(t *testing.T) {
 	}) {
 		t.Fatal("signature must ignore format")
 	}
+	// Pin the exact md5 to the real Last.fm algorithm (name+value sorted, then
+	// secret appended ONCE): md5("api_keykeymethodauth.getSessiontokentoken-123secret").
+	// Guards the error-13 regression where the secret was also prepended.
+	const want = "5e618b4c044fd0547a24e5f3869d5403"
+	if sig != want {
+		t.Fatalf("api_sig = %q, want %q (Last.fm sign = params+secret, secret only at end)", sig, want)
+	}
 }
 
 func TestCompleteAuthStoresSession(t *testing.T) {

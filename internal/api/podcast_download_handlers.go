@@ -2,6 +2,7 @@ package api
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"net/http"
 	"time"
@@ -9,6 +10,148 @@ import (
 	"github.com/bouliehaan/samo-server/internal/catalog"
 	"github.com/bouliehaan/samo-server/internal/podcastcache"
 )
+
+type prewarmCountInput struct {
+	Count int `json:"count"`
+}
+
+// getPodcastPrewarm reports the global default prewarm count (how many newest
+// episodes the server keeps warm per show by default).
+func (s *Server) getPodcastPrewarm(w http.ResponseWriter, r *http.Request) {
+	if _, ok := s.currentUser(r); !ok {
+		writeError(w, http.StatusUnauthorized, "unauthorized")
+		return
+	}
+	if s.podcastCache == nil {
+		writeJSON(w, http.StatusOK, map[string]any{"count": 0, "default": 0})
+		return
+	}
+	count, explicit := s.podcastCache.GetPrewarmCount(r.Context(), "")
+	if !explicit {
+		count = s.podcastCache.DefaultPrewarmCount()
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"count":   count,
+		"default": s.podcastCache.DefaultPrewarmCount(),
+	})
+}
+
+// setPodcastPrewarm sets the global default prewarm count.
+func (s *Server) setPodcastPrewarm(w http.ResponseWriter, r *http.Request) {
+	if _, ok := s.requireAdmin(w, r); !ok {
+		return
+	}
+	if s.podcastCache == nil || !s.podcastCache.Enabled() {
+		writeError(w, http.StatusServiceUnavailable, "podcast cache is not enabled")
+		return
+	}
+	var input prewarmCountInput
+	if err := json.NewDecoder(r.Body).Decode(&input); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid request body")
+		return
+	}
+	if err := s.podcastCache.SetPrewarmCount(r.Context(), "", input.Count); err != nil {
+		writePodcastCacheError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"count": maxInt(input.Count, 0)})
+}
+
+// getPodcastShowPrewarm reports the effective prewarm count for one show plus
+// whether it has an explicit override (so the UI can show "using default").
+func (s *Server) getPodcastShowPrewarm(w http.ResponseWriter, r *http.Request) {
+	if _, ok := s.currentUser(r); !ok {
+		writeError(w, http.StatusUnauthorized, "unauthorized")
+		return
+	}
+	showID := r.PathValue("id")
+	if s.podcastCache == nil {
+		writeJSON(w, http.StatusOK, map[string]any{"count": 0, "override": false})
+		return
+	}
+	stored, override := s.podcastCache.GetPrewarmCount(r.Context(), showID)
+	writeJSON(w, http.StatusOK, map[string]any{
+		"count":    s.podcastCache.PrewarmCount(r.Context(), showID),
+		"override": override,
+		"stored":   stored,
+		"default":  s.podcastCache.DefaultPrewarmCount(),
+	})
+}
+
+// setPodcastShowPrewarm sets a per-show override and immediately warms the
+// newest N episodes so the change takes effect without waiting for a feed poll.
+func (s *Server) setPodcastShowPrewarm(w http.ResponseWriter, r *http.Request) {
+	if _, ok := s.requireAdmin(w, r); !ok {
+		return
+	}
+	if s.podcastCache == nil || !s.podcastCache.Enabled() {
+		writeError(w, http.StatusServiceUnavailable, "podcast cache is not enabled")
+		return
+	}
+	showID := r.PathValue("id")
+	if _, err := s.catalog.Podcast(showID); err != nil {
+		writeCatalogError(w, err)
+		return
+	}
+	var input prewarmCountInput
+	if err := json.NewDecoder(r.Body).Decode(&input); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid request body")
+		return
+	}
+	if err := s.podcastCache.SetPrewarmCount(r.Context(), showID, input.Count); err != nil {
+		writePodcastCacheError(w, err)
+		return
+	}
+	if episodes, err := s.catalog.EpisodesForPodcast(showID, catalog.PageRequest{Limit: 500}); err == nil {
+		s.podcastCache.PrewarmNewest(showID, episodes.Items, maxInt(input.Count, 0))
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"count": maxInt(input.Count, 0)})
+}
+
+func maxInt(a, b int) int {
+	if a > b {
+		return a
+	}
+	return b
+}
+
+type cacheLimitInput struct {
+	MaxBytes int64 `json:"maxBytes"`
+}
+
+// getPodcastCacheLimit reports the effective cache size cap (bytes).
+func (s *Server) getPodcastCacheLimit(w http.ResponseWriter, r *http.Request) {
+	if _, ok := s.currentUser(r); !ok {
+		writeError(w, http.StatusUnauthorized, "unauthorized")
+		return
+	}
+	if s.podcastCache == nil {
+		writeJSON(w, http.StatusOK, map[string]any{"maxBytes": 0})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"maxBytes": s.podcastCache.CacheMaxBytes(r.Context())})
+}
+
+// setPodcastCacheLimit sets the cache size cap and prunes to it immediately.
+func (s *Server) setPodcastCacheLimit(w http.ResponseWriter, r *http.Request) {
+	if _, ok := s.requireAdmin(w, r); !ok {
+		return
+	}
+	if s.podcastCache == nil || !s.podcastCache.Enabled() {
+		writeError(w, http.StatusServiceUnavailable, "podcast cache is not enabled")
+		return
+	}
+	var input cacheLimitInput
+	if err := json.NewDecoder(r.Body).Decode(&input); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid request body")
+		return
+	}
+	if err := s.podcastCache.SetCacheMaxBytes(r.Context(), input.MaxBytes); err != nil {
+		writePodcastCacheError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"maxBytes": s.podcastCache.CacheMaxBytes(r.Context())})
+}
 
 func (s *Server) cachePodcastEpisode(w http.ResponseWriter, r *http.Request) {
 	if _, ok := s.requireAdmin(w, r); !ok {

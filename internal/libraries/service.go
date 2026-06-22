@@ -326,6 +326,13 @@ func (s *Service) ScannerLibraries(ctx context.Context) ([]scanner.Library, erro
 // request (e.g. per-library scan while a full-library scan is running)
 // returns ErrScanInProgress so the UI does not attach to the wrong job.
 func (s *Service) runScan(ctx context.Context, request scanRequest) (ScanResult, error) {
+	// Kickoff is fire-and-forget and must outlive the caller's request. The HTTP
+	// handlers pass r.Context(), which a browser refresh/navigation cancels — if
+	// the library resolve + job insert rode on it, the scan would abort
+	// mid-start ("stuck at starting" / "a refresh stops the scan you started").
+	// Pin the whole kickoff to the long-lived background context; the worker
+	// (executeScan) already runs on a child of s.bgCtx.
+	ctx = s.bgCtx
 	if request.trigger == "" {
 		request.trigger = TriggerAPI
 	}

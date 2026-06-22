@@ -747,7 +747,13 @@ func (s *Service) savePodcastFeed(ctx context.Context, feedURL string, parsed pa
 		newEpisodes = append(newEpisodes, episode)
 	}
 	if autoDownload && len(newEpisodes) > 0 {
+		// Full auto-download: cache every new episode.
 		s.prefetchPodcastEpisodes(newEpisodes)
+	} else if s.podcastCache != nil {
+		// Bounded prewarm: keep the newest N episodes warm so first play is
+		// instant, without downloading the entire back catalogue.
+		count := s.podcastCache.PrewarmCount(ctx, podcastID)
+		s.podcastCache.PrewarmNewest(podcastID, guardedEpisodes, count)
 	}
 
 	if s.podcastCache != nil {

@@ -95,11 +95,12 @@ func (s *Service) deleteRowsOlderThan(ctx context.Context, cutoff string) error 
 }
 
 func (s *Service) pruneToMaxBytes(ctx context.Context) error {
+	maxBytes := s.CacheMaxBytes(ctx)
 	var total int64
 	if err := s.db.QueryRowContext(ctx, `SELECT COALESCE(SUM(size_bytes), 0) FROM podcast_episode_cache`).Scan(&total); err != nil {
 		return fmt.Errorf("sum podcast cache size: %w", err)
 	}
-	if total <= s.maxBytes {
+	if total <= maxBytes {
 		return nil
 	}
 	rows, err := s.db.QueryContext(ctx, `
@@ -114,7 +115,7 @@ func (s *Service) pruneToMaxBytes(ctx context.Context) error {
 		return err
 	}
 	for _, row := range candidates {
-		if total <= s.maxBytes {
+		if total <= maxBytes {
 			break
 		}
 		if err := s.removeCacheRow(ctx, row.episodeID, row.cachePath); err != nil {
