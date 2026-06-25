@@ -33,20 +33,22 @@ const loginHTML = `<!doctype html>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>SAMO SERVER · SIGN IN</title>
+  <link href="https://fonts.googleapis.com/css2?family=Young+Serif&display=swap" rel="stylesheet">
   <link rel="icon" type="image/png" href="/favicon-dark.png">
   <link rel="icon" type="image/png" href="/favicon-light.png" media="(prefers-color-scheme: light)">
   <link rel="icon" type="image/png" href="/favicon-dark.png" media="(prefers-color-scheme: dark)">
   <style>` + samoBaseCSS + `</style>
   <style>
-    main.login-main {
-      position: relative;
-      z-index: 1;
-      min-height: 100vh;
+    body {
       display: grid;
-      grid-template-columns: 1fr 1fr;
       align-items: center;
-      gap: 64px;
-      padding: 56px;
+    }
+    main.login-main {
+      display: grid;
+      grid-template-columns: 1fr 400px;
+      gap: 60px;
+      align-items: center;
+      width: 100%;
       max-width: 1080px;
       margin: 0 auto;
     }
@@ -60,7 +62,9 @@ const loginHTML = `<!doctype html>
     }
     .login-shell h1 {
       margin: 0 0 4px;
-      font-size: 1.4rem;
+      font-family: var(--serif);
+      font-size: 2.2rem;
+      font-weight: 400;
       letter-spacing: -0.01em;
     }
     .login-shell p.lede {

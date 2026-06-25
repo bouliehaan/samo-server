@@ -28,6 +28,7 @@ const appHTML = `<!doctype html>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>SAMO SERVER</title>
+  <link href="https://fonts.googleapis.com/css2?family=Young+Serif&display=swap" rel="stylesheet">
   <link rel="icon" type="image/png" href="/favicon-dark.png">
   <link rel="icon" type="image/png" href="/favicon-light.png" media="(prefers-color-scheme: light)">
   <link rel="icon" type="image/png" href="/favicon-dark.png" media="(prefers-color-scheme: dark)">
@@ -299,8 +300,9 @@ main.app-main {
 }
 .view-head h1 {
   margin: 0;
-  font-size: clamp(1.6rem, 3vw, 2.4rem);
-  font-weight: 900;
+  font-family: var(--serif);
+  font-size: clamp(2.4rem, 4.5vw, 3.6rem);
+  font-weight: 400;
   letter-spacing: -0.025em;
 }
 .view-head .crumb {

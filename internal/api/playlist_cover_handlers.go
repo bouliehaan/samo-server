@@ -22,54 +22,53 @@ func (s *Server) serveMusicPlaylistCover(w http.ResponseWriter, r *http.Request)
 
 	images := s.catalog.MusicPlaylistCoverImages(id)
 	if len(images) == 4 {
-		var hashParts []string
-		var sourcePaths []string
-		for _, img := range images {
-			path := img.Path
-			if path == "" {
-				path = img.URL
-			}
-			hashID := img.ID
-			if path == "" {
-				resolved, ok := s.resolveCatalogImageRecord(r.Context(), []catalog.Image{img})
-				if ok {
-					path = resolved.Path
-					if path == "" {
-						path = resolved.URL
-					}
-					if resolved.ID != "" {
-						hashID = resolved.ID
-					}
-				}
-			}
-			if path != "" {
-				sourcePaths = append(sourcePaths, path)
-				if hashID == "" {
-					hashID = path
-				}
-				hashParts = append(hashParts, hashID)
-			}
-		}
+		hashParts, sourcePaths := s.playlistCoverCompositeSources(r, images)
 		if len(sourcePaths) == 4 {
 			imagesHash := strings.Join(hashParts, ",")
 			composite, err := s.coversService().Composite(r.Context(), id, imagesHash, sourcePaths)
 			if err == nil {
 				images = []catalog.Image{*composite}
-			} else {
-				// ADDED LOGGING FOR DEBUGGING
-				println("serveMusicPlaylistCover: Composite failed for playlist", id, "error:", err.Error())
-				for i, p := range sourcePaths {
-					println("  source", i, p)
-				}
 			}
-		} else {
-			println("serveMusicPlaylistCover: len(sourcePaths) is", len(sourcePaths), "expected 4 for playlist", id)
 		}
-	} else {
-		println("serveMusicPlaylistCover: len(images) is", len(images), "expected 4 for playlist", id)
 	}
 
 	s.serveCatalogImage(w, r, images)
+}
+
+func (s *Server) playlistCoverCompositeSources(r *http.Request, images []catalog.Image) ([]string, []string) {
+	hashParts := make([]string, 0, len(images))
+	sourcePaths := make([]string, 0, len(images))
+
+	for _, img := range images {
+		path := strings.TrimSpace(img.Path)
+		if path == "" {
+			path = strings.TrimSpace(img.URL)
+		}
+
+		hashID := strings.TrimSpace(img.ID)
+		if path == "" {
+			if resolved, ok := s.resolveCatalogImageRecord(r.Context(), []catalog.Image{img}); ok {
+				path = strings.TrimSpace(resolved.Path)
+				if path == "" {
+					path = strings.TrimSpace(resolved.URL)
+				}
+				if resolvedID := strings.TrimSpace(resolved.ID); resolvedID != "" {
+					hashID = resolvedID
+				}
+			}
+		}
+
+		if path == "" {
+			continue
+		}
+		if hashID == "" {
+			hashID = path
+		}
+		hashParts = append(hashParts, hashID)
+		sourcePaths = append(sourcePaths, path)
+	}
+
+	return hashParts, sourcePaths
 }
 
 func (s *Server) uploadMusicPlaylistCover(w http.ResponseWriter, r *http.Request) {

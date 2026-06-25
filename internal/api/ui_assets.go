@@ -17,6 +17,7 @@ const samoBaseCSS = `
   --accent-strong: #fbbf24;
   --danger: #ef4444;
   --sans: -apple-system, BlinkMacSystemFont, "Segoe UI", Inter, ui-sans-serif, sans-serif;
+  --serif: "Young Serif", serif;
   --mono: ui-monospace, "JetBrains Mono", "Fira Code", "Menlo", monospace;
   color-scheme: dark;
 }
@@ -59,8 +60,8 @@ html, body {
   display: inline-flex;
   align-items: baseline;
   gap: 10px;
-  font-family: var(--sans);
-  font-weight: 900;
+  font-family: var(--serif);
+  font-weight: 400;
   letter-spacing: -0.04em;
   line-height: 0.9;
   color: var(--text);

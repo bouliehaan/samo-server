@@ -531,8 +531,29 @@ func candidateFromYouTubeRenderer(value any) importCandidate {
 	if len(texts) == 0 {
 		return importCandidate{}
 	}
-	item := importCandidate{Title: texts[0], Raw: strings.Join(texts, " ")}
-	for _, text := range texts[1:] {
+	// The title must come from the renderer's explicit `title` node — NOT
+	// texts[0]. collectYouTubeTexts walks a map[string]any, and Go randomizes
+	// map iteration order, so texts[0] is non-deterministic and frequently
+	// lands on the lengthText overlay ("3:45") instead of the song title.
+	title := youTubeRendererTitle(value)
+	if title == "" {
+		for _, text := range texts {
+			if !looksLikeDuration(text) {
+				title = text
+				break
+			}
+		}
+	}
+	if title == "" {
+		title = texts[0]
+	}
+	item := importCandidate{Title: title, Raw: strings.Join(texts, " ")}
+	titleSkipped := false
+	for _, text := range texts {
+		if !titleSkipped && text == title {
+			titleSkipped = true
+			continue
+		}
 		parts := splitMetadataLine(text)
 		for _, part := range parts {
 			if item.Artist == "" && !looksLikeDuration(part) && !strings.EqualFold(part, "song") {
@@ -548,6 +569,42 @@ func candidateFromYouTubeRenderer(value any) importCandidate {
 		}
 	}
 	return item
+}
+
+// youTubeRendererTitle reads the title deterministically from a renderer's
+// `title` field (simpleText or runs), independent of map-walk order.
+func youTubeRendererTitle(value any) string {
+	object, ok := value.(map[string]any)
+	if !ok {
+		return ""
+	}
+	titleNode, ok := object["title"]
+	if !ok {
+		return ""
+	}
+	return strings.TrimSpace(firstYouTubeText(titleNode))
+}
+
+func firstYouTubeText(node any) string {
+	object, ok := node.(map[string]any)
+	if !ok {
+		return ""
+	}
+	if text, ok := object["simpleText"].(string); ok {
+		return text
+	}
+	if runs, ok := object["runs"].([]any); ok {
+		var joined []string
+		for _, run := range runs {
+			if runObject, ok := run.(map[string]any); ok {
+				if text, ok := runObject["text"].(string); ok {
+					joined = append(joined, text)
+				}
+			}
+		}
+		return strings.Join(joined, "")
+	}
+	return ""
 }
 
 func collectYouTubeTexts(value any) []string {

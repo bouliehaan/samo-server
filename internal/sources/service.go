@@ -13,6 +13,7 @@ import (
 	"net/http"
 	"net/url"
 	"path"
+	"regexp"
 	"sort"
 	"strings"
 	"time"
@@ -77,6 +78,14 @@ func (s *Service) AddPodcastFeed(ctx context.Context, input AddPodcastFeedInput)
 		return PodcastFeed{}, ErrDisabled
 	}
 	feedURL, err := normalizeHTTPURL(input.URL)
+	if err != nil {
+		return PodcastFeed{}, err
+	}
+	feedURL, err = resolveApplePodcastURL(ctx, s.client, feedURL)
+	if err != nil {
+		return PodcastFeed{}, err
+	}
+	feedURL, err = resolveYouTubeURL(ctx, s.client, feedURL)
 	if err != nil {
 		return PodcastFeed{}, err
 	}
@@ -936,3 +945,104 @@ func timeString(value *time.Time) any {
 	}
 	return value.UTC().Format(time.RFC3339)
 }
+
+func resolveApplePodcastURL(ctx context.Context, client *http.Client, inputURL string) (string, error) {
+	if !strings.Contains(inputURL, "podcasts.apple.com") && !strings.Contains(inputURL, "itunes.apple.com") {
+		return inputURL, nil
+	}
+	re := regexp.MustCompile(`id(\d+)`)
+	matches := re.FindStringSubmatch(inputURL)
+	if len(matches) < 2 {
+		return inputURL, nil
+	}
+	id := matches[1]
+
+	lookupURL := fmt.Sprintf("https://itunes.apple.com/lookup?id=%s&entity=podcast", id)
+	req, err := http.NewRequestWithContext(ctx, "GET", lookupURL, nil)
+	if err != nil {
+		return "", err
+	}
+
+	resp, err := client.Do(req)
+	if err != nil {
+		return "", fmt.Errorf("apple podcast lookup failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return "", fmt.Errorf("apple podcast lookup returned status %d", resp.StatusCode)
+	}
+
+	var result struct {
+		Results []struct {
+			FeedUrl string `json:"feedUrl"`
+		} `json:"results"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return "", fmt.Errorf("failed to parse apple podcast lookup: %w", err)
+	}
+
+	if len(result.Results) == 0 || result.Results[0].FeedUrl == "" {
+		return "", errors.New("no rss feed found for this apple podcast")
+	}
+	return result.Results[0].FeedUrl, nil
+}
+
+func resolveYouTubeURL(ctx context.Context, client *http.Client, inputURL string) (string, error) {
+	if !strings.Contains(inputURL, "youtube.com/") && !strings.Contains(inputURL, "youtu.be/") {
+		return inputURL, nil
+	}
+	
+	// If it's already a YouTube RSS feed, just return it
+	if strings.Contains(inputURL, "feeds/videos.xml") {
+		return inputURL, nil
+	}
+
+	// If it contains playlist?list=PL..., we can directly form the RSS
+	if strings.Contains(inputURL, "playlist?list=") {
+		u, err := url.Parse(inputURL)
+		if err == nil {
+			list := u.Query().Get("list")
+			if list != "" {
+				return "https://www.youtube.com/feeds/videos.xml?playlist_id=" + list, nil
+			}
+		}
+	}
+
+	req, err := http.NewRequestWithContext(ctx, "GET", inputURL, nil)
+	if err != nil {
+		return "", err
+	}
+	req.Header.Set("User-Agent", "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7)")
+	
+	resp, err := client.Do(req)
+	if err != nil {
+		return "", fmt.Errorf("youtube page fetch failed: %w", err)
+	}
+	defer resp.Body.Close()
+	
+	if resp.StatusCode != http.StatusOK {
+		return "", fmt.Errorf("youtube returned status %d", resp.StatusCode)
+	}
+	
+	b, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return "", err
+	}
+	html := string(b)
+	
+	re1 := regexp.MustCompile(`itemprop="channelId" content="([^"]+)"`)
+	re2 := regexp.MustCompile(`"externalId":"(UC[^"]+)"`)
+	re3 := regexp.MustCompile(`channel_id=(UC[^"&']+)`)
+	
+	if m := re1.FindStringSubmatch(html); len(m) > 1 {
+		return "https://www.youtube.com/feeds/videos.xml?channel_id=" + m[1], nil
+	} else if m := re2.FindStringSubmatch(html); len(m) > 1 {
+		return "https://www.youtube.com/feeds/videos.xml?channel_id=" + m[1], nil
+	} else if m := re3.FindStringSubmatch(html); len(m) > 1 {
+		return "https://www.youtube.com/feeds/videos.xml?channel_id=" + m[1], nil
+	}
+	
+	return "", errors.New("could not find youtube channel ID on the page")
+}
+
