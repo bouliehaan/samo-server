@@ -92,9 +92,12 @@ func (s *Scanner) findRecentByMBZTrackID(ctx context.Context, missing indexedMed
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT id, library_id, path, track_id, track_pid, content_hash
 		FROM media_files
-		WHERE missing = 0 AND library_id != ? AND embedded_tags_json LIKE ?
+		WHERE missing = 0 AND library_id != ? AND (
+			json_extract(embedded_tags_json, '$.musicbrainz_trackid') = ? OR
+			json_extract(embedded_tags_json, '$.musicbrainz_recordingid') = ?
+		)
 		ORDER BY updated_at DESC LIMIT 8`,
-		missing.LibraryID, "%"+mbzID+"%")
+		missing.LibraryID, mbzID, mbzID)
 	if err != nil {
 		return indexedMediaFile{}, false, err
 	}

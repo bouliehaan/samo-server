@@ -105,6 +105,9 @@ func sqliteDSN(path string, opts OpenOptions) string {
 		q.Add("_pragma", fmt.Sprintf("synchronous(%s)", opts.Synchronous))
 		q.Add("_txlock", "immediate")
 	}
+	q.Add("_pragma", "mmap_size(30000000000)")
+	q.Add("_pragma", "temp_store(MEMORY)")
+
 	if opts.CacheShared {
 		q.Add("cache", "shared")
 	}
@@ -188,4 +191,25 @@ func applyMigration(ctx context.Context, db *sql.DB, version string, body string
 	}
 
 	return nil
+}
+
+// StartOptimizer runs SQLite's PRAGMA optimize periodically to update query
+// planner statistics. It should be called once per database connection pool.
+func StartOptimizer(ctx context.Context, db *sql.DB) {
+	go func() {
+		ticker := time.NewTicker(12 * time.Hour)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				// SQLite recommends running optimize right before close.
+				// Since we share the context, we make one final attempt here,
+				// though db.Close() might race with this.
+				db.Exec("PRAGMA optimize")
+				return
+			case <-ticker.C:
+				db.ExecContext(ctx, "PRAGMA optimize")
+			}
+		}
+	}()
 }

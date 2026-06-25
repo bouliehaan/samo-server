@@ -18,3 +18,5 @@ internal/toolchain/assets/
 samo-server
 data/*.db
 data/*.db-*
+samo-server-local
+/quarantine/

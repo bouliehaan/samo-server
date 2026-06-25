@@ -64,6 +64,7 @@ func main() {
 		log.Fatal(err)
 	}
 	defer db.Close()
+	storage.StartOptimizer(ctx, db)
 
 	if err := storage.ApplyMigrations(ctx, db, migrations.Files); err != nil {
 		log.Fatal(err)
