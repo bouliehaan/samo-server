@@ -662,7 +662,11 @@ func (s *Service) reindex() {
 	s.enrichAlbumImagesFromTracks()
 	s.enrichAlbumImagesFromExtractedCovers()
 	s.enrichAlbumAudioQuality()
-	s.enrichAlbumAddedAtFromFiles()
+	// NOTE: album AddedAt is intentionally NOT recomputed from file mtime here.
+	// music_albums.added_at is persisted write-once at first scan and loaded by
+	// loadMusicAlbums; recomputing it live from the newest track's filesystem
+	// mtime made "Recently Added" really mean "recently-touched-on-disk", so any
+	// copy/restore/sync that re-stamped old files rocketed them to the top.
 	EnrichAudiobookAddedAtFromFiles(s.audiobooks)
 	EnrichPodcastAddedAtFromFiles(s.podcasts)
 	s.enrichPlaylistImagesFromTracks()
