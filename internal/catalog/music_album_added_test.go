@@ -5,25 +5,34 @@ import (
 	"time"
 )
 
-func TestEnrichAlbumAddedAtFromFiles(t *testing.T) {
-	older := time.Date(2024, 1, 1, 0, 0, 0, 0, time.UTC)
-	newer := time.Date(2025, 6, 1, 0, 0, 0, 0, time.UTC)
-	scanTime := time.Date(2020, 1, 1, 0, 0, 0, 0, time.UTC)
-	albums := []MusicAlbum{
-		{ID: "album-a", Title: "A", AddedAt: &scanTime},
+// "Recently Added" must order albums by the persisted music_albums.added_at (set
+// once at first scan), NOT by the newest track's filesystem mtime. The previous
+// behavior recomputed AddedAt live from file mtime on every catalog build, so a
+// copy / restore / rsync-without-times that re-stamped old files pushed long-owned
+// albums straight to the top of Recently Added. This locks the album's AddedAt to
+// its persisted value regardless of how recent its files look on disk.
+func TestAlbumAddedAtIsNotRecomputedFromFileMtime(t *testing.T) {
+	firstScanned := time.Date(2024, 1, 1, 0, 0, 0, 0, time.UTC)
+	recentlyTouchedFile := time.Date(2026, 6, 20, 0, 0, 0, 0, time.UTC)
+
+	service := NewService(Seed{
+		MusicAlbums: []MusicAlbum{{ID: "album-1", Title: "Old Album", AddedAt: &firstScanned}},
+		MusicTracks: []MusicTrack{{
+			ID:         "track-1",
+			AlbumID:    "album-1",
+			AudioFiles: []AudioFile{{ID: "f1", ModifiedAt: &recentlyTouchedFile}},
+		}},
+	})
+
+	album, err := service.MusicAlbum("album-1")
+	if err != nil {
+		t.Fatal(err)
 	}
-	tracks := []MusicTrack{
-		{
-			ID:      "track-1",
-			AlbumID: "album-a",
-			AudioFiles: []AudioFile{
-				{ModifiedAt: &older},
-				{ModifiedAt: &newer},
-			},
-		},
+	if album.AddedAt == nil {
+		t.Fatal("album AddedAt is nil; want the persisted first-scan timestamp")
 	}
-	EnrichAlbumAddedAtFromFiles(albums, tracks)
-	if albums[0].AddedAt == nil || !albums[0].AddedAt.Equal(newer) {
-		t.Fatalf("addedAt = %v, want %v", albums[0].AddedAt, newer)
+	if !album.AddedAt.Equal(firstScanned) {
+		t.Fatalf("album AddedAt = %s, want persisted %s (must not follow the recent file mtime %s)",
+			album.AddedAt.UTC(), firstScanned, recentlyTouchedFile)
 	}
 }
