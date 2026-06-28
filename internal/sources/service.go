@@ -992,7 +992,7 @@ func resolveYouTubeURL(ctx context.Context, client *http.Client, inputURL string
 	if !strings.Contains(inputURL, "youtube.com/") && !strings.Contains(inputURL, "youtu.be/") {
 		return inputURL, nil
 	}
-	
+
 	// If it's already a YouTube RSS feed, just return it
 	if strings.Contains(inputURL, "feeds/videos.xml") {
 		return inputURL, nil
@@ -1014,27 +1014,27 @@ func resolveYouTubeURL(ctx context.Context, client *http.Client, inputURL string
 		return "", err
 	}
 	req.Header.Set("User-Agent", "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7)")
-	
+
 	resp, err := client.Do(req)
 	if err != nil {
 		return "", fmt.Errorf("youtube page fetch failed: %w", err)
 	}
 	defer resp.Body.Close()
-	
+
 	if resp.StatusCode != http.StatusOK {
 		return "", fmt.Errorf("youtube returned status %d", resp.StatusCode)
 	}
-	
+
 	b, err := io.ReadAll(resp.Body)
 	if err != nil {
 		return "", err
 	}
 	html := string(b)
-	
+
 	re1 := regexp.MustCompile(`itemprop="channelId" content="([^"]+)"`)
 	re2 := regexp.MustCompile(`"externalId":"(UC[^"]+)"`)
 	re3 := regexp.MustCompile(`channel_id=(UC[^"&']+)`)
-	
+
 	if m := re1.FindStringSubmatch(html); len(m) > 1 {
 		return "https://www.youtube.com/feeds/videos.xml?channel_id=" + m[1], nil
 	} else if m := re2.FindStringSubmatch(html); len(m) > 1 {
@@ -1042,7 +1042,6 @@ func resolveYouTubeURL(ctx context.Context, client *http.Client, inputURL string
 	} else if m := re3.FindStringSubmatch(html); len(m) > 1 {
 		return "https://www.youtube.com/feeds/videos.xml?channel_id=" + m[1], nil
 	}
-	
+
 	return "", errors.New("could not find youtube channel ID on the page")
 }
-
