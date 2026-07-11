@@ -314,6 +314,14 @@ func main() {
 		if err := exploService.ReconcileRecentlyAdded(ctx); err != nil {
 			log.Printf("explo: startup reconcile failed: %v", err)
 		}
+		// Prune ghosts the exporter rotated out (deleted files whose rows linger)
+		// before the identify pass, so it doesn't fpcalc missing files. Unconditional
+		// like the reconcile above — a no-op when the folder is unconfigured.
+		if pruned, err := exploService.PruneRotatedOutFiles(ctx); err != nil {
+			log.Printf("explo: startup prune of rotated-out files failed: %v", err)
+		} else if pruned > 0 {
+			log.Printf("explo: startup pruned %d rotated-out file(s)", pruned)
+		}
 		// Identification pass at boot too — this is what retries previously
 		// unmatched/errored drops (fresh releases AcoustID couldn't identify
 		// yet). Without it, retries only ran when a scan happened to fire.
@@ -356,6 +364,13 @@ func main() {
 		// run every scan since it's a no-op once nothing new is pending.
 		if exploService.Enabled() {
 			go func() {
+				// A scan just reconciled the folder; prune any files the exporter
+				// rotated out before identifying so we don't fpcalc missing files.
+				if pruned, err := exploService.PruneRotatedOutFiles(ctx); err != nil {
+					log.Printf("explo: prune of rotated-out files after scan %s failed: %v", job.ID, err)
+				} else if pruned > 0 {
+					log.Printf("explo: pruned %d rotated-out file(s) after scan %s", pruned, job.ID)
+				}
 				if _, err := exploService.ProcessNewTracks(ctx); err != nil {
 					log.Printf("explo: process new tracks after scan %s failed: %v", job.ID, err)
 				}

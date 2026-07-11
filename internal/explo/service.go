@@ -13,8 +13,10 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
+	"os"
 	"slices"
 	"strings"
 	"sync"
@@ -378,6 +380,71 @@ func (s *Service) reconcileHiddenAlbums(ctx context.Context, dirs []string) (hid
 	return hidden, unhidden, nil
 }
 
+// pruneVanishedFiles deletes tracks whose file has disappeared from an explo
+// folder. The explo exporter ROTATES its weekly drop — last week's files are
+// deleted from the folder, not moved — so a media_files row under the folder
+// whose path no longer exists on disk is genuinely gone. Left alone it lingers
+// as a ghost: fpcalc errors on it every pass ("No such file"), it never leaves
+// the ledger, and it pads the Explore playlist with an untitled entry.
+//
+// Deleting the music_tracks row cascades (ON DELETE CASCADE) to media_files AND
+// explo_tracks, so the ledger, playlist, and library views all self-correct on
+// the same pass without a separate library rescan. Safe by construction: it is
+// scoped to the configured explo folder(s) and only ever deletes a row whose
+// file os.Stat has just confirmed is ErrNotExist — a present file, or any
+// ambiguous stat error (permission, I/O, mount hiccup), is left untouched, so it
+// can never delete a real or merely-unreachable track. Returns how many it pruned.
+func (s *Service) pruneVanishedFiles(ctx context.Context, dirs []string) (int, error) {
+	if len(dirs) == 0 {
+		return 0, nil
+	}
+	clause, args := exploPathClause(dirs)
+	rows, err := s.db.QueryContext(ctx, fmt.Sprintf(`
+		SELECT mt.id, mf.path
+		FROM music_tracks mt
+		JOIN media_files mf ON mf.track_id = mt.id
+		WHERE %s`, clause), args...)
+	if err != nil {
+		return 0, fmt.Errorf("explo prune-vanished query: %w", err)
+	}
+	type candidate struct{ trackID, path string }
+	var candidates []candidate
+	for rows.Next() {
+		var c candidate
+		if err := rows.Scan(&c.trackID, &c.path); err != nil {
+			rows.Close()
+			return 0, err
+		}
+		candidates = append(candidates, c)
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return 0, err
+	}
+
+	pruned := 0
+	for _, c := range candidates {
+		select {
+		case <-ctx.Done():
+			return pruned, ctx.Err()
+		default:
+		}
+		if _, statErr := os.Stat(c.path); !errors.Is(statErr, os.ErrNotExist) {
+			// File present, or an ambiguous error — never prune on doubt.
+			continue
+		}
+		if _, err := s.db.ExecContext(ctx, `DELETE FROM music_tracks WHERE id = ?`, c.trackID); err != nil {
+			s.logger("explo: prune vanished track %s failed: %v", c.trackID, err)
+			continue
+		}
+		pruned++
+	}
+	if pruned > 0 {
+		s.logger("explo: pruned %d file(s) rotated out of the drop folder", pruned)
+	}
+	return pruned, nil
+}
+
 // pruneExploLedger drops explo_tracks rows for any track no longer under a
 // configured explo folder, so a too-broad folder that swept in real tracks can
 // be undone by narrowing (or clearing) it. With no folders it clears the whole
@@ -540,6 +607,39 @@ func (s *Service) syncExploState(ctx context.Context, dirs []string) (hidden, un
 	}
 	hidden, unhidden, err = s.reconcileHiddenAlbums(ctx, dirs)
 	return hidden, unhidden, playlistChanged, err
+}
+
+// PruneRotatedOutFiles removes ghost tracks left behind when the explo exporter
+// rotates its weekly drop (deletes old files), then reconciles the derived
+// state. Kept OUT of syncExploState/ProcessNewTracks on purpose: it hits the
+// real filesystem (os.Stat), whereas those run against synthetic fixtures in
+// tests. Wired into the boot + post-scan goroutines in main.go next to
+// ProcessNewTracks. No-op (and reload-free) when nothing was rotated out.
+func (s *Service) PruneRotatedOutFiles(ctx context.Context) (int, error) {
+	if s == nil || s.db == nil {
+		return 0, nil
+	}
+	s.processMu.Lock()
+	defer s.processMu.Unlock()
+	dirs := s.effectiveDirs()
+	pruned, err := s.pruneVanishedFiles(ctx, dirs)
+	if err != nil {
+		return pruned, err
+	}
+	if pruned == 0 {
+		return 0, nil
+	}
+	// The cascade already dropped the ledger/media_files rows; re-derive the
+	// playlist + hidden flags so the Explore queue and Recently Added drop them.
+	if _, _, _, err := s.syncExploState(ctx, dirs); err != nil {
+		s.logger("explo: reconcile after prune failed: %v", err)
+	}
+	if s.reloadCatalog != nil {
+		if err := s.reloadCatalog(ctx); err != nil {
+			s.logger("explo: catalog reload after prune failed: %v", err)
+		}
+	}
+	return pruned, nil
 }
 
 // ReconcileRecentlyAdded re-syncs explo's persisted state to the current folder
@@ -855,9 +955,11 @@ type candidateTrack struct {
 const exploMaxIdentifyAttempts = 5
 
 // exploRetryBackoff[i] is how long a row waits after its (i+1)-th failed
-// attempt; rows past the end of the table reuse the last wait until the
-// budget retires them.
-var exploRetryBackoff = []string{"1 day", "2 days", "4 days", "7 days"}
+// attempt; rows past the end of the table reuse the last wait until the budget
+// retires them. Front-loaded so a transiently-failed identify — or one blocked
+// by a since-fixed bug — is retried within the hour and its metadata written
+// promptly, instead of a drop sitting unidentified for a full day.
+var exploRetryBackoff = []string{"1 hour", "6 hours", "1 day", "3 days"}
 
 // exploBackoffCase renders the ladder as a SQL CASE over an attempts column:
 // sign "-" for the eligibility check against datetime('now', ...), sign "+"
