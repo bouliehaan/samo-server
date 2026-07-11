@@ -19,6 +19,7 @@ import (
 	"github.com/bouliehaan/samo-server/internal/catalog"
 	"github.com/bouliehaan/samo-server/internal/channels"
 	"github.com/bouliehaan/samo-server/internal/covers"
+	"github.com/bouliehaan/samo-server/internal/explo"
 	"github.com/bouliehaan/samo-server/internal/files"
 	"github.com/bouliehaan/samo-server/internal/lastfm"
 	"github.com/bouliehaan/samo-server/internal/libraries"
@@ -51,6 +52,7 @@ type ServerOptions struct {
 	Radio         *radio.Service
 	Sources       *sources.Service
 	LastFM        *lastfm.Service
+	Explo         *explo.Service
 	ArtistImages  *artistimages.Service
 	ArtistMeta    *artistmeta.Service
 	Users         *users.Service
@@ -81,6 +83,7 @@ type Server struct {
 	radio                            *radio.Service
 	sources                          *sources.Service
 	lastfm                           *lastfm.Service
+	explo                            *explo.Service
 	artistImages                     *artistimages.Service
 	artistMeta                       *artistmeta.Service
 	users                            *users.Service
@@ -88,6 +91,7 @@ type Server struct {
 	reloadCatalog                    func(context.Context) error
 	disableInitialInternetRadioProbe bool
 	startedAt                        time.Time
+	loginLimiter                     *loginLimiter
 }
 
 func NewServer(options ServerOptions) http.Handler {
@@ -132,6 +136,7 @@ func NewServer(options ServerOptions) http.Handler {
 		radio:                            radioService,
 		sources:                          options.Sources,
 		lastfm:                           options.LastFM,
+		explo:                            options.Explo,
 		artistImages:                     options.ArtistImages,
 		artistMeta:                       options.ArtistMeta,
 		users:                            options.Users,
@@ -139,12 +144,13 @@ func NewServer(options ServerOptions) http.Handler {
 		reloadCatalog:                    options.ReloadCatalog,
 		disableInitialInternetRadioProbe: options.DisableInitialInternetRadioProbe,
 		startedAt:                        options.StartedAt,
+		loginLimiter:                     newLoginLimiter(),
 	}
 	if server.startedAt.IsZero() {
 		server.startedAt = time.Now()
 	}
 	server.routes()
-	return WithCORS(server)
+	return WithSecurityHeaders(WithCORS(server))
 }
 
 func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -236,6 +242,11 @@ func (s *Server) routes() {
 	s.handleAPI("POST /api/v1/lastfm/auth/begin", s.beginLastFMAuth)
 	s.handleAPI("POST /api/v1/lastfm/auth/complete", s.completeLastFMAuth)
 	s.handleAPI("DELETE /api/v1/lastfm/auth/session", s.disconnectLastFM)
+
+	s.handleAPI("GET /api/v1/explo/config", s.getExploConfig)
+	s.handleAPI("PUT /api/v1/explo/config", s.updateExploConfig)
+	s.handleAPI("DELETE /api/v1/explo/config", s.clearExploConfig)
+	s.handleAPI("GET /api/v1/explo/directories", s.browseExploDirectories)
 	s.handleAPI("POST /api/v1/lastfm/queue/flush", s.flushLastFMQueue)
 	s.handleAPI("GET /api/v1/lastfm/queue", s.listLastFMQueue)
 	s.handleAPI("GET /api/v1/lastfm/history", s.listLastFMHistory)

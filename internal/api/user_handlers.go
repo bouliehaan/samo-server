@@ -3,6 +3,9 @@ package api
 import (
 	"errors"
 	"net/http"
+	"strconv"
+	"strings"
+	"time"
 
 	"github.com/bouliehaan/samo-server/internal/users"
 )
@@ -43,12 +46,38 @@ func (s *Server) loginUser(w http.ResponseWriter, r *http.Request) {
 	if !readJSONBody(w, r, &input) {
 		return
 	}
+
+	now := time.Now()
+	usernameKey := "user:" + strings.ToLower(strings.TrimSpace(input.Username))
+	addrKey := "addr:" + clientAddr(r)
+	if ok, retryAfter := s.loginLimiter.allow(usernameKey, now); !ok {
+		writeLoginRateLimited(w, retryAfter)
+		return
+	}
+	if ok, retryAfter := s.loginLimiter.allow(addrKey, now); !ok {
+		writeLoginRateLimited(w, retryAfter)
+		return
+	}
+
 	response, err := service.Login(r.Context(), input)
 	if err != nil {
+		s.loginLimiter.recordFailure(usernameKey, now)
+		s.loginLimiter.recordFailure(addrKey, now)
 		writeUserError(w, err)
 		return
 	}
+	s.loginLimiter.recordSuccess(usernameKey)
+	s.loginLimiter.recordSuccess(addrKey)
 	writeJSON(w, http.StatusOK, response)
+}
+
+func writeLoginRateLimited(w http.ResponseWriter, retryAfter time.Duration) {
+	seconds := int(retryAfter.Seconds())
+	if seconds < 1 {
+		seconds = 1
+	}
+	w.Header().Set("Retry-After", strconv.Itoa(seconds))
+	writeError(w, http.StatusTooManyRequests, "too many failed login attempts; try again later")
 }
 
 func (s *Server) getCurrentUser(w http.ResponseWriter, r *http.Request) {

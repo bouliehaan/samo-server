@@ -38,17 +38,24 @@ func trackSubmission(track catalog.MusicTrack, durationOverride int) (TrackSubmi
 }
 
 func shouldStartNewPlaySession(before, after catalog.PlaybackState, patch *playback.PatchInput) bool {
+	// A play-count bump is NOT a "new play started" signal - it's the client
+	// telling the play-count column to increment, which both clients send at
+	// the NATURAL END of a track (progress still at/near the end). Treating it
+	// as a session reset wipes session.Scrobbled/NowPlayingSent right after the
+	// real scrobble already fired, so the server (a) re-scrobbles, since
+	// progress is still past threshold - a double scrobble on every fully
+	// played track - and (b) re-sends "now playing" for the just-ended track
+	// exactly as the next track begins, so Last.fm shows the wrong song. Both
+	// the patch signal (patch.IncrementPlayCount / patch.PlayCount) AND the
+	// derived state comparison (before.PlayCount < after.PlayCount) are the
+	// same non-event and must be ignored here. A genuine restart (repeat-one,
+	// seek-to-start) is caught by the progress-transition heuristics below:
+	// progress jumping from near-the-end back to near-the-start.
 	if patch != nil {
-		if patch.IncrementPlayCount {
-			return true
-		}
 		if patch.IncrementSkipCount {
 			return true
 		}
 		if patch.TouchLastPlayedAt && after.ProgressSeconds <= 15 {
-			return true
-		}
-		if patch.PlayCount != nil && *patch.PlayCount > before.PlayCount {
 			return true
 		}
 	}
@@ -56,9 +63,6 @@ func shouldStartNewPlaySession(before, after catalog.PlaybackState, patch *playb
 		return true
 	}
 	if before.ProgressSeconds == 0 && after.ProgressSeconds > 0 && after.ProgressSeconds <= 5 {
-		return true
-	}
-	if before.PlayCount < after.PlayCount {
 		return true
 	}
 	return false

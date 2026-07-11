@@ -38,6 +38,18 @@ func Resolve(options Options) (Tools, error) {
 	return Tools{FFmpeg: ffmpeg, FFprobe: ffprobe}, nil
 }
 
+// ResolveFpcalc locates the chromaprint fpcalc binary the same way Resolve
+// locates ffmpeg/ffprobe (env override, beside-the-binary bin/, bundled
+// assets). It's separate from Resolve because fpcalc is optional - only the
+// explo folder feature needs it, and its absence must not block startup.
+func ResolveFpcalc(options Options) (string, error) {
+	dataDir := strings.TrimSpace(options.DataDir)
+	if dataDir == "" {
+		dataDir = "data"
+	}
+	return resolveTool("fpcalc", "SAMO_FPCALC_PATH", dataDir)
+}
+
 func resolveTool(name, envKey, dataDir string) (string, error) {
 	if override := strings.TrimSpace(os.Getenv(envKey)); override != "" {
 		return validateExecutable(override)

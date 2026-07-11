@@ -18,14 +18,13 @@ func listenWithFallback(requested string, attempts int) (net.Listener, error) {
 	if attempts <= 0 {
 		attempts = 20
 	}
+	// A bare ":port" (empty host) binds the dual-stack wildcard as-is. Don't
+	// rewrite it to "0.0.0.0": Go treats any wildcard the same for "tcp"
+	// listens (still a dual-stack [::] socket on Linux), so the rewrite buys
+	// nothing and just misleads readers into expecting an IPv4-only bind.
 	host, port, err := splitAddr(requested)
 	if err != nil {
 		return nil, err
-	}
-
-	// If host is empty (bare :port), try IPv4 explicitly first on dual-stack systems
-	if host == "" {
-		host = "0.0.0.0"
 	}
 
 	var lastErr error
@@ -77,6 +76,18 @@ func normalizedDisplayPort(addr string) string {
 		return addr
 	}
 	return ":" + port
+}
+
+// sameListenPort reports whether two listen addresses share a port. The
+// kernel reports a bare ":6969" bind back as "[::]:6969", so comparing raw
+// address strings misreads a successful first-try bind as a port fallback.
+func sameListenPort(a, b string) bool {
+	_, portA, errA := splitAddr(a)
+	_, portB, errB := splitAddr(b)
+	if errA != nil || errB != nil {
+		return a == b
+	}
+	return portA == portB
 }
 
 func isAddressInUse(err error) bool {

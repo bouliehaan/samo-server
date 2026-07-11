@@ -1,4 +1,4 @@
-.PHONY: setup bundle bundle-linux build build-linux build-bundled test install-dist clean release release-amd64 release-arm64
+.PHONY: setup bundle bundle-linux bundle-chromaprint bundle-chromaprint-all build build-linux build-bundled test install-dist clean release release-amd64 release-arm64
 
 BINARY ?= samo-server
 DIST_DIR ?= dist
@@ -20,11 +20,26 @@ bundle-linux:
 bundle-linux-all:
 	./scripts/bundle-ffmpeg.sh --all
 
+# fpcalc is a separate, optional bundle target: only the explo folder
+# feature needs it, so it isn't part of the default bundle-linux/build path.
+# Run this once (or --all for both arches) before `make build`/`make release`
+# to have fpcalc automatically swept into dist/ and the release tarball.
+bundle-chromaprint:
+	./scripts/bundle-chromaprint.sh --platform $(LINUX_PLATFORM)
+
+bundle-chromaprint-all:
+	./scripts/bundle-chromaprint.sh --all
+
 build: bundle-linux
 	CGO_ENABLED=0 GOOS=$(GOOS) GOARCH=$(GOARCH) go build $(GOFLAGS) -ldflags "-s -w" -o $(DIST_DIR)/$(BINARY) ./cmd/samo-server
 	@mkdir -p $(DIST_DIR)/bin
 	@cp internal/toolchain/assets/$(LINUX_PLATFORM)/ffmpeg internal/toolchain/assets/$(LINUX_PLATFORM)/ffprobe $(DIST_DIR)/bin/
 	@chmod 0755 $(DIST_DIR)/$(BINARY) $(DIST_DIR)/bin/ffmpeg $(DIST_DIR)/bin/ffprobe
+	@if [ -f internal/toolchain/assets/$(LINUX_PLATFORM)/fpcalc ]; then \
+		cp internal/toolchain/assets/$(LINUX_PLATFORM)/fpcalc $(DIST_DIR)/bin/; \
+		chmod 0755 $(DIST_DIR)/bin/fpcalc; \
+		echo "Included bin/fpcalc (explo folder feature)"; \
+	fi
 	@echo "Built Ubuntu bundle: $(DIST_DIR)/$(BINARY) + bin/ffmpeg + bin/ffprobe"
 
 build-linux:

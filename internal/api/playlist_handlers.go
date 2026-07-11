@@ -130,6 +130,8 @@ func writePlaylistError(w http.ResponseWriter, err error) {
 		writeError(w, http.StatusNotFound, "playlist not found")
 	case errors.Is(err, playlists.ErrForbidden):
 		writeError(w, http.StatusForbidden, err.Error())
+	case errors.Is(err, playlists.ErrSystemPlaylist):
+		writeError(w, http.StatusForbidden, err.Error())
 	case errors.Is(err, playlists.ErrInvalidInput):
 		writeError(w, http.StatusBadRequest, err.Error())
 	case errors.Is(err, playlists.ErrDisabled):

@@ -77,7 +77,7 @@ func (s *Service) ListRecentlyAdded(page PageRequest) RecentlyAddedResults {
 }
 
 func recentlyAddedMusicAlbum(album MusicAlbum) (RecentlyAddedEntry, bool) {
-	if strings.TrimSpace(album.ID) == "" {
+	if strings.TrimSpace(album.ID) == "" || album.HiddenFromRecentlyAdded {
 		return RecentlyAddedEntry{}, false
 	}
 	subtitle := strings.TrimSpace(album.DisplayArtist)

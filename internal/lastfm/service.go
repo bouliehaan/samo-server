@@ -26,11 +26,12 @@ const (
 )
 
 type Service struct {
-	db         *sql.DB
-	httpClient *http.Client
-	mu         sync.RWMutex
-	client     *Client
-	logger     func(format string, args ...any)
+	db            *sql.DB
+	httpClient    *http.Client
+	mu            sync.RWMutex
+	client        *Client
+	logger        func(format string, args ...any)
+	playbackLocks sync.Map // per-user *sync.Mutex for processPlayback serialization
 }
 
 type ServiceOptions struct {
@@ -215,6 +216,11 @@ func (s *Service) currentCredentials() (apiKey, sharedSecret string) {
 		return "", ""
 	}
 	return s.client.apiKey, s.client.sharedSecret
+}
+
+func (s *Service) playbackMutex(userID string) *sync.Mutex {
+	v, _ := s.playbackLocks.LoadOrStore(userID, &sync.Mutex{})
+	return v.(*sync.Mutex)
 }
 
 func (s *Service) Status(ctx context.Context, userID string) (Status, error) {
@@ -432,6 +438,11 @@ func (s *Service) processPlayback(ctx context.Context, input PlaybackInput, dura
 	if !s.Enabled() {
 		return result
 	}
+
+	mu := s.playbackMutex(input.UserID)
+	mu.Lock()
+	defer mu.Unlock()
+
 	if _, err := loadSession(ctx, s.db, input.UserID); err != nil {
 		return result
 	}
@@ -475,6 +486,8 @@ func (s *Service) processPlayback(ctx context.Context, input PlaybackInput, dura
 	}
 	forceComplete := input.After.Completed || (input.Patch != nil && input.Patch.Completed != nil && *input.Patch.Completed)
 	if !session.Scrobbled && shouldScrobble(progress, submission.DurationSeconds, forceComplete) {
+		s.logger("last.fm scrobbling: track=%q artist=%q progress=%d/%d source=%s",
+			submission.Track, submission.Artist, progress, submission.DurationSeconds, input.Source)
 		submission.Timestamp = playStartedAt(session, input)
 		submission.PlayedSeconds = progress
 		queued, err := s.submitScrobble(ctx, input.UserID, submission, input.Source)
@@ -521,6 +534,8 @@ func (s *Service) tryNowPlaying(ctx context.Context, session *trackSession, subm
 	if progress <= 0 && input.Event != EventStart && input.Source != "stream" {
 		return result
 	}
+	s.logger("last.fm sending now-playing: track=%q artist=%q source=%s progress=%d",
+		submission.Track, submission.Artist, input.Source, progress)
 	submission.Timestamp = playStartedAt(*session, input)
 	queued, err := s.submitNowPlaying(ctx, input.UserID, submission, input.Source)
 	if err != nil {

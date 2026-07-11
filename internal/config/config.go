@@ -51,6 +51,9 @@ type Config struct {
 	AutoImportPlaylists    bool
 	ScannerExternal        bool
 	ScanFFprobe            bool
+	ExploDirs              []string
+	AcoustIDAPIKey         string
+	ExploPlaylistName      string
 }
 
 type Library struct {
@@ -104,6 +107,9 @@ func LoadEnv() (Config, error) {
 		AutoImportPlaylists:    envBool("SAMO_AUTO_IMPORT_PLAYLISTS", true),
 		ScannerExternal:        envBool("SAMO_SCANNER_EXTERNAL", false),
 		ScanFFprobe:            envBool("SAMO_SCAN_FFPROBE", false),
+		ExploDirs:              envPathList("SAMO_EXPLO_DIRS"),
+		AcoustIDAPIKey:         strings.TrimSpace(os.Getenv("SAMO_ACOUSTID_API_KEY")),
+		ExploPlaylistName:      envOrDefault("SAMO_EXPLO_PLAYLIST_NAME", "Explore"),
 	}
 
 	return cfg.Validate()
@@ -204,6 +210,19 @@ func envCSVOrDefault(key string, fallback []string) []string {
 		return envCSV(key)
 	}
 	return append([]string(nil), fallback...)
+}
+
+// envPathList splits on the OS path separator, matching SAMO_MUSIC_DIRS and
+// friends, so a folder path containing a comma isn't misread as two paths.
+func envPathList(key string) []string {
+	var paths []string
+	for _, path := range filepath.SplitList(strings.TrimSpace(os.Getenv(key))) {
+		path = strings.TrimSpace(path)
+		if path != "" {
+			paths = append(paths, path)
+		}
+	}
+	return paths
 }
 
 func loadLibraries() []Library {

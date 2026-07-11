@@ -6,13 +6,22 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+
+	"github.com/bouliehaan/samo-server/internal/users"
 )
 
-// FirstAdminOwnerID returns the first admin user's id for filesystem playlist import.
+// FirstAdminOwnerID returns the admin who should own server-managed playlists
+// (filesystem imports, the explo drop playlist). The internal bootstrap
+// account (users.BootstrapUserID) has a zero created_at so a naive
+// ORDER BY created_at always picks it - but a non-public playlist it owns is
+// invisible to every real user, since playlists only render for their owner.
+// Prefer the earliest HUMAN admin; fall back to the bootstrap account only
+// when no human admin exists.
 func FirstAdminOwnerID(ctx context.Context, db *sql.DB) (string, error) {
 	var id string
 	err := db.QueryRowContext(ctx, `
-		SELECT id FROM users WHERE role = 'admin' ORDER BY created_at LIMIT 1`).Scan(&id)
+		SELECT id FROM users WHERE role = 'admin'
+		ORDER BY (id = ?), created_at LIMIT 1`, users.BootstrapUserID).Scan(&id)
 	if err != nil {
 		return "", err
 	}
