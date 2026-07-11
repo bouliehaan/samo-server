@@ -10,13 +10,14 @@ import (
 	"github.com/bouliehaan/samo-server/migrations"
 )
 
-// TestSingleWriterEliminatesBusy hammers the read-write pool with many
-// goroutines writing simultaneously and asserts none ever sees SQLITE_BUSY and
-// the pool never deadlocks. Regression guard for the live SQLITE_BUSY the explo
-// batch pass hit: Open() pins the write pool to a single connection so writes
-// serialize in database/sql instead of racing SQLite's single-writer lock to a
-// BUSY error.
-func TestSingleWriterEliminatesBusy(t *testing.T) {
+// TestConcurrentWritesDoNotBusy hammers the read-write pool with many goroutines
+// writing simultaneously and asserts none sees SQLITE_BUSY. It passes on the
+// normal multi-connection pool because busy_timeout absorbs plain write
+// contention — which is the key finding: ordinary concurrency does NOT produce
+// the production BUSY. That came from a write lock held longer than the timeout
+// (a long-running operation), so the real fix is finding that holder, not
+// shrinking the pool (a single-connection pool deadlocks this codebase's boot).
+func TestConcurrentWritesDoNotBusy(t *testing.T) {
 	ctx := context.Background()
 	db, err := Open(ctx, t.TempDir()+"/samo.db")
 	if err != nil {
