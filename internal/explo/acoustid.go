@@ -75,8 +75,14 @@ func lookupAcoustID(ctx context.Context, httpClient *http.Client, apiKey string,
 		"client":      {apiKey},
 		"duration":    {strconv.Itoa(fp.DurationSeconds)},
 		"fingerprint": {fp.Value},
-		"meta":        {"recordings+releasegroups"},
-		"format":      {"json"},
+		// AcoustID separates multiple meta values with "+", which on the wire
+		// means a form-encoded space. url.Values.Encode() runs QueryEscape on
+		// each value: a literal "+" becomes "%2B" (a literal plus AcoustID does
+		// NOT split on -> it returns results with NO recordings, so every track
+		// looks "unmatched" even on a 0.97 fingerprint hit), whereas a SPACE
+		// becomes "+" -> the two meta values AcoustID expects. Must stay a space.
+		"meta":   {"recordings releasegroups"},
+		"format": {"json"},
 	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, acoustidLookupURL+"?"+values.Encode(), nil)
 	if err != nil {

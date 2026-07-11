@@ -47,6 +47,36 @@ func TestLookupAcoustIDReturnsBestMatch(t *testing.T) {
 	}
 }
 
+// TestLookupAcoustIDSendsSplittableMeta guards a production-only bug the mock
+// tests above could never catch (they hard-code the response body). AcoustID
+// combines multiple `meta` values with "+", which on the wire is a form-encoded
+// space. If the value is written as a literal "+", url.Values.Encode() emits
+// "%2B" — a literal plus AcoustID does NOT split on, so it returns results with
+// NO recordings and every track looks "unmatched" despite a strong fingerprint
+// hit. The value must be space-separated so it arrives as two splittable tokens.
+func TestLookupAcoustIDSendsSplittableMeta(t *testing.T) {
+	var gotMeta string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotMeta = r.URL.Query().Get("meta")
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"status": "ok", "results": []}`))
+	}))
+	defer server.Close()
+	orig := acoustidLookupURL
+	acoustidLookupURL = server.URL
+	t.Cleanup(func() { acoustidLookupURL = orig })
+
+	if _, _, err := lookupAcoustID(context.Background(), server.Client(), "test-key", Fingerprint{DurationSeconds: 320, Value: "AQAA"}); err != nil {
+		t.Fatal(err)
+	}
+	// The httptest server decodes the query: a correct "recordings+releasegroups"
+	// (form-encoded space) arrives as two space-separated values; the buggy
+	// literal-plus encoding would arrive as the single token "recordings+releasegroups".
+	if gotMeta != "recordings releasegroups" {
+		t.Fatalf("meta arrived as %q; want \"recordings releasegroups\" — a literal + encodes to %%2B and makes AcoustID drop every recording", gotMeta)
+	}
+}
+
 func TestLookupAcoustIDNoResultsIsUnmatchedNotError(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
