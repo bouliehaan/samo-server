@@ -99,7 +99,13 @@ func (s *Service) musicBrowse(
 		matches = filterMusicBrowse(snapshot, func(playback PlaybackState) bool { return playback.LastPlayedAt != nil })
 		sortMusicBrowseByLastPlayed(&matches)
 	case MusicBrowseRecentlyAdded:
-		albums := append([]MusicAlbum(nil), snapshot.albums...)
+		albums := make([]MusicAlbum, 0, len(snapshot.albums))
+		for _, album := range snapshot.albums {
+			if album.HiddenFromRecentlyAdded {
+				continue
+			}
+			albums = append(albums, album)
+		}
 		sort.SliceStable(albums, func(i, j int) bool {
 			return addedAtAfter(albums[i].AddedAt, albums[j].AddedAt)
 		})

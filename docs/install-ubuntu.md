@@ -104,6 +104,35 @@ Environment=SAMO_LASTFM_SHARED_SECRET=...
 
 Save, then `sudo systemctl restart samo-server`.
 
+## Explo folder auto-tagging (optional)
+
+If you run a weekly playlist-exporter integration ("explo" or similar) that
+drops untagged music files into a folder, Samo can identify them in the
+background (via audio fingerprinting, never by trusting the filename),
+route them into a system-managed "Explo" playlist, and keep them out of the
+Recently Added shelves — without moving, renaming, or writing tags to the
+files themselves. The exporter keeps managing the folder exactly as before.
+
+This is opt-in and needs two things beyond the base install:
+
+1. A free [AcoustID](https://acoustid.org/new-application) API key.
+2. The `fpcalc` binary next to `ffmpeg`/`ffprobe`. If you built the release
+   tarball yourself, run `make bundle-chromaprint` (or `bundle-chromaprint-all`
+   for both architectures) before `make release-amd64` — `bin/fpcalc` then
+   ships in the tarball automatically. Official release tarballs already
+   include it.
+
+Then set:
+
+```ini
+[Service]
+Environment=SAMO_EXPLO_DIRS=/srv/music/explo
+Environment=SAMO_ACOUSTID_API_KEY=...
+```
+
+`SAMO_EXPLO_DIRS` accepts multiple paths separated by `:` (same convention
+as `SAMO_MUSIC_DIRS`). Leave it unset and the feature stays fully off.
+
 ## Building a release locally
 
 If you want to produce the release tarball yourself instead of

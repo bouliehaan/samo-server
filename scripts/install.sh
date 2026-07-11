@@ -53,6 +53,11 @@ if [ ! -f "${FFMPEG}" ] || [ ! -f "${FFPROBE}" ]; then
   exit 1
 fi
 
+# fpcalc is optional - only needed if SAMO_EXPLO_DIRS is configured. Install
+# it when present (./scripts/bundle-chromaprint.sh produces bin/fpcalc) but
+# don't fail the install if it's missing.
+FPCALC="${SCRIPT_DIR}/bin/fpcalc"
+
 UNIT_SOURCE="${SCRIPT_DIR}/samo-server.service"
 if [ ! -f "${UNIT_SOURCE}" ]; then
   echo "missing samo-server.service next to install.sh" >&2
@@ -90,6 +95,9 @@ install -d -m 0755 "${INSTALL_DIR}/bin"
 install -m 0755 "${BINARY}" "${INSTALL_DIR}/samo-server"
 install -m 0755 "${FFMPEG}" "${INSTALL_DIR}/bin/ffmpeg"
 install -m 0755 "${FFPROBE}" "${INSTALL_DIR}/bin/ffprobe"
+if [ -f "${FPCALC}" ]; then
+  install -m 0755 "${FPCALC}" "${INSTALL_DIR}/bin/fpcalc"
+fi
 
 # ---- data directory ----------------------------------------------------------
 

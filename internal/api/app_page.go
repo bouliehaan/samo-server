@@ -1498,6 +1498,46 @@ main.app-main {
     padding: 12px 16px;
   }
 }
+.explo-browser {
+  margin: 12px 0;
+  border: 1px solid rgba(255,255,255,0.12);
+  border-radius: 8px;
+  padding: 10px;
+  background: rgba(255,255,255,0.02);
+}
+.explo-browser .browser-head {
+  font-size: 11px;
+  letter-spacing: 0.08em;
+  opacity: 0.7;
+  margin-bottom: 8px;
+  word-break: break-all;
+}
+.explo-browser .browser-list {
+  max-height: 260px;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.explo-browser .browser-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 12px;
+  padding: 7px 10px;
+  border-radius: 6px;
+  cursor: pointer;
+  font-size: 13px;
+}
+.explo-browser .browser-row:hover { background: rgba(255,255,255,0.06); }
+.explo-browser .browser-row.is-parent { opacity: 0.8; }
+.explo-browser .browser-row .meta {
+  font-size: 10px;
+  letter-spacing: 0.08em;
+  opacity: 0.5;
+  white-space: nowrap;
+}
+.explo-warn { color: #f0a35e; }
 `
 
 const appJS = `
@@ -4301,6 +4341,8 @@ const appJS = `
         body = await settingsRadio();
       } else if (settingsMode === "podcasts") {
         body = await settingsPodcasts();
+      } else if (settingsMode === "explo") {
+        body = await settingsExplo();
       } else {
         body = await settingsAccount();
       }
@@ -4308,6 +4350,7 @@ const appJS = `
         '<button class="pill ' + (settingsMode === "libraries" ? "active" : "") + '" data-action="settings-mode" data-mode="libraries">LIBRARIES</button>' +
         '<button class="pill ' + (settingsMode === "radio" ? "active" : "") + '" data-action="settings-mode" data-mode="radio">RADIO</button>' +
         '<button class="pill ' + (settingsMode === "podcasts" ? "active" : "") + '" data-action="settings-mode" data-mode="podcasts">PODCASTS</button>' +
+        '<button class="pill ' + (settingsMode === "explo" ? "active" : "") + '" data-action="settings-mode" data-mode="explo">EXPLO</button>' +
         '<button class="pill ' + (settingsMode === "account" ? "active" : "") + '" data-action="settings-mode" data-mode="account">ACCOUNT</button>' +
       '</div>';
       main.innerHTML = '<section class="view">' +
@@ -4519,6 +4562,87 @@ const appJS = `
       });
       html += '</div>';
     }
+    html += '</div></div>';
+    return html;
+  }
+
+  let exploBrowsePath = "";
+
+  async function exploLoadDirs(path) {
+    const url = "/api/v1/explo/directories" + (path ? "?path=" + encodeURIComponent(path) : "");
+    const data = await api(url);
+    renderExploDirs(data);
+  }
+
+  function renderExploDirs(data) {
+    const list = document.getElementById("exploBrowseList");
+    const head = document.getElementById("exploBrowsePath");
+    if (!list) return;
+    exploBrowsePath = data.path || "";
+    if (head) head.textContent = data.path || "// suggested locations";
+    list.innerHTML = "";
+    (data.entries || []).forEach((entry) => {
+      const row = document.createElement("div");
+      row.className = "browser-row" + (entry.isParent ? " is-parent" : "");
+      const left = document.createElement("div");
+      left.textContent = entry.isParent ? ".. /" : entry.name;
+      const right = document.createElement("div");
+      right.className = "meta";
+      if (entry.isParent) right.textContent = "PARENT";
+      else if (entry.isRoot) right.textContent = "SHORTCUT";
+      else if (entry.itemCount) right.textContent = entry.itemCount + " ITEMS";
+      else right.textContent = "EMPTY";
+      row.appendChild(left);
+      row.appendChild(right);
+      row.addEventListener("click", () => {
+        exploLoadDirs(entry.path).catch((e) => setMessage("exploConfigMessage", e.message, true));
+      });
+      list.appendChild(row);
+    });
+  }
+
+  async function settingsExplo() {
+    const [me, config] = await Promise.all([
+      api("/api/v1/users/me").catch(() => ({ role: "user" })),
+      api("/api/v1/explo/config").catch(() => null),
+    ]);
+    const cfg = config || {};
+    const isAdmin = me.role === "admin";
+    const statusText = cfg.enabled ? "ENABLED" : "DISABLED";
+    const sourceText = cfg.source === "ui" ? "UI" : (cfg.source === "environment" ? "ENV VAR" : "—");
+    let html = '<div class="panel-grid">';
+    html += '<div class="panel panel-wide">' +
+      '<div class="panel-head"><span>// explo folder</span><span>' + statusText + '</span></div>' +
+      '<div class="empty-state" style="margin-bottom:12px">// Point Samo at the folder your weekly &ldquo;explo&rdquo; exporter drops untagged tracks into. Samo fingerprints them (AcoustID, with a MusicBrainz fallback), fixes their metadata, gathers them into the &ldquo;Explo&rdquo; playlist on your apps, and keeps them out of Recently Added. Files on disk are never modified. The folder must sit inside a library Samo already scans.</div>';
+    html += '<div class="empty-state" style="margin-bottom:12px">// folder: ' + (cfg.folder ? escapeHTML(cfg.folder) : "&lt;none set&gt;") +
+      ' · source: ' + sourceText +
+      ' · AcoustID key: ' + (cfg.hasApiKey ? "set" : "MISSING") +
+      ' · fpcalc: ' + (cfg.fpcalcReady ? "ready" : "MISSING") + '</div>';
+    if (!cfg.fpcalcReady) {
+      html += '<div class="empty-state explo-warn" style="margin-bottom:12px">// fpcalc (chromaprint) is not bundled on this server, so the pipeline cannot run. Run <code>make bundle-chromaprint</code> before building the release, or install fpcalc on the host.</div>';
+    }
+    if (!isAdmin) {
+      html += '<div class="panel-sub">// an admin must configure the explo folder</div></div></div>';
+      return html;
+    }
+    html += '<form class="settings-form" id="exploConfigForm">' +
+      '<div class="form-grid">' +
+        '<label class="field full"><span class="field-label">Explo folder (absolute path on the server)</span>' +
+          '<input id="exploFolder" type="text" placeholder="/srv/media/music/explo" value="' + attr(cfg.folder || "") + '"></label>' +
+      '</div>' +
+      '<div class="actions"><button class="btn ghost" type="button" id="exploBrowseToggle">BROWSE&hellip;</button></div>' +
+      '<div id="exploBrowser" class="explo-browser" hidden>' +
+        '<div class="browser-head"><span id="exploBrowsePath">// choose a folder</span></div>' +
+        '<div class="browser-list" id="exploBrowseList"></div>' +
+        '<div class="actions"><button class="btn primary btn-mini" type="button" id="exploBrowseUse">USE THIS FOLDER</button></div>' +
+      '</div>' +
+      '<div class="form-grid">' +
+        fieldHTML("exploAPIKey", "AcoustID API key", (cfg.hasApiKey ? "leave blank to keep current" : "AcoustID application key"), "password", "", "full") +
+      '</div>' +
+      '<div class="actions"><button class="btn primary" type="submit">SAVE</button>' +
+        '<button class="btn danger" type="button" id="exploClear">DISABLE &amp; CLEAR</button></div>' +
+      '<div class="status-line" id="exploConfigMessage" hidden></div>' +
+    '</form>';
     html += '</div></div>';
     return html;
   }
@@ -5113,6 +5237,53 @@ const appJS = `
           setMessage("lastfmConfigMessage", "last.fm keys saved", false);
           await viewSettings();
         } catch (err) { setMessage("lastfmConfigMessage", err.message, true); }
+      });
+    }
+
+    const exploConfigForm = document.getElementById("exploConfigForm");
+    if (exploConfigForm) {
+      const browseToggle = document.getElementById("exploBrowseToggle");
+      const browser = document.getElementById("exploBrowser");
+      if (browseToggle && browser) {
+        browseToggle.addEventListener("click", () => {
+          const reveal = browser.hidden;
+          browser.hidden = !reveal;
+          if (reveal) {
+            const seed = (document.getElementById("exploFolder").value || "").trim();
+            exploLoadDirs(seed).catch((e) => setMessage("exploConfigMessage", e.message, true));
+          }
+        });
+      }
+      const useBtn = document.getElementById("exploBrowseUse");
+      if (useBtn) {
+        useBtn.addEventListener("click", () => {
+          if (!exploBrowsePath) { setMessage("exploConfigMessage", "navigate into a folder first", true); return; }
+          document.getElementById("exploFolder").value = exploBrowsePath;
+          setMessage("exploConfigMessage", "folder selected: " + exploBrowsePath, false);
+        });
+      }
+      const clearBtn = document.getElementById("exploClear");
+      if (clearBtn) {
+        clearBtn.addEventListener("click", async () => {
+          if (!confirm("Disable explo and forget the configured folder? Files on disk are untouched.")) return;
+          try {
+            await api("/api/v1/explo/config", { method: "DELETE" });
+            setMessage("exploConfigMessage", "explo disabled", false);
+            await viewSettings();
+          } catch (err) { setMessage("exploConfigMessage", err.message, true); }
+        });
+      }
+      exploConfigForm.addEventListener("submit", async (event) => {
+        event.preventDefault();
+        const body = {
+          folder: document.getElementById("exploFolder").value.trim(),
+          apiKey: document.getElementById("exploAPIKey").value.trim(),
+        };
+        try {
+          const saved = await api("/api/v1/explo/config", { method: "PUT", body: body });
+          setMessage("exploConfigMessage", saved && saved.enabled ? "explo enabled - scanning the folder for new drops now" : "saved", false);
+          await viewSettings();
+        } catch (err) { setMessage("exploConfigMessage", err.message, true); }
       });
     }
 

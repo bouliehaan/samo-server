@@ -71,6 +71,13 @@ func TestGetSessionSignature(t *testing.T) {
 	}) {
 		t.Fatal("signature must ignore format")
 	}
+	// Pin the exact md5 to the real Last.fm algorithm (name+value sorted, then
+	// secret appended ONCE): md5("api_keykeymethodauth.getSessiontokentoken-123secret").
+	// Guards the error-13 regression where the secret was also prepended.
+	const want = "5e618b4c044fd0547a24e5f3869d5403"
+	if sig != want {
+		t.Fatalf("api_sig = %q, want %q (Last.fm sign = params+secret, secret only at end)", sig, want)
+	}
 }
 
 func TestCompleteAuthStoresSession(t *testing.T) {
@@ -171,6 +178,111 @@ func TestHandleScrobbleEventComplete(t *testing.T) {
 	}
 	if history.Total == 0 {
 		t.Fatal("expected submission history")
+	}
+}
+
+// TestNaturalTrackEndDoesNotDoubleScrobble reproduces the real client
+// sequence for a fully-played track: periodic progress-only PATCHes (the
+// server scrobbles once it crosses the threshold), followed by the
+// end-of-track PATCH both Android and desktop send with
+// IncrementPlayCount+TouchLastPlayedAt at the final (near-duration)
+// position. Regression for "doing doubles": that final PATCH used to reset
+// the session and re-trigger a second scrobble.
+func TestNaturalTrackEndDoesNotDoubleScrobble(t *testing.T) {
+	ctx := context.Background()
+	var scrobbleCalls int
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if err := r.ParseForm(); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		if r.PostForm.Get("method") == "track.scrobble" {
+			scrobbleCalls++
+		}
+		_, _ = w.Write([]byte(`{}`))
+	}))
+	defer server.Close()
+
+	db := openTestDB(t)
+	seedLastFMSession(t, db)
+	service := newTestService(t, db, server)
+	track := testTrack() // DurationSeconds: 120 -> scrobble threshold at 60s
+
+	// Periodic progress update crosses the scrobble threshold.
+	service.HandlePlaybackUpdate(ctx, users.BootstrapUserID, track,
+		catalog.PlaybackState{ProgressSeconds: 0, PlayCount: 2},
+		catalog.PlaybackState{ProgressSeconds: 65, PlayCount: 2},
+		playback.PatchInput{ProgressSeconds: intPtr(65)},
+	)
+	// Natural end of track: client bumps play count at the final position. This
+	// mirrors what the real HTTP handler passes - `before` is the pre-patch
+	// state and `after` already has the incremented PlayCount (see
+	// playback_handlers.go). The bug was that before.PlayCount < after.PlayCount
+	// reset the session and re-scrobbled; an earlier version of this test left
+	// both counts at 0, so it never exercised that path.
+	service.HandlePlaybackUpdate(ctx, users.BootstrapUserID, track,
+		catalog.PlaybackState{ProgressSeconds: 65, PlayCount: 2},
+		catalog.PlaybackState{ProgressSeconds: 118, PlayCount: 3},
+		playback.PatchInput{IncrementPlayCount: true, TouchLastPlayedAt: true, ProgressSeconds: intPtr(118)},
+	)
+
+	if scrobbleCalls != 1 {
+		t.Fatalf("track.scrobble calls = %d, want 1 (double scrobble on natural track end)", scrobbleCalls)
+	}
+}
+
+// TestNaturalTrackEndDoesNotReAnnounceNowPlaying is the "wrong song" half of
+// the same bug: the end-of-track play-count bump reset the session, which
+// cleared NowPlayingSent and made the server re-send "now playing" for the
+// track that just finished - right as the next track begins - so Last.fm
+// showed the previous song. now-playing must be announced exactly once.
+func TestNaturalTrackEndDoesNotReAnnounceNowPlaying(t *testing.T) {
+	ctx := context.Background()
+	var nowPlaying, scrobbles int
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if err := r.ParseForm(); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		switch r.PostForm.Get("method") {
+		case "track.updateNowPlaying":
+			nowPlaying++
+		case "track.scrobble":
+			scrobbles++
+		}
+		_, _ = w.Write([]byte(`{}`))
+	}))
+	defer server.Close()
+
+	db := openTestDB(t)
+	seedLastFMSession(t, db)
+	service := newTestService(t, db, server)
+	track := testTrack() // DurationSeconds: 120 -> scrobble threshold at 60s
+
+	// Early progress: announces now-playing once, no scrobble yet.
+	service.HandlePlaybackUpdate(ctx, users.BootstrapUserID, track,
+		catalog.PlaybackState{ProgressSeconds: 0, PlayCount: 2},
+		catalog.PlaybackState{ProgressSeconds: 20, PlayCount: 2},
+		playback.PatchInput{ProgressSeconds: intPtr(20)},
+	)
+	// Crosses threshold: scrobbles once, still the same now-playing.
+	service.HandlePlaybackUpdate(ctx, users.BootstrapUserID, track,
+		catalog.PlaybackState{ProgressSeconds: 20, PlayCount: 2},
+		catalog.PlaybackState{ProgressSeconds: 65, PlayCount: 2},
+		playback.PatchInput{ProgressSeconds: intPtr(65)},
+	)
+	// Natural end: play-count bump must not re-announce or re-scrobble.
+	service.HandlePlaybackUpdate(ctx, users.BootstrapUserID, track,
+		catalog.PlaybackState{ProgressSeconds: 65, PlayCount: 2},
+		catalog.PlaybackState{ProgressSeconds: 118, PlayCount: 3},
+		playback.PatchInput{IncrementPlayCount: true, TouchLastPlayedAt: true, ProgressSeconds: intPtr(118)},
+	)
+
+	if scrobbles != 1 {
+		t.Fatalf("track.scrobble calls = %d, want 1", scrobbles)
+	}
+	if nowPlaying != 1 {
+		t.Fatalf("track.updateNowPlaying calls = %d, want 1 (finished track re-announced as now playing)", nowPlaying)
 	}
 }
 

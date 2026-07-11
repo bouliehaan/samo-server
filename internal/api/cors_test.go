@@ -22,8 +22,11 @@ func TestCORSPreflightAllowsDesktopDevOrigin(t *testing.T) {
 	if got := rec.Header().Get("Access-Control-Allow-Origin"); got != "http://localhost:5173" {
 		t.Fatalf("Access-Control-Allow-Origin = %q", got)
 	}
-	if got := rec.Header().Get("Access-Control-Allow-Credentials"); got != "true" {
-		t.Fatalf("Access-Control-Allow-Credentials = %q", got)
+	// Auth is bearer-token-only (no cookies), so credentialed CORS is never
+	// needed and must stay off — combined with reflected origins it would let
+	// any site ride an authenticated session. See WithCORS's doc comment.
+	if got := rec.Header().Get("Access-Control-Allow-Credentials"); got != "" {
+		t.Fatalf("Access-Control-Allow-Credentials = %q, want unset", got)
 	}
 }
 

@@ -2,6 +2,7 @@ package api
 
 import (
 	"context"
+	"log"
 	"net/http"
 	"time"
 
@@ -26,6 +27,9 @@ func (s *Server) notifyMusicTrackLastFM(
 	if err != nil {
 		return
 	}
+
+	log.Printf("last.fm notify: track=%q artist=%q source=%s before.progress=%d after.progress=%d resume=%d",
+		track.Title, track.DisplayArtist, source, before.ProgressSeconds, after.ProgressSeconds, resumeSeconds)
 
 	var safePatch *playback.PatchInput
 	if patch != nil {

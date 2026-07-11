@@ -81,6 +81,15 @@ type MusicAlbum struct {
 	Playback      PlaybackState `json:"playback"`
 	AddedAt       *time.Time    `json:"addedAt,omitempty"`
 	UpdatedAt     *time.Time    `json:"updatedAt,omitempty"`
+	// HiddenFromRecentlyAdded is set by the explo service once every track on
+	// the album came from an unmanaged auto-tagged drop folder, so it doesn't
+	// flood the home "Recently Added" shelves. The album is still fully
+	// browsable everywhere else. Exposed in JSON (unlike a purely internal
+	// flag) because the Android client's home "Recently Added" shelf reads
+	// from an on-device mirror synced from this payload, not from the
+	// server-filtered /recently-added endpoints - it needs to see this flag
+	// to apply the same exclusion itself.
+	HiddenFromRecentlyAdded bool `json:"hiddenFromRecentlyAdded,omitempty"`
 }
 
 type MusicTrack struct {
@@ -138,6 +147,10 @@ type MusicPlaylist struct {
 	Playback        PlaybackState `json:"playback"`
 	CreatedAt       *time.Time    `json:"createdAt,omitempty"`
 	UpdatedAt       *time.Time    `json:"updatedAt,omitempty"`
+	// System marks a playlist as server-managed (e.g. the explo auto-tagged
+	// drop playlist) rather than user-created, so clients can surface it
+	// distinctly instead of listing it as a regular user playlist.
+	System bool `json:"system,omitempty"`
 }
 
 type MusicSearchResults struct {

@@ -132,7 +132,7 @@ func loadMusicAlbums(ctx context.Context, db *sql.DB) ([]MusicAlbum, error) {
 		SELECT id, title, sort_title, version, display_artist, release_date, original_release_date, release_year,
 		       release_type, release_status, compilation, record_label, catalog_number, barcode, genres_json, styles_json,
 		       moods_json, tags_json, disc_count, track_count, duration_seconds, images_json, external_ids_json,
-		       playback_json, added_at, updated_at
+		       playback_json, added_at, updated_at, hidden_from_recently_added
 		FROM music_albums`)
 	if err != nil {
 		return nil, fmt.Errorf("load music albums: %w", err)
@@ -142,17 +142,18 @@ func loadMusicAlbums(ctx context.Context, db *sql.DB) ([]MusicAlbum, error) {
 	var items []MusicAlbum
 	for rows.Next() {
 		var item MusicAlbum
-		var compilation int
+		var compilation, hiddenFromRecentlyAdded int
 		var genresJSON, stylesJSON, moodsJSON, tagsJSON, imagesJSON, externalJSON, playbackJSON string
 		var addedAt, updatedAt sql.NullString
 		if err := rows.Scan(&item.ID, &item.Title, &item.SortTitle, &item.Version, &item.DisplayArtist, &item.ReleaseDate,
 			&item.OriginalReleaseDate, &item.ReleaseYear, &item.ReleaseType, &item.ReleaseStatus,
 			&compilation, &item.RecordLabel, &item.CatalogNumber, &item.Barcode, &genresJSON, &stylesJSON, &moodsJSON,
 			&tagsJSON, &item.DiscCount, &item.TrackCount, &item.DurationSeconds, &imagesJSON, &externalJSON,
-			&playbackJSON, &addedAt, &updatedAt); err != nil {
+			&playbackJSON, &addedAt, &updatedAt, &hiddenFromRecentlyAdded); err != nil {
 			return nil, fmt.Errorf("scan music album: %w", err)
 		}
 		item.Compilation = compilation != 0
+		item.HiddenFromRecentlyAdded = hiddenFromRecentlyAdded != 0
 		decodeJSON(genresJSON, &item.Genres)
 		decodeJSON(stylesJSON, &item.Styles)
 		decodeJSON(moodsJSON, &item.Moods)
@@ -226,7 +227,7 @@ func loadMusicTracks(ctx context.Context, db *sql.DB) ([]MusicTrack, error) {
 func loadMusicPlaylists(ctx context.Context, db *sql.DB) ([]MusicPlaylist, error) {
 	rows, err := db.QueryContext(ctx, `
 		SELECT id, name, description, owner_id, public, collaborative, track_ids_json, track_count,
-		       duration_seconds, images_json, playback_json, created_at, updated_at
+		       duration_seconds, images_json, playback_json, created_at, updated_at, system
 		FROM music_playlists`)
 	if err != nil {
 		return nil, fmt.Errorf("load music playlists: %w", err)
@@ -236,16 +237,17 @@ func loadMusicPlaylists(ctx context.Context, db *sql.DB) ([]MusicPlaylist, error
 	var items []MusicPlaylist
 	for rows.Next() {
 		var item MusicPlaylist
-		var public, collaborative int
+		var public, collaborative, system int
 		var trackIDsJSON, imagesJSON, playbackJSON string
 		var createdAt, updatedAt sql.NullString
 		if err := rows.Scan(&item.ID, &item.Name, &item.Description, &item.OwnerID, &public, &collaborative,
 			&trackIDsJSON, &item.TrackCount, &item.DurationSeconds, &imagesJSON, &playbackJSON,
-			&createdAt, &updatedAt); err != nil {
+			&createdAt, &updatedAt, &system); err != nil {
 			return nil, fmt.Errorf("scan music playlist: %w", err)
 		}
 		item.Public = public != 0
 		item.Collaborative = collaborative != 0
+		item.System = system != 0
 		decodeJSON(trackIDsJSON, &item.TrackIDs)
 		decodeJSON(imagesJSON, &item.Images)
 		decodeJSON(playbackJSON, &item.Playback)

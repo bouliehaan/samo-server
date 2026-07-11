@@ -39,6 +39,16 @@ func (s *Server) getSetupStatus(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
+	// This route intentionally has no auth (the wizard needs it before an
+	// admin exists), which means it's reachable by anyone on the public
+	// internet once the server is tunneled. Once setup is done, nothing
+	// legitimate reads more than NeedsSetup — the /setup page itself
+	// redirects away — so don't hand out library counts / scan state /
+	// current step to anonymous callers indefinitely.
+	if !status.NeedsSetup {
+		writeJSON(w, http.StatusOK, SetupStatus{NeedsSetup: false, HasAdmin: status.HasAdmin})
+		return
+	}
 	writeJSON(w, http.StatusOK, status)
 }
 

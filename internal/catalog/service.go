@@ -366,6 +366,13 @@ func (s *Service) MusicPlaylistForUser(userID, id string) (MusicPlaylist, error)
 }
 
 func PlaylistVisibleToUser(item MusicPlaylist, userID string) bool {
+	// Server-managed (system) playlists are curated for every user - e.g. the
+	// explo drop queue both home screens surface. They are also typically owned
+	// by an internal service account no real user matches, so without this rule
+	// they would be visible to nobody.
+	if item.System {
+		return true
+	}
 	if item.Public || strings.TrimSpace(item.OwnerID) == "" {
 		return true
 	}

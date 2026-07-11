@@ -22,6 +22,7 @@ import (
 	"github.com/bouliehaan/samo-server/internal/config"
 	"github.com/bouliehaan/samo-server/internal/covers"
 	"github.com/bouliehaan/samo-server/internal/discovery"
+	"github.com/bouliehaan/samo-server/internal/explo"
 	"github.com/bouliehaan/samo-server/internal/files"
 	"github.com/bouliehaan/samo-server/internal/lastfm"
 	"github.com/bouliehaan/samo-server/internal/libraries"
@@ -79,6 +80,21 @@ func main() {
 	tools, err := toolchain.Resolve(toolchain.Options{DataDir: cfg.DataDir})
 	if err != nil {
 		log.Fatal(err)
+	}
+
+	// fpcalc is optional - only the explo folder feature needs it, and its
+	// absence must not block startup the way a missing ffmpeg does. Resolve it
+	// unconditionally (not just when SAMO_EXPLO_DIRS is preset) so the folder
+	// can be enabled later from the web UI without a restart+rebundle.
+	var fpcalcPath string
+	if path, err := toolchain.ResolveFpcalc(toolchain.Options{DataDir: cfg.DataDir}); err != nil {
+		// Always log — the folder can be configured from the web UI (DB), so
+		// gating this on SAMO_EXPLO_DIRS hid the one line that explained why
+		// a UI-configured explo pipeline never ran.
+		log.Printf("explo: fpcalc not available (folder feature needs it): %v", err)
+	} else {
+		fpcalcPath = path
+		log.Printf("fpcalc: %s", path)
 	}
 
 	coverDir := filepath.Join(cfg.DataDir, "covers")
@@ -259,6 +275,62 @@ func main() {
 		searchService.Rebuild(seed)
 		return nil
 	}
+
+	exploService := explo.NewService(explo.ServiceOptions{
+		DB:             db,
+		Dirs:           cfg.ExploDirs,
+		AcoustIDAPIKey: cfg.AcoustIDAPIKey,
+		FpcalcPath:     fpcalcPath,
+		MetadataApply:  metadataApplyService,
+		// Fallback identification (filename + duration-gated text search)
+		// when AcoustID can't identify a file. Reuses the same search
+		// providers (MusicBrainz etc.) already configured via
+		// SAMO_METADATA_PROVIDERS for the manual "apply metadata" feature.
+		Metadata:      metadataService,
+		Playlists:     playlistService,
+		ReloadCatalog: reloadCatalog,
+		PlaylistName:  cfg.ExploPlaylistName,
+		Logger:        log.Printf,
+	})
+	// Overlay any admin config persisted via the web UI onto the env defaults.
+	if err := exploService.LoadConfig(ctx); err != nil {
+		log.Printf("explo: config load failed: %v", err)
+	}
+	switch {
+	case exploService.Enabled():
+		log.Printf("explo: folder feature enabled")
+	default:
+		// Covers env AND web-UI configured folders; silent only when explo
+		// was never configured at all.
+		if reason := exploService.DisabledReason(ctx); reason != "" {
+			log.Printf("explo: folder configured but the feature is disabled - %s", reason)
+		}
+	}
+	// One-shot cleanup at boot: re-sync explo's hidden flags / ledger / playlist
+	// to the currently-configured folder. Unconditional (not gated on Enabled)
+	// so that narrowing or clearing the folder recovers Recently Added on the
+	// next boot even if the key/fpcalc are now absent.
+	go func() {
+		if err := exploService.ReconcileRecentlyAdded(ctx); err != nil {
+			log.Printf("explo: startup reconcile failed: %v", err)
+		}
+		// Identification pass at boot too — this is what retries previously
+		// unmatched/errored drops (fresh releases AcoustID couldn't identify
+		// yet). Without it, retries only ran when a scan happened to fire.
+		// No-op when nothing is due, so it's free on ordinary boots.
+		if exploService.Enabled() {
+			if _, err := exploService.ProcessNewTracks(ctx); err != nil {
+				log.Printf("explo: startup identify pass failed: %v", err)
+			}
+		}
+		// Backfill album art for any identified explo albums still missing it
+		// (e.g. matched before cover support). Network-bound, so kept off the
+		// reconcile's critical path.
+		if err := exploService.BackfillCovers(ctx); err != nil {
+			log.Printf("explo: startup cover backfill failed: %v", err)
+		}
+	}()
+
 	libraryService.OnScanComplete(func(ctx context.Context, job libraries.ScanJob, stats scanner.ScanStats) {
 		if err := reloadCatalog(ctx); err != nil {
 			log.Printf("catalog reload after scan %s failed: %v", job.ID, err)
@@ -278,6 +350,19 @@ func main() {
 					}
 				}()
 			}
+		}
+		// Explo folder enrichment: identify + playlist-route any newly
+		// scanned drops. Runs in the background so scans stay fast; safe to
+		// run every scan since it's a no-op once nothing new is pending.
+		if exploService.Enabled() {
+			go func() {
+				if _, err := exploService.ProcessNewTracks(ctx); err != nil {
+					log.Printf("explo: process new tracks after scan %s failed: %v", job.ID, err)
+				}
+				if err := exploService.BackfillCovers(ctx); err != nil {
+					log.Printf("explo: cover backfill after scan %s failed: %v", job.ID, err)
+				}
+			}()
 		}
 		if !cfg.ArtistImagesOnScan || !artistImageService.Enabled() {
 			return
@@ -328,6 +413,7 @@ func main() {
 		Radio:         radioService,
 		Sources:       sourceService,
 		LastFM:        lastfmService,
+		Explo:         exploService,
 		ArtistImages:  artistImageService,
 		ArtistMeta:    artistMetaService,
 		Users:         userService,
@@ -409,7 +495,7 @@ func main() {
 		log.Fatal(err)
 	}
 	actualAddr := listener.Addr().String()
-	if actualAddr != cfg.Addr {
+	if !sameListenPort(cfg.Addr, actualAddr) {
 		log.Printf("requested %s was in use; samo-server bound to %s instead", cfg.Addr, actualAddr)
 	}
 	log.Printf("samo-server listening on %s", actualAddr)

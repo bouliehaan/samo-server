@@ -19,6 +19,12 @@ var (
 	ErrNotFound     = errors.New("playlist not found")
 	ErrForbidden    = errors.New("playlist owner required")
 	ErrInvalidInput = errors.New("invalid playlist input")
+	// ErrSystemPlaylist rejects client mutations of server-managed playlists
+	// (e.g. the explo "Explore" queue). Their name and membership are re-derived
+	// by the owning service on every pass, so a client edit would not stick -
+	// it would be silently reverted, which reads as data loss. Refusing loudly
+	// here is the honest behavior; internal callers use the System* methods.
+	ErrSystemPlaylist = errors.New("this playlist is managed by the server")
 )
 
 type Service struct {
@@ -35,6 +41,9 @@ type CreateInput struct {
 	Public        bool     `json:"public"`
 	Collaborative bool     `json:"collaborative,omitempty"`
 	TrackIDs      []string `json:"trackIds,omitempty"`
+	// System marks a server-managed playlist (e.g. explo). Not settable via
+	// the public API - only internal callers (explo service) pass true.
+	System bool `json:"-"`
 }
 
 type UpdateInput struct {
@@ -66,11 +75,11 @@ func (s *Service) Create(ctx context.Context, ownerID string, input CreateInput)
 	_, err = s.db.ExecContext(ctx, `
 		INSERT INTO music_playlists (
 		  id, name, description, owner_id, public, collaborative, track_ids_json,
-		  track_count, duration_seconds, images_json, playback_json, created_at, updated_at
+		  track_count, duration_seconds, images_json, playback_json, created_at, updated_at, system
 		)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, '[]', '{}', ?, ?)`,
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, '[]', '{}', ?, ?, ?)`,
 		id, name, strings.TrimSpace(input.Description), ownerID, boolInt(input.Public),
-		boolInt(input.Collaborative), jsonText(trackIDs), len(trackIDs), duration, now, now)
+		boolInt(input.Collaborative), jsonText(trackIDs), len(trackIDs), duration, now, now, boolInt(input.System))
 	if err != nil {
 		return catalog.MusicPlaylist{}, fmt.Errorf("create playlist: %w", err)
 	}
@@ -84,6 +93,9 @@ func (s *Service) Update(ctx context.Context, ownerID, id string, input UpdateIn
 	current, err := s.loadByID(ctx, id)
 	if err != nil {
 		return catalog.MusicPlaylist{}, err
+	}
+	if current.System {
+		return catalog.MusicPlaylist{}, ErrSystemPlaylist
 	}
 	if err := assertOwner(ownerID, current.OwnerID); err != nil {
 		return catalog.MusicPlaylist{}, err
@@ -147,6 +159,9 @@ func (s *Service) Delete(ctx context.Context, ownerID, id string) error {
 	if err != nil {
 		return err
 	}
+	if current.System {
+		return ErrSystemPlaylist
+	}
 	if err := assertOwner(ownerID, current.OwnerID); err != nil {
 		return err
 	}
@@ -164,11 +179,46 @@ func (s *Service) Delete(ctx context.Context, ownerID, id string) error {
 	return catalog.DeleteMetadataOverridesForTarget(ctx, s.db, catalog.OverrideKindMusicPlaylist, id)
 }
 
+// SetSystemTracks replaces the membership of a SYSTEM playlist. It is the
+// internal write path for server-managed playlists (the explo reconciler):
+// Update/Delete refuse system rows so no client can edit a server-derived
+// queue out from under its reconciler, and this method refuses non-system
+// rows so it can never become a backdoor around the ownership checks.
+func (s *Service) SetSystemTracks(ctx context.Context, id string, trackIDs []string) (catalog.MusicPlaylist, error) {
+	if s == nil || s.db == nil {
+		return catalog.MusicPlaylist{}, ErrDisabled
+	}
+	current, err := s.loadByID(ctx, id)
+	if err != nil {
+		return catalog.MusicPlaylist{}, err
+	}
+	if !current.System {
+		return catalog.MusicPlaylist{}, ErrForbidden
+	}
+	validated, duration, err := s.validateTrackIDs(ctx, trackIDs)
+	if err != nil {
+		return catalog.MusicPlaylist{}, err
+	}
+	_, err = s.db.ExecContext(ctx, `
+		UPDATE music_playlists
+		SET track_ids_json = ?,
+		    track_count = ?,
+		    duration_seconds = ?,
+		    updated_at = CURRENT_TIMESTAMP
+		WHERE id = ?`,
+		jsonText(validated), len(validated), duration, id)
+	if err != nil {
+		return catalog.MusicPlaylist{}, fmt.Errorf("update system playlist: %w", err)
+	}
+	return s.loadByID(ctx, id)
+}
+
 func (s *Service) loadByID(ctx context.Context, id string) (catalog.MusicPlaylist, error) {
 	var (
 		item          catalog.MusicPlaylist
 		public        int
 		collaborative int
+		system        int
 		trackIDsJSON  string
 		imagesJSON    string
 		playbackJSON  string
@@ -177,12 +227,12 @@ func (s *Service) loadByID(ctx context.Context, id string) (catalog.MusicPlaylis
 	)
 	err := s.db.QueryRowContext(ctx, `
 		SELECT id, name, description, owner_id, public, collaborative, track_ids_json,
-		       track_count, duration_seconds, images_json, playback_json, created_at, updated_at
+		       track_count, duration_seconds, images_json, playback_json, created_at, updated_at, system
 		FROM music_playlists
 		WHERE id = ?`, id).Scan(
 		&item.ID, &item.Name, &item.Description, &item.OwnerID, &public, &collaborative,
 		&trackIDsJSON, &item.TrackCount, &item.DurationSeconds, &imagesJSON, &playbackJSON,
-		&createdAt, &updatedAt,
+		&createdAt, &updatedAt, &system,
 	)
 	if err == sql.ErrNoRows {
 		return catalog.MusicPlaylist{}, ErrNotFound
@@ -192,6 +242,7 @@ func (s *Service) loadByID(ctx context.Context, id string) (catalog.MusicPlaylis
 	}
 	item.Public = public != 0
 	item.Collaborative = collaborative != 0
+	item.System = system != 0
 	decodeJSON(trackIDsJSON, &item.TrackIDs)
 	decodeJSON(imagesJSON, &item.Images)
 	decodeJSON(playbackJSON, &item.Playback)
