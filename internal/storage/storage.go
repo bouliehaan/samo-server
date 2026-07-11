@@ -39,8 +39,22 @@ var defaultOpenOptions = OpenOptions{
 	CacheShared:  false,
 }
 
+// Open returns the read-WRITE handle. SQLite (WAL) permits exactly one writer
+// at a time; a multi-connection pool therefore lets goroutines attempt truly
+// concurrent writes that lose the race with SQLITE_BUSY under load — which is
+// what the explo batch pass was hitting on the live server. Pinning the pool to
+// a single connection makes writes SERIALIZE inside database/sql (they queue for
+// the connection and proceed) instead of erroring, so SQLITE_BUSY becomes
+// structurally impossible on the write path. Concurrent reads do NOT pay for
+// this: heavy reads use the separate OpenReadOnly pool and the hot browse/search
+// endpoints are served from the in-memory catalog projection, not the live DB.
+// Every transaction site was audited to be self-contained (no query nested on
+// the base handle inside a tx), so a single connection cannot self-deadlock.
 func Open(ctx context.Context, path string) (*sql.DB, error) {
-	return OpenWithOptions(ctx, path, defaultOpenOptions)
+	opts := defaultOpenOptions
+	opts.MaxOpenConns = 1
+	opts.MaxIdleConns = 1
+	return OpenWithOptions(ctx, path, opts)
 }
 
 func OpenReadOnly(ctx context.Context, path string) (*sql.DB, error) {

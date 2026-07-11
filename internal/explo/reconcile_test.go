@@ -4,6 +4,8 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"os"
+	"path/filepath"
 	"testing"
 
 	"github.com/bouliehaan/samo-server/internal/playlists"
@@ -11,6 +13,73 @@ import (
 	"github.com/bouliehaan/samo-server/internal/users"
 	"github.com/bouliehaan/samo-server/migrations"
 )
+
+func assertCount(t *testing.T, db *sql.DB, query string, want int) {
+	t.Helper()
+	var got int
+	if err := db.QueryRowContext(context.Background(), query).Scan(&got); err != nil {
+		t.Fatal(err)
+	}
+	if got != want {
+		t.Fatalf("%s = %d, want %d", query, got, want)
+	}
+}
+
+// TestPruneVanishedFilesRemovesRotatedOutDrops covers the ghost-file bug: the
+// explo exporter deletes last week's files from the drop folder, but their
+// media_files rows linger — fpcalc errors on them every pass and they pad the
+// Explore playlist. pruneVanishedFiles deletes the track for any explo file gone
+// from disk (cascading to media_files + explo_tracks) and leaves present files —
+// and any ambiguous stat — untouched.
+func TestPruneVanishedFilesRemovesRotatedOutDrops(t *testing.T) {
+	ctx := context.Background()
+	db := newMigratedDB(t)
+	dir := t.TempDir()
+
+	present := filepath.Join(dir, "present.mp3")
+	rotated := filepath.Join(dir, "rotated.mp3")
+	if err := os.WriteFile(present, []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	// rotated.mp3 is intentionally never created — it's the file the exporter
+	// switched out from under a stale scan.
+
+	mustExec(t, db, `INSERT INTO libraries (id, name, kind, path) VALUES ('lib-1','Music','music','`+dir+`')`)
+	mustExec(t, db, `
+		INSERT INTO music_albums (id, title, track_count, duration_seconds, updated_at) VALUES ('al','A',2,0,'2020-01-01 00:00:00');
+		INSERT INTO music_tracks (id, title, display_artist, album_id, duration_seconds) VALUES
+		  ('t-present','p','x','al',200),
+		  ('t-rotated','r','x','al',200);`)
+	mustExec(t, db, `
+		INSERT INTO media_files (id, library_id, track_id, path, relative_path, file_name, duration_seconds) VALUES
+		  ('mf-present','lib-1','t-present','`+present+`','present.mp3','present.mp3',200),
+		  ('mf-rotated','lib-1','t-rotated','`+rotated+`','rotated.mp3','rotated.mp3',200);
+		INSERT INTO explo_tracks (track_id, status, processed_at, attempts) VALUES
+		  ('t-present','unmatched', datetime('now'), 1),
+		  ('t-rotated','error', datetime('now'), 1);`)
+
+	svc := &Service{db: db, logger: func(string, ...any) {}}
+	pruned, err := svc.pruneVanishedFiles(ctx, []string{dir})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if pruned != 1 {
+		t.Fatalf("pruned=%d, want 1 (only the rotated-out file)", pruned)
+	}
+
+	// The rotated track + its media_file + its ledger row are all gone (cascade).
+	assertCount(t, db, `SELECT COUNT(*) FROM music_tracks WHERE id='t-rotated'`, 0)
+	assertCount(t, db, `SELECT COUNT(*) FROM media_files WHERE id='mf-rotated'`, 0)
+	assertCount(t, db, `SELECT COUNT(*) FROM explo_tracks WHERE track_id='t-rotated'`, 0)
+	// The present file is untouched.
+	assertCount(t, db, `SELECT COUNT(*) FROM music_tracks WHERE id='t-present'`, 1)
+	assertCount(t, db, `SELECT COUNT(*) FROM explo_tracks WHERE track_id='t-present'`, 1)
+
+	// Idempotent: a second pass with nothing missing prunes nothing.
+	if n, _ := svc.pruneVanishedFiles(ctx, []string{dir}); n != 0 {
+		t.Fatalf("second pass pruned=%d, want 0", n)
+	}
+}
 
 func newMigratedDB(t *testing.T) *sql.DB {
 	t.Helper()

@@ -42,54 +42,54 @@ func TestFindCandidateTracksRetriesFailedIdentifications(t *testing.T) {
 		t.Fatalf("first-time candidates = %v, want both seeded tracks", ids)
 	}
 
-	// matched: never re-runs. unmatched with one attempt: due a day later —
-	// NOT a week; a flat 7-day first wait left freshly-deployed retry support
-	// sitting on a broken drop with nothing eligible.
+	// matched: never re-runs. unmatched with one attempt: due an HOUR later —
+	// front-loaded so a transient (or since-fixed-bug) failure retries promptly
+	// instead of leaving a broken drop unidentified for a full day.
 	mustExec(t, db, `
 		INSERT INTO explo_tracks (track_id, status, processed_at, attempts) VALUES
 		  ('track-matched', 'matched', datetime('now', '-30 days'), 1),
-		  ('track-unmatched', 'unmatched', datetime('now', '-2 days'), 1);
+		  ('track-unmatched', 'unmatched', datetime('now', '-2 hours'), 1);
 	`)
 	ids = candidateTrackIDs(t, svc)
 	if ids["track-matched"] {
 		t.Fatal("matched track must never become a candidate again")
 	}
 	if !ids["track-unmatched"] {
-		t.Fatal("first retry (attempts=1) must be due after a day")
+		t.Fatal("first retry (attempts=1) must be due after an hour")
 	}
-	mustExec(t, db, `UPDATE explo_tracks SET processed_at = datetime('now', '-2 hours') WHERE track_id = 'track-unmatched'`)
+	mustExec(t, db, `UPDATE explo_tracks SET processed_at = datetime('now', '-10 minutes') WHERE track_id = 'track-unmatched'`)
 	if ids := candidateTrackIDs(t, svc); ids["track-unmatched"] {
-		t.Fatal("first retry fired before its 1-day wait")
+		t.Fatal("first retry fired before its 1-hour wait")
 	}
 
-	// Each failure climbs the ladder: attempts=2 waits 2 days...
-	mustExec(t, db, `UPDATE explo_tracks SET attempts = 2, processed_at = datetime('now', '-1 day') WHERE track_id = 'track-unmatched'`)
+	// Each failure climbs the ladder: attempts=2 waits 6 hours...
+	mustExec(t, db, `UPDATE explo_tracks SET attempts = 2, processed_at = datetime('now', '-2 hours') WHERE track_id = 'track-unmatched'`)
 	if ids := candidateTrackIDs(t, svc); ids["track-unmatched"] {
-		t.Fatal("second retry fired before its 2-day wait")
+		t.Fatal("second retry fired before its 6-hour wait")
 	}
-	mustExec(t, db, `UPDATE explo_tracks SET processed_at = datetime('now', '-3 days') WHERE track_id = 'track-unmatched'`)
+	mustExec(t, db, `UPDATE explo_tracks SET processed_at = datetime('now', '-7 hours') WHERE track_id = 'track-unmatched'`)
 	if ids := candidateTrackIDs(t, svc); !ids["track-unmatched"] {
-		t.Fatal("second retry must be due after 2 days")
+		t.Fatal("second retry must be due after 6 hours")
 	}
 
-	// ...attempts=3 waits 4 days...
-	mustExec(t, db, `UPDATE explo_tracks SET attempts = 3, processed_at = datetime('now', '-3 days') WHERE track_id = 'track-unmatched'`)
+	// ...attempts=3 waits 1 day...
+	mustExec(t, db, `UPDATE explo_tracks SET attempts = 3, processed_at = datetime('now', '-6 hours') WHERE track_id = 'track-unmatched'`)
 	if ids := candidateTrackIDs(t, svc); ids["track-unmatched"] {
-		t.Fatal("third retry fired before its 4-day wait")
+		t.Fatal("third retry fired before its 1-day wait")
 	}
-	mustExec(t, db, `UPDATE explo_tracks SET processed_at = datetime('now', '-5 days') WHERE track_id = 'track-unmatched'`)
+	mustExec(t, db, `UPDATE explo_tracks SET processed_at = datetime('now', '-2 days') WHERE track_id = 'track-unmatched'`)
 	if ids := candidateTrackIDs(t, svc); !ids["track-unmatched"] {
-		t.Fatal("third retry must be due after 4 days")
+		t.Fatal("third retry must be due after 1 day")
 	}
 
-	// ...and attempts=4 waits the final 7-day rung.
-	mustExec(t, db, `UPDATE explo_tracks SET attempts = 4, processed_at = datetime('now', '-5 days') WHERE track_id = 'track-unmatched'`)
+	// ...and attempts=4 waits the final 3-day rung.
+	mustExec(t, db, `UPDATE explo_tracks SET attempts = 4, processed_at = datetime('now', '-2 days') WHERE track_id = 'track-unmatched'`)
 	if ids := candidateTrackIDs(t, svc); ids["track-unmatched"] {
-		t.Fatal("fourth retry fired before its 7-day wait")
+		t.Fatal("fourth retry fired before its 3-day wait")
 	}
-	mustExec(t, db, `UPDATE explo_tracks SET processed_at = datetime('now', '-8 days') WHERE track_id = 'track-unmatched'`)
+	mustExec(t, db, `UPDATE explo_tracks SET processed_at = datetime('now', '-4 days') WHERE track_id = 'track-unmatched'`)
 	if ids := candidateTrackIDs(t, svc); !ids["track-unmatched"] {
-		t.Fatal("fourth retry must be due after 7 days")
+		t.Fatal("fourth retry must be due after 3 days")
 	}
 
 	// Exhausted attempt budget: retired for good, no matter how old.
@@ -103,7 +103,7 @@ func TestFindCandidateTracksRetriesFailedIdentifications(t *testing.T) {
 	if ids := candidateTrackIDs(t, svc); !ids["track-unmatched"] {
 		t.Fatal("errored track past its backoff must retry")
 	}
-	mustExec(t, db, `UPDATE explo_tracks SET processed_at = datetime('now', '-2 hours') WHERE track_id = 'track-unmatched'`)
+	mustExec(t, db, `UPDATE explo_tracks SET processed_at = datetime('now', '-10 minutes') WHERE track_id = 'track-unmatched'`)
 	if ids := candidateTrackIDs(t, svc); ids["track-unmatched"] {
 		t.Fatal("errored track retried before its backoff")
 	}
@@ -124,7 +124,7 @@ func TestProcessNewTracksLogsIdleStatusBreakdown(t *testing.T) {
 	// budget. Nothing is due, but the pass must explain the idle state.
 	mustExec(t, db, `
 		INSERT INTO explo_tracks (track_id, status, processed_at, attempts) VALUES
-		  ('track-matched', 'unmatched', datetime('now', '-2 hours'), 1),
+		  ('track-matched', 'unmatched', datetime('now', '-10 minutes'), 1),
 		  ('track-unmatched', 'error', datetime('now', '-60 days'), 5);
 	`)
 	// One warm-up reconcile absorbs first-pass side effects (album hiding,
