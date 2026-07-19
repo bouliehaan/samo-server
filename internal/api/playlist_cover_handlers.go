@@ -1,6 +1,7 @@
 package api
 
 import (
+	"log"
 	"net/http"
 	"net/url"
 	"strings"
@@ -28,7 +29,20 @@ func (s *Server) serveMusicPlaylistCover(w http.ResponseWriter, r *http.Request)
 			composite, err := s.coversService().Composite(r.Context(), id, imagesHash, sourcePaths)
 			if err == nil {
 				images = []catalog.Image{*composite}
+			} else {
+				// The 2x2 grid failed to render (a common cause is ffmpeg
+				// choking on a cover that is still a remote URL instead of a
+				// downloaded local file). We deliberately fall through and serve
+				// the first cover rather than error the request — but log it, so
+				// the degrade from grid to single tile is diagnosable instead of
+				// silent.
+				log.Printf("playlist cover %s: 2x2 composite failed, serving single cover: %v", id, err)
 			}
+		} else {
+			// Fewer than 4 servable sources (e.g. covers not yet backfilled)
+			// means no grid is possible; serving one cover is expected here, but
+			// log it so "the Explore tile isn't a grid" is explainable.
+			log.Printf("playlist cover %s: %d/4 servable sources, serving single cover", id, len(sourcePaths))
 		}
 	}
 

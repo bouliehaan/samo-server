@@ -8,20 +8,12 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/bouliehaan/samo-server/internal/storage"
-	"github.com/bouliehaan/samo-server/migrations"
+	"github.com/bouliehaan/samo-server/internal/storage/storagetest"
 )
 
 func TestDownloadFromURLStoresCover(t *testing.T) {
 	ctx := context.Background()
-	db, err := storage.Open(ctx, t.TempDir()+"/samo.db")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer db.Close()
-	if err := storage.ApplyMigrations(ctx, db, migrations.Files); err != nil {
-		t.Fatal(err)
-	}
+	db := storagetest.Open(t)
 
 	coverDir := t.TempDir()
 	service, err := New(db, Options{CoverDir: coverDir})
@@ -74,14 +66,7 @@ func TestDownloadFromURLStoresCover(t *testing.T) {
 
 func TestDownloadFromURLRejectsNonImageContent(t *testing.T) {
 	ctx := context.Background()
-	db, err := storage.Open(ctx, t.TempDir()+"/samo.db")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer db.Close()
-	if err := storage.ApplyMigrations(ctx, db, migrations.Files); err != nil {
-		t.Fatal(err)
-	}
+	db := storagetest.Open(t)
 
 	service, err := New(db, Options{CoverDir: t.TempDir()})
 	if err != nil {
@@ -102,14 +87,7 @@ func TestDownloadFromURLRejectsNonImageContent(t *testing.T) {
 
 func TestDownloadFromURLBlocksLoopbackByDefault(t *testing.T) {
 	ctx := context.Background()
-	db, err := storage.Open(ctx, t.TempDir()+"/samo.db")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer db.Close()
-	if err := storage.ApplyMigrations(ctx, db, migrations.Files); err != nil {
-		t.Fatal(err)
-	}
+	db := storagetest.Open(t)
 
 	service, err := New(db, Options{CoverDir: t.TempDir()})
 	if err != nil {
@@ -125,14 +103,7 @@ func TestDownloadFromURLBlocksLoopbackByDefault(t *testing.T) {
 
 func TestDownloadFromURLRejectsOversizedBody(t *testing.T) {
 	ctx := context.Background()
-	db, err := storage.Open(ctx, t.TempDir()+"/samo.db")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer db.Close()
-	if err := storage.ApplyMigrations(ctx, db, migrations.Files); err != nil {
-		t.Fatal(err)
-	}
+	db := storagetest.Open(t)
 
 	service, err := New(db, Options{CoverDir: t.TempDir()})
 	if err != nil {

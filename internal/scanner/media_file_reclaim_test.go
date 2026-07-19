@@ -6,20 +6,12 @@ import (
 	"testing"
 
 	"github.com/bouliehaan/samo-server/internal/catalog"
-	"github.com/bouliehaan/samo-server/internal/storage"
-	"github.com/bouliehaan/samo-server/migrations"
+	"github.com/bouliehaan/samo-server/internal/storage/storagetest"
 )
 
 func TestUpsertAudioFileReclaimsPathFromMusicTrack(t *testing.T) {
 	ctx := context.Background()
-	db, err := storage.Open(ctx, t.TempDir()+"/samo.db")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer db.Close()
-	if err := storage.ApplyMigrations(ctx, db, migrations.Files); err != nil {
-		t.Fatal(err)
-	}
+	db := storagetest.Open(t)
 
 	scanner := New(db)
 	musicLib := Library{ID: "lib-music", Name: "Music", Kind: "music", Path: "/mnt/data2tb/Music"}

@@ -21,6 +21,14 @@ type BootstrapResult struct {
 
 func bootstrap(ctx context.Context, db *sql.DB, service *Service, input BootstrapInput) (BootstrapResult, error) {
 	var result BootstrapResult
+	// Guarantee the reserved bootstrap row exists before anything reads it. On
+	// SQLite this duplicates migration 008 (harmless); on a fresh Postgres
+	// database — whose schema is generated structurally, without seed DML — this
+	// is what creates 'user-server' so loadUserByID and the server-token FK below
+	// don't fail on first boot.
+	if err := ensureReservedServerUser(ctx, db); err != nil {
+		return BootstrapResult{}, err
+	}
 	serverUser, err := loadUserByID(ctx, db, BootstrapUserID)
 	if err != nil {
 		return BootstrapResult{}, err
@@ -109,6 +117,17 @@ func bootstrap(ctx context.Context, db *sql.DB, service *Service, input Bootstra
 	}
 	result.CreatedAdmin = true
 	return result, nil
+}
+
+// ensureReservedServerUser upserts the reserved 'user-server' account. The
+// INSERT ... ON CONFLICT DO NOTHING form is portable across SQLite and Postgres
+// and never clobbers an existing row (e.g. one a human renamed).
+func ensureReservedServerUser(ctx context.Context, db *sql.DB) error {
+	_, err := db.ExecContext(ctx, `
+		INSERT INTO users (id, username, display_name, role, password_hash)
+		VALUES (?, 'server', 'Server', 'admin', '')
+		ON CONFLICT (id) DO NOTHING`, BootstrapUserID)
+	return err
 }
 
 func ensureServerToken(ctx context.Context, db *sql.DB, tokenHash string) error {

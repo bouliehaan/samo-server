@@ -50,7 +50,10 @@ func latestTime(left, right *time.Time) *time.Time {
 
 func (s *Service) ListMusicArtistsSorted(options MusicListOptions) Page[MusicArtist] {
 	s.mu.RLock()
-	items := append([]MusicArtist(nil), s.musicArtists...)
+	items := WithoutExploArtists(s.musicArtists)
+	if len(items) == len(s.musicArtists) {
+		items = append([]MusicArtist(nil), s.musicArtists...)
+	}
 	var tracks []MusicTrack
 	if len(options.Playback.TrackStates) > 0 {
 		tracks = append([]MusicTrack(nil), s.musicTracks...)
@@ -71,7 +74,10 @@ func (s *Service) ListMusicArtistsSorted(options MusicListOptions) Page[MusicArt
 
 func (s *Service) ListMusicAlbumsSorted(options MusicListOptions) Page[MusicAlbum] {
 	s.mu.RLock()
-	items := append([]MusicAlbum(nil), s.musicAlbums...)
+	items := WithoutExploAlbums(s.musicAlbums)
+	if len(items) == len(s.musicAlbums) {
+		items = append([]MusicAlbum(nil), s.musicAlbums...)
+	}
 	var tracks []MusicTrack
 	if len(options.Playback.TrackStates) > 0 {
 		tracks = append([]MusicTrack(nil), s.musicTracks...)
@@ -88,7 +94,10 @@ func (s *Service) ListMusicAlbumsSorted(options MusicListOptions) Page[MusicAlbu
 
 func (s *Service) ListMusicTracksSorted(options MusicListOptions) Page[MusicTrack] {
 	s.mu.RLock()
-	items := append([]MusicTrack(nil), s.musicTracks...)
+	items := WithoutExploTracks(s.musicTracks)
+	if len(items) == len(s.musicTracks) {
+		items = append([]MusicTrack(nil), s.musicTracks...)
+	}
 	s.mu.RUnlock()
 
 	applyTrackPlaybackOverlay(items, options.Playback.TrackStates)

@@ -1,4 +1,4 @@
-.PHONY: setup bundle bundle-linux bundle-chromaprint bundle-chromaprint-all build build-linux build-bundled test install-dist clean release release-amd64 release-arm64
+.PHONY: setup bundle bundle-linux bundle-chromaprint bundle-chromaprint-all build build-linux build-bundled test test-db install-dist clean release release-amd64 release-arm64
 
 BINARY ?= samo-server
 DIST_DIR ?= dist
@@ -52,7 +52,24 @@ build-bundled: bundle-linux-all
 	GOOS=linux GOARCH=amd64 go build -tags bundled $(GOFLAGS) -o $(DIST_DIR)/$(BINARY) ./cmd/samo-server
 	@echo "Built linux/amd64 bundled binary (extracts tools into SAMO_DATA_DIR when bin/ is absent)"
 
-test:
+# Tests run against a real PostgreSQL: every test clones its own database from
+# a migrated template. test-db starts (or reuses) a disposable local container
+# on port 55432; it is skipped when SAMO_TEST_PG_DSN points somewhere else.
+test-db:
+	@if [ -n "$$SAMO_TEST_PG_DSN" ]; then \
+		echo "using SAMO_TEST_PG_DSN"; \
+	elif [ "$$(docker inspect -f '{{.State.Running}}' samo-test-pg 2>/dev/null)" = "true" ]; then \
+		echo "samo-test-pg already running"; \
+	else \
+		docker rm -f samo-test-pg >/dev/null 2>&1 || true; \
+		docker run -d --name samo-test-pg \
+			-e POSTGRES_USER=samo -e POSTGRES_PASSWORD=samo -e POSTGRES_DB=samo \
+			-p 55432:5432 postgres:16 >/dev/null; \
+		until docker exec samo-test-pg pg_isready -U samo -d samo >/dev/null 2>&1; do sleep 1; done; \
+		echo "started samo-test-pg on :55432"; \
+	fi
+
+test: test-db
 	go test ./...
 
 install-dist: build-linux

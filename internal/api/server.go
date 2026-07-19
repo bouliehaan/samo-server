@@ -247,6 +247,10 @@ func (s *Server) routes() {
 	s.handleAPI("PUT /api/v1/explo/config", s.updateExploConfig)
 	s.handleAPI("DELETE /api/v1/explo/config", s.clearExploConfig)
 	s.handleAPI("GET /api/v1/explo/directories", s.browseExploDirectories)
+	s.handleAPI("POST /api/v1/explo/reprocess", s.postExploReprocess)
+	// User-level (auth-only, no admin): the Explo tab's gate and its ledger.
+	s.handleAPI("GET /api/v1/explo/status", s.getExploStatus)
+	s.handleAPI("GET /api/v1/explo/tracks", s.getExploTracks)
 	s.handleAPI("POST /api/v1/lastfm/queue/flush", s.flushLastFMQueue)
 	s.handleAPI("GET /api/v1/lastfm/queue", s.listLastFMQueue)
 	s.handleAPI("GET /api/v1/lastfm/history", s.listLastFMHistory)

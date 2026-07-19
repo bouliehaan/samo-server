@@ -24,12 +24,22 @@ var (
 type AppConfig struct {
 	// Enabled reflects whether the pipeline would actually run with the
 	// current config (folder + key + fpcalc all present and not paused).
-	Enabled     bool       `json:"enabled"`
-	Folder      string     `json:"folder"`
-	HasAPIKey   bool       `json:"hasApiKey"`
-	FpcalcReady bool       `json:"fpcalcReady"`
-	Source      string     `json:"source,omitempty"` // "ui" | "environment"
-	UpdatedAt   *time.Time `json:"updatedAt,omitempty"`
+	Enabled bool `json:"enabled"`
+	// Configured is the broader gate the UI's Explo tab hangs off: a folder
+	// is set and the feature isn't paused, regardless of whether fpcalc/key
+	// are currently healthy. A server with 400 identified explo tracks that
+	// lost its fpcalc binary in a redeploy is configured-but-disabled — the
+	// tab (and the tracks in it) must not vanish; the tab shows
+	// DisabledReason as a banner instead.
+	Configured bool `json:"configured"`
+	// DisabledReason names the first missing prerequisite when Configured
+	// && !Enabled, empty otherwise.
+	DisabledReason string     `json:"disabledReason,omitempty"`
+	Folder         string     `json:"folder"`
+	HasAPIKey      bool       `json:"hasApiKey"`
+	FpcalcReady    bool       `json:"fpcalcReady"`
+	Source         string     `json:"source,omitempty"` // "ui" | "environment"
+	UpdatedAt      *time.Time `json:"updatedAt,omitempty"`
 }
 
 // AppConfigInput is the admin-supplied settings payload. An empty APIKey means
@@ -198,27 +208,37 @@ func (s *Service) Config(ctx context.Context) (AppConfig, error) {
 			folder = s.envDirs[0]
 		}
 		hasKey := record.APIKey != "" || s.envKey != ""
-		return AppConfig{
+		config := AppConfig{
 			Enabled:     record.Enabled && folder != "" && hasKey && fpcalcReady,
+			Configured:  record.Enabled && folder != "",
 			Folder:      folder,
 			HasAPIKey:   hasKey,
 			FpcalcReady: fpcalcReady,
 			Source:      "ui",
 			UpdatedAt:   &updatedAt,
-		}, nil
+		}
+		if config.Configured && !config.Enabled {
+			config.DisabledReason = s.DisabledReason(ctx)
+		}
+		return config, nil
 	}
 	folder := ""
 	if len(s.envDirs) > 0 {
 		folder = s.envDirs[0]
 	}
 	hasKey := s.envKey != ""
-	return AppConfig{
+	config := AppConfig{
 		Enabled:     folder != "" && hasKey && fpcalcReady,
+		Configured:  folder != "",
 		Folder:      folder,
 		HasAPIKey:   hasKey,
 		FpcalcReady: fpcalcReady,
 		Source:      "environment",
-	}, nil
+	}
+	if config.Configured && !config.Enabled {
+		config.DisabledReason = s.DisabledReason(ctx)
+	}
+	return config, nil
 }
 
 // SaveConfig persists an admin-chosen folder (and optionally an AcoustID key)

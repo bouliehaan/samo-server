@@ -21,10 +21,13 @@ func buildMusicIndex(seed catalog.Seed) musicIndex {
 	// Match catalog.Service.applySeed: search must see the same aggregated
 	// maxBitDepth/maxSampleRate/hiRes fields list endpoints expose.
 	catalog.EnrichAlbumAudioQuality(albums, tracks)
+	// The explo silo: explo content never surfaces in search. It remains
+	// reachable through the Explo tab and the Explore playlist, which
+	// resolve by ID, not through this index.
 	return musicIndex{
-		artists:   append([]catalog.MusicArtist(nil), seed.MusicArtists...),
-		albums:    albums,
-		tracks:    tracks,
+		artists:   catalog.WithoutExploArtists(append([]catalog.MusicArtist(nil), seed.MusicArtists...)),
+		albums:    catalog.WithoutExploAlbums(albums),
+		tracks:    catalog.WithoutExploTracks(tracks),
 		playlists: append([]catalog.MusicPlaylist(nil), seed.MusicPlaylists...),
 	}
 }

@@ -6,20 +6,12 @@ import (
 	"testing"
 
 	"github.com/bouliehaan/samo-server/internal/catalog"
-	"github.com/bouliehaan/samo-server/internal/storage"
-	"github.com/bouliehaan/samo-server/migrations"
+	"github.com/bouliehaan/samo-server/internal/storage/storagetest"
 )
 
 func TestMetadataApplyPreviewMergesAudiobookTitle(t *testing.T) {
 	ctx := context.Background()
-	db, err := storage.Open(ctx, t.TempDir()+"/samo.db")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer db.Close()
-	if err := storage.ApplyMigrations(ctx, db, migrations.Files); err != nil {
-		t.Fatal(err)
-	}
+	db := storagetest.Open(t)
 
 	itemID := "item-1"
 	if _, err := db.ExecContext(ctx, `
@@ -58,14 +50,7 @@ func TestMetadataApplyPreviewMergesAudiobookTitle(t *testing.T) {
 
 func TestMetadataApplyWritesMusicArtistName(t *testing.T) {
 	ctx := context.Background()
-	db, err := storage.Open(ctx, t.TempDir()+"/samo.db")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer db.Close()
-	if err := storage.ApplyMigrations(ctx, db, migrations.Files); err != nil {
-		t.Fatal(err)
-	}
+	db := storagetest.Open(t)
 
 	artistID := "artist-1"
 	if _, err := db.ExecContext(ctx, `
@@ -124,14 +109,7 @@ func TestMetadataApplyWritesMusicArtistName(t *testing.T) {
 
 func TestMetadataApplyPodcastFeedUpdatesCatalogProjection(t *testing.T) {
 	ctx := context.Background()
-	db, err := storage.Open(ctx, t.TempDir()+"/samo.db")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer db.Close()
-	if err := storage.ApplyMigrations(ctx, db, migrations.Files); err != nil {
-		t.Fatal(err)
-	}
+	db := storagetest.Open(t)
 
 	if _, err := db.ExecContext(ctx, `
 		INSERT INTO libraries (id, name, kind, path)

@@ -2,6 +2,7 @@ package explo
 
 import (
 	"context"
+	"fmt"
 	"path/filepath"
 	"regexp"
 	"strings"
@@ -36,11 +37,11 @@ var trackNumberPrefix = regexp.MustCompile(`^\d{1,3}[\s.\-_]+`)
 //
 // Returns ok=false (no error) when nothing passed the duration gate -
 // callers should record that as "unmatched", not retry.
-func (s *Service) identifyByTextSearch(ctx context.Context, path string, knownDurationSeconds int) (identifiedTrack, bool, error) {
+func (s *Service) identifyByTextSearch(ctx context.Context, path, tagTitle, tagArtist string, knownDurationSeconds int) (identifiedTrack, bool, error) {
 	if s.metadata == nil || knownDurationSeconds <= 0 {
 		return identifiedTrack{}, false, nil
 	}
-	title, artist := parseFilenameSearchQuery(path)
+	title, artist := textSearchSeed(path, tagTitle, tagArtist)
 	if title == "" {
 		return identifiedTrack{}, false, nil
 	}
@@ -56,9 +57,29 @@ func (s *Service) identifyByTextSearch(ctx context.Context, path string, knownDu
 	if err != nil {
 		return identifiedTrack{}, false, err
 	}
+	// Per-provider failures do NOT surface through err — the aggregator
+	// collects them in ProviderErrors and returns an empty result set. Left
+	// unchecked, an outage (or a rejected User-Agent) reads exactly like
+	// "song not found": the track gets recorded as terminal 'unmatched'
+	// instead of a retriable 'error', and the whole fallback path can be
+	// broken for weeks without a single log line saying so.
+	if len(response.Results) == 0 && len(response.ProviderErrors) > 0 {
+		messages := make([]string, 0, len(response.ProviderErrors))
+		for _, providerError := range response.ProviderErrors {
+			messages = append(messages, providerError.Provider+": "+providerError.Error)
+		}
+		return identifiedTrack{}, false, fmt.Errorf("metadata search failed: %s", strings.Join(messages, "; "))
+	}
 
-	// Results already come back sorted by provider score descending, so the
-	// first one to pass the duration gate is the best available candidate.
+	// Results come back sorted by provider score descending. Among the ones
+	// that pass the duration gate, prefer a candidate whose release is
+	// UNDERIVED (not a Compilation/Live/Remix group): a classic hit has many
+	// duplicate MusicBrainz recordings, and the top-scored one is often a
+	// duplicate that exists only on disco samplers — matching that one hands
+	// the track a sampler album and sampler artwork. Fall back to the first
+	// duration-passing candidate when no clean-release candidate exists.
+	var fallbackMatch identifiedTrack
+	fallbackFound := false
 	for _, result := range response.Results {
 		resultTitle := strings.TrimSpace(result.Title)
 		if resultTitle == "" || result.DurationSeconds <= 0 {
@@ -82,15 +103,31 @@ func (s *Service) identifyByTextSearch(ctx context.Context, path string, knownDu
 			Source:                 "musicbrainz-search",
 			Score:                  float64(result.Score),
 			MusicBrainzRecordingID: result.ExternalIDs.MusicBrainzRecordingID,
-			Title:                  resultTitle,
-			Artist:                 resultArtist,
+			// The recording search reports the release group too; carrying it
+			// lets the cover engine build a Cover Art Archive URL for
+			// fallback-matched tracks, which previously could never get a
+			// cover at all on this path.
+			MusicBrainzReleaseGroupID: result.ExternalIDs.MusicBrainzReleaseGroupID,
+			Title:                     resultTitle,
+			Artist:                    resultArtist,
 		}
-		if releaseTitle, ok := result.Raw["releaseTitle"].(string); ok {
+		derived, _ := result.Raw["releaseIsDerived"].(bool)
+		if releaseTitle, ok := result.Raw["releaseTitle"].(string); ok && !derived {
+			// A derived release's title is a sampler's name, not this
+			// track's album — leave the album title alone in that case
+			// (the scanner's tag, when present, is better than "Ultimate
+			// Disco Vol. 7").
 			match.Album = strings.TrimSpace(releaseTitle)
 		}
-		return match, true, nil
+		if !derived {
+			return match, true, nil
+		}
+		if !fallbackFound {
+			fallbackMatch = match
+			fallbackFound = true
+		}
 	}
-	return identifiedTrack{}, false, nil
+	return fallbackMatch, fallbackFound, nil
 }
 
 // withinDurationTolerance is the actual identity check for the fallback
@@ -107,6 +144,55 @@ func withinDurationTolerance(candidateSeconds, knownSeconds int) bool {
 		diff = -diff
 	}
 	return diff <= tolerance
+}
+
+// featSuffix matches a trailing "feat./ft./featuring/with X" credit —
+// MusicBrainz's canonical recording title omits guest artists, so searching
+// the decorated form ("Song feat. Y") returns nothing.
+var featSuffix = regexp.MustCompile(`(?i)\s*[(\[]?\s*(feat\.?|ft\.?|featuring|w/)\s+.*$`)
+
+// trailingBracket matches ONE trailing "(...)" or "[...]" — "(single version)",
+// "[Remix]", `(original 12")` — again, title noise the canonical record lacks.
+var trailingBracket = regexp.MustCompile(`\s*[(\[][^()\[\]]*[)\]]\s*$`)
+
+// normalizeSearchTitle strips guest credits and trailing bracketed qualifiers
+// so a decorated title matches MusicBrainz's canonical form. It only shapes the
+// SEARCH SEED — the duration gate and derived-release filter still decide
+// whether any result is accepted, so an over-eager strip can only ever cost a
+// match, never manufacture a wrong one.
+func normalizeSearchTitle(title string) string {
+	title = strings.TrimSpace(title)
+	if title == "" {
+		return ""
+	}
+	// Each strip is guarded so it can never reduce the title to nothing — a
+	// title that is entirely a "feat." credit or a lone "(Reprise)" keeps its
+	// original form rather than becoming an empty query.
+	if stripped := strings.TrimSpace(featSuffix.ReplaceAllString(title, "")); stripped != "" {
+		title = stripped
+	}
+	for {
+		stripped := strings.TrimSpace(trailingBracket.ReplaceAllString(title, ""))
+		if stripped == "" || stripped == title {
+			break
+		}
+		title = stripped
+	}
+	return title
+}
+
+// textSearchSeed picks the cleanest (title, artist) to seed the fallback
+// search. The scanner's parsed tags win when present — it already split the
+// file into clean title/artist fields, whereas re-parsing the filename folds
+// the album into the title. A genuinely tag-less drop falls back to the
+// filename. The title is normalized either way (guest credits / bracketed
+// qualifiers stripped).
+func textSearchSeed(path, tagTitle, tagArtist string) (title, artist string) {
+	if t := normalizeSearchTitle(tagTitle); t != "" {
+		return t, strings.TrimSpace(tagArtist)
+	}
+	fnTitle, fnArtist := parseFilenameSearchQuery(path)
+	return normalizeSearchTitle(fnTitle), fnArtist
 }
 
 // parseFilenameSearchQuery turns "02 - Some Artist - Track Title.mp3" (or
@@ -134,27 +220,36 @@ func parseFilenameSearchQuery(path string) (title, artist string) {
 	return base, ""
 }
 
-type musicbrainzThrottle struct {
+// requestPacer enforces a minimum interval between calls to one external
+// API. One instance per API (MusicBrainz, iTunes, Deezer). NOTE: like the
+// AcoustID throttle, it drops its lock while sleeping, so it paces exactly
+// one serial caller — which is what the explo pipeline is. If a worker pool
+// is ever introduced, this must become a real token bucket first.
+type requestPacer struct {
 	mu   sync.Mutex
 	last time.Time
 }
 
-// throttleMusicBrainz blocks until musicbrainzMinInterval has passed since
-// the last fallback search call, so a large backfill batch can't hammer the
-// (rate-limited, free) MusicBrainz search API.
-func (s *Service) throttleMusicBrainz(ctx context.Context) {
-	s.mbThrottle.mu.Lock()
-	wait := musicbrainzMinInterval - time.Since(s.mbThrottle.last)
+func (p *requestPacer) wait(ctx context.Context, minInterval time.Duration) {
+	p.mu.Lock()
+	wait := minInterval - time.Since(p.last)
 	if wait > 0 {
-		s.mbThrottle.mu.Unlock()
+		p.mu.Unlock()
 		timer := time.NewTimer(wait)
 		defer timer.Stop()
 		select {
 		case <-ctx.Done():
 		case <-timer.C:
 		}
-		s.mbThrottle.mu.Lock()
+		p.mu.Lock()
 	}
-	s.mbThrottle.last = time.Now()
-	s.mbThrottle.mu.Unlock()
+	p.last = time.Now()
+	p.mu.Unlock()
+}
+
+// throttleMusicBrainz blocks until musicbrainzMinInterval has passed since
+// the last MusicBrainz call (fallback search or cover release lookup), so a
+// large batch can't hammer the rate-limited, free API.
+func (s *Service) throttleMusicBrainz(ctx context.Context) {
+	s.mbPacer.wait(ctx, musicbrainzMinInterval)
 }

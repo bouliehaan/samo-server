@@ -171,7 +171,7 @@ func normalizeTags(input map[string]string) catalog.Tags {
 	tags := catalog.Tags{}
 	for key, value := range input {
 		key = normalizeTagKey(key)
-		value = strings.TrimSpace(value)
+		value = strings.TrimSpace(strings.ReplaceAll(value, "\x00", ""))
 		if key == "" || value == "" {
 			continue
 		}

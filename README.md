@@ -11,7 +11,7 @@ Samo Server is a native media server built around unified listening history, pla
 V0 focuses on:
 
 - running as a small Ubuntu-friendly Go server
-- SQLite-backed metadata storage
+- PostgreSQL-backed metadata storage
 - running a deterministic 24/7 radio station from local media
 - adding local library folders
 - adding podcast RSS feeds
@@ -45,7 +45,28 @@ Last.fm scrobbling is configured with `SAMO_LASTFM_API_KEY` and `SAMO_LASTFM_SHA
 
 ## Storage and scanning
 
-Samo stores catalog metadata in SQLite and scans configured music, audiobook, and podcast folders using bundled `ffmpeg`/`ffprobe` on Ubuntu. See [docs/install-ubuntu.md](docs/install-ubuntu.md) for deployment layout and [docs/storage-and-scanning.md](docs/storage-and-scanning.md) for scanner environment variables.
+Samo stores catalog metadata in **PostgreSQL**, pointed at with `SAMO_DB_DSN=postgres://...` (the bundled `docker compose` sets this up for you). It scans configured music, audiobook, and podcast folders using bundled `ffmpeg`/`ffprobe` on Ubuntu. See [docs/install-ubuntu.md](docs/install-ubuntu.md) for deployment layout and [docs/storage-and-scanning.md](docs/storage-and-scanning.md) for scanner environment variables.
+
+Schema changes are plain SQL files in `migrations/postgres/`, applied automatically at startup; add a new numbered file, never edit an old one.
+
+## Running with Docker + Postgres
+
+The whole stack — server plus Postgres — runs in two containers on a Linux host. `./install.sh` opens the firewall ports and boots everything:
+
+```bash
+sudo ./install.sh
+# open http://<this machine's LAN IP>:6969
+```
+
+The server runs with Docker **host networking**, so it listens on the host directly — HTTP on `6969/tcp` and UDP autodiscovery on `7360/udp`. That is what makes discovery work: LAN broadcasts (`"Who is SamoServer?"`) reach the listener and it replies with the host's real LAN IP. Docker's default bridge can't do this — it drops LAN broadcasts and would advertise an unreachable container-internal address. Postgres stays in its own container, published only on `127.0.0.1`, never exposed to the LAN.
+
+Because host networking means your firewall now applies to those ports (bridge used to bypass it), `install.sh` runs `ufw`/`firewalld allow` for `6969/tcp` and `7360/udp`. A blocked `7360/udp` is the most common reason discovery goes silent. Prefer to do it by hand? Copy `.env.example` to `.env`, allow those two ports, and `docker compose up -d --build`.
+
+Still on an old SQLite install? Samo is Postgres-only now — migrate first using a pre-removal build's `migrate-postgres` command (it copies every row and verifies counts), then upgrade. See **[MIGRATING-TO-POSTGRES.md](MIGRATING-TO-POSTGRES.md)**.
+
+### Running the tests
+
+Tests run against a real PostgreSQL (each test gets its own database cloned from a migrated template). `make test` starts a disposable container on port 55432 and runs the suite; point `SAMO_TEST_PG_DSN` at your own server to skip the container.
 
 ## Philosophy
 

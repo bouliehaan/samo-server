@@ -1,9 +1,111 @@
 package catalog
 
 import (
+	"fmt"
 	"os"
 	"testing"
 )
+
+// TestMusicPlaylistCoverImagesGridsFromPerTrackArt is the server half of the
+// explo artwork fix. Untagged drops share ONE folder-derived album, so an
+// album-wide cover made every playlist entry (and the tile) show the same
+// image. Once each drop carries its OWN cover on the TRACK, a playlist of
+// distinct drops must yield 4 distinct covers — the 2x2 grid input, and the
+// per-row art every client resolves from track.images.
+func TestMusicPlaylistCoverImagesGridsFromPerTrackArt(t *testing.T) {
+	tracks := make([]MusicTrack, 4)
+	for i := range tracks {
+		tracks[i] = MusicTrack{
+			ID:      fmt.Sprintf("track-%d", i),
+			AlbumID: "album-lump", // all in the one folder-derived album...
+			// ...but each drop carries its OWN cover on the track.
+			Images: []Image{{ID: fmt.Sprintf("cover_%d", i), Path: writeTestImageFile(t, fmt.Sprintf("c%d.jpg", i))}},
+		}
+	}
+	service := NewService(Seed{
+		MusicPlaylists: []MusicPlaylist{{
+			ID:       "pl-1",
+			Name:     "Explore",
+			TrackIDs: []string{"track-0", "track-1", "track-2", "track-3"},
+		}},
+		MusicAlbums: []MusicAlbum{{ID: "album-lump", Title: "Weekly-Exploration"}},
+		MusicTracks: tracks,
+	})
+
+	images := service.MusicPlaylistCoverImages("pl-1")
+	if len(images) != 4 {
+		t.Fatalf("MusicPlaylistCoverImages = %d images, want 4 (2x2 grid input): %#v", len(images), images)
+	}
+	distinct := map[string]bool{}
+	for _, img := range images {
+		distinct[img.ID] = true
+	}
+	if len(distinct) != 4 {
+		t.Fatalf("playlist auto-cover has %d distinct covers, want 4: %#v", len(distinct), images)
+	}
+}
+
+// TestMusicPlaylistCoverImagesResolvesStalePathViaID is the decisive prod
+// repro: explo drops share ONE lump album; each track carries its own cover
+// override, but the stored local PATH may not exist at enrichment time (rotated
+// cover-store entry, container path mismatch). resolvedImagesLocked's strict
+// os.Stat then DROPS the image — even though its ID still resolves via the media
+// endpoint exactly as the client renders it — so every track collapses onto the
+// lump-album cover and the tile shows one cover on both platforms.
+func TestMusicPlaylistCoverImagesResolvesStalePathViaID(t *testing.T) {
+	tracks := make([]MusicTrack, 4)
+	for i := range tracks {
+		tracks[i] = MusicTrack{
+			ID:      fmt.Sprintf("track-%d", i),
+			AlbumID: "album-lump",
+			Images:  []Image{{ID: fmt.Sprintf("cover_%d", i), Path: fmt.Sprintf("/nonexistent/cover_%d.jpg", i)}},
+		}
+	}
+	service := NewService(Seed{
+		MusicPlaylists: []MusicPlaylist{{
+			ID:       "pl-1",
+			Name:     "Explore",
+			TrackIDs: []string{"track-0", "track-1", "track-2", "track-3"},
+		}},
+		MusicAlbums: []MusicAlbum{{ID: "album-lump", Title: "Weekly-Exploration"}},
+		MusicTracks: tracks,
+	})
+
+	images := service.MusicPlaylistCoverImages("pl-1")
+	distinct := map[string]bool{}
+	for _, im := range images {
+		distinct[im.ID] = true
+	}
+	if len(distinct) < 2 {
+		t.Fatalf("stale-path covers collapsed to %d distinct — the strict os.Stat drop is the tile bug: %#v", len(distinct), images)
+	}
+}
+
+// TestMusicPlaylistCoverImagesLumpedAlbumIsSingleCover pins the bug the
+// per-track fix corrects: with no track art and one shared album cover, the
+// playlist auto-cover collapses to a SINGLE image — which every row then borrows
+// (the "all explo tracks show the same cover" report).
+func TestMusicPlaylistCoverImagesLumpedAlbumIsSingleCover(t *testing.T) {
+	albumPath := writeTestImageFile(t, "album.jpg")
+	tracks := make([]MusicTrack, 4)
+	for i := range tracks {
+		tracks[i] = MusicTrack{ID: fmt.Sprintf("track-%d", i), AlbumID: "album-lump"}
+	}
+	service := NewService(Seed{
+		MusicPlaylists: []MusicPlaylist{{
+			ID:       "pl-1",
+			Name:     "Explore",
+			TrackIDs: []string{"track-0", "track-1", "track-2", "track-3"},
+		}},
+		MusicAlbums: []MusicAlbum{{ID: "album-lump", Images: []Image{{ID: "cover_album", Path: albumPath}}}},
+		MusicTracks: tracks,
+	})
+
+	images := service.MusicPlaylistCoverImages("pl-1")
+	if len(images) != 1 {
+		t.Fatalf("lumped-album playlist auto-cover = %d images, want 1 (the single-cover bug): %#v", len(images), images)
+	}
+}
 
 func TestImageByIDReturnsAlbumCover(t *testing.T) {
 	service := NewService(Seed{

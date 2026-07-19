@@ -13,10 +13,14 @@ internal/toolchain/assets/
 
 # ===== Logs =====
 *.log
+/logs/
 .cache/
 *.tar.xz
-samo-server
+# Anchored to repo root so it ignores the built binary, NOT the cmd/samo-server/
+# source directory (a bare `samo-server` pattern matched that directory and hid
+# its source files from git).
+/samo-server
 data/*.db
 data/*.db-*
-samo-server-local
+/samo-server-local
 /quarantine/

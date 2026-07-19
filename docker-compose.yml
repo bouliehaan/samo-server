@@ -1,0 +1,80 @@
+# Samo server + Postgres, in two containers. Linux host.
+#
+#   1. ./install.sh            # opens the firewall ports and boots the stack
+#   2. Open http://<this machine's LAN IP>:6969
+#
+# The server runs with network_mode: host so it shares the host's network
+# stack. That is what makes UDP autodiscovery work: the discovery listener on
+# udp/7360 receives LAN broadcasts ("Who is SamoServer?") directly, and replies
+# with the host's real LAN IP. Docker's default bridge can't do this — it drops
+# LAN broadcasts and would advertise an unreachable container-internal address.
+#
+# Postgres stays in its own container, published only on 127.0.0.1 so it is
+# reachable by the server over loopback but never exposed to the LAN.
+
+services:
+  db:
+    image: postgres:16
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: samo
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-changeme}
+      POSTGRES_DB: samo
+    # Loopback only: the host-networked server reaches this at 127.0.0.1:5432,
+    # but it is never bound to the LAN interface.
+    ports:
+      - "127.0.0.1:5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      # The server waits for this before starting, so it never races an
+      # unready database on boot.
+      test: ["CMD-SHELL", "pg_isready -U samo -d samo"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+
+  server:
+    build: .
+    # Or, once you publish an image for installing on other machines:
+    # image: ghcr.io/bouliehaan/samo-server:latest
+    restart: unless-stopped
+    # Share the host's network stack: HTTP on :6969 and UDP autodiscovery on
+    # :7360 bind directly to the host, so LAN broadcasts reach the server and it
+    # advertises a reachable address. No `ports:` mapping is used or needed here.
+    network_mode: host
+    depends_on:
+      db:
+        condition: service_healthy
+    env_file: .env
+    environment:
+      # Host networking means "the database" is on loopback, not a `db` DNS name.
+      SAMO_DB_DSN: postgres://samo:${POSTGRES_PASSWORD:-changeme}@127.0.0.1:5432/samo?sslmode=disable
+      SAMO_DATA_DIR: /data
+    volumes:
+      # Samo's own state: radio.json, extracted covers, podcast cache. A plain
+      # host folder so you can see and back up your files.
+      - ./data:/data
+      # Your media, mounted at the SAME path it has on the host so the absolute
+      # paths already stored in the database keep resolving inside the container.
+      # SAMO_MEDIA_HOST_DIR must be an ABSOLUTE path (e.g. /mnt/media); point the
+      # SAMO_*_DIRS at subfolders of it.
+      - ${SAMO_MEDIA_HOST_DIR:-/mnt/media}:${SAMO_MEDIA_HOST_DIR:-/mnt/media}:ro
+
+networks:
+  # Pin the db network to a fixed subnet. Compose otherwise auto-assigns the next
+  # free /16 from Docker's pool, which drifts as other stacks come and go. That
+  # matters here because the host runs a ProtonVPN kill-switch (ufw default deny
+  # outgoing) that only permits outbound to specific 172.x subnets. When the
+  # server (host networking) dials 127.0.0.1:5432, Docker DNATs it to db's real
+  # bridge IP; if that subnet has drifted off the ufw allow-list, the packets are
+  # silently DROPPED and the server logs "connect to postgres: ... timeout".
+  # Pinning keeps db on an always-allowed subnet. Matching firewall rule:
+  #   sudo ufw allow out to 172.22.0.0/16
+  default:
+    ipam:
+      config:
+        - subnet: 172.22.0.0/16
+
+volumes:
+  pgdata:

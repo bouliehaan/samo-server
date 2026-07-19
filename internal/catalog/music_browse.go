@@ -87,6 +87,15 @@ func (s *Service) musicBrowse(
 	if filterPrivatePlaylists {
 		snapshot.playlists = visibleMusicBrowsePlaylists(snapshot.playlists, playlistUserID)
 	}
+	// The explo silo: every browse view works on the explo-free snapshot.
+	// This matters most for Unplayed and Discovery, which select never-played
+	// tracks sorted newest-first — precisely the population a fresh explo
+	// drop is — so without this they didn't just leak explo, they were
+	// dominated by it. (Recently Added additionally checks the album-level
+	// flag below, which is now redundant but harmless.)
+	snapshot.artists = WithoutExploArtists(snapshot.artists)
+	snapshot.albums = WithoutExploAlbums(snapshot.albums)
+	snapshot.tracks = WithoutExploTracks(snapshot.tracks)
 	var matches musicBrowseSnapshot
 	switch view {
 	case MusicBrowseFavorites:

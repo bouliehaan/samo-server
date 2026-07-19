@@ -43,7 +43,7 @@ Search results are candidates only until a client explicitly applies them.
 
 1. `GET /api/v1/metadata/search` — find candidates.
 2. `POST /api/v1/metadata/apply/preview` — show `before`, merged `after`, plus `appliedFields` / `skippedFields` for the requested field list.
-3. `POST /api/v1/metadata/apply` — write selected fields to SQLite and refresh the in-memory catalog.
+3. `POST /api/v1/metadata/apply` — write selected fields to the database and refresh the in-memory catalog.
 
 Apply targets:
 

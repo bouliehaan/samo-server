@@ -11,9 +11,8 @@ import (
 	"github.com/bouliehaan/samo-server/internal/files"
 	"github.com/bouliehaan/samo-server/internal/podcastcache"
 	"github.com/bouliehaan/samo-server/internal/podcaststream"
-	"github.com/bouliehaan/samo-server/internal/storage"
+	"github.com/bouliehaan/samo-server/internal/storage/storagetest"
 	"github.com/bouliehaan/samo-server/internal/users"
-	"github.com/bouliehaan/samo-server/migrations"
 )
 
 func TestCachePodcastEpisodeDownloadsEnclosure(t *testing.T) {
@@ -25,14 +24,7 @@ func TestCachePodcastEpisodeDownloadsEnclosure(t *testing.T) {
 	defer upstream.Close()
 
 	root := t.TempDir()
-	db, err := storage.Open(ctx, filepath.Join(root, "samo.db"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer db.Close()
-	if err := storage.ApplyMigrations(ctx, db, migrations.Files); err != nil {
-		t.Fatal(err)
-	}
+	db := storagetest.Open(t)
 	if _, err := db.ExecContext(ctx, `
 		INSERT INTO libraries (id, name, kind, path)
 		VALUES ('lib-1', 'Podcasts', 'podcast', 'samo://podcast-feeds')`); err != nil {

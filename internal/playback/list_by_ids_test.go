@@ -3,20 +3,12 @@ package playback
 import (
 	"testing"
 
-	"github.com/bouliehaan/samo-server/internal/storage"
-	"github.com/bouliehaan/samo-server/migrations"
+	"github.com/bouliehaan/samo-server/internal/storage/storagetest"
 )
 
 func TestListForUserByIDsReturnsOnlyRequestedRows(t *testing.T) {
 	ctx := t.Context()
-	db, err := storage.Open(ctx, t.TempDir()+"/samo.db")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer db.Close()
-	if err := storage.ApplyMigrations(ctx, db, migrations.Files); err != nil {
-		t.Fatal(err)
-	}
+	db := storagetest.Open(t)
 	if _, err := db.ExecContext(ctx, `
 		INSERT INTO users (id, username, display_name, role, password_hash)
 		VALUES ('user-1', 'listener', 'Listener', 'user', '')`); err != nil {

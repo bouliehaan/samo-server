@@ -86,6 +86,42 @@ func (s *Server) updateExploConfig(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, config)
 }
 
+// postExploReprocess is the admin "re-scan / retry" action: it resets stranded
+// identifications (so tracks retired by the attempt ceiling — e.g. during the
+// AcoustID outage — re-run) and every track's cover state (so the per-track
+// cover engine re-resolves art), then kicks the slow identify + cover passes in
+// the background. The synchronous reset counts are returned immediately.
+func (s *Server) postExploReprocess(w http.ResponseWriter, r *http.Request) {
+	if _, ok := s.requireAdmin(w, r); !ok {
+		return
+	}
+	service, ok := s.requireExploService(w)
+	if !ok {
+		return
+	}
+	result, err := service.Reprocess(r.Context())
+	if err != nil {
+		writeExploError(w, err)
+		return
+	}
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Minute)
+		defer cancel()
+		if service.Enabled() {
+			if _, err := service.ProcessNewTracks(ctx); err != nil {
+				log.Printf("explo: process after reprocess failed: %v", err)
+			}
+		}
+		if err := service.BackfillCovers(ctx); err != nil {
+			log.Printf("explo: cover backfill after reprocess failed: %v", err)
+		}
+	}()
+	writeJSON(w, http.StatusOK, map[string]any{
+		"identificationReset": result.IdentificationReset,
+		"coversReset":         result.CoversReset,
+	})
+}
+
 // browseExploDirectories lets the admin folder-picker walk the server
 // filesystem. It reuses the setup wizard's browseDirectories logic but is
 // registered via handleAPI (so requireUser injects the principal into the
@@ -128,6 +164,81 @@ func (s *Server) clearExploConfig(w http.ResponseWriter, r *http.Request) {
 		}
 	}()
 	writeJSON(w, http.StatusOK, config)
+}
+
+// getExploStatus is the user-level gate for the web UI's Explo tab: unlike
+// every other explo endpoint it is NOT admin-only (any signed-in user may see
+// their explo queue), and unlike GET /explo/config it exposes only the
+// feature-visibility facts — no folder path, no key presence.
+func (s *Server) getExploStatus(w http.ResponseWriter, r *http.Request) {
+	service := s.exploService()
+	if service == nil {
+		writeJSON(w, http.StatusOK, map[string]any{"configured": false, "enabled": false})
+		return
+	}
+	config, err := service.Config(r.Context())
+	if err != nil {
+		writeExploError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"configured":     config.Configured,
+		"enabled":        config.Enabled,
+		"disabledReason": config.DisabledReason,
+	})
+}
+
+// exploLedgerTrack is a ledger row decorated with current display fields from
+// the catalog projection (override-aware, so matched titles show as applied).
+type exploLedgerTrack struct {
+	explo.LedgerRow
+	Title      string `json:"title"`
+	Artist     string `json:"artist,omitempty"`
+	AlbumTitle string `json:"albumTitle,omitempty"`
+}
+
+// getExploTracks lists the explo pipeline ledger for the Explo tab. User-
+// level on purpose: the Explore playlist already exposes this membership to
+// every user; this adds the pipeline status columns.
+func (s *Server) getExploTracks(w http.ResponseWriter, r *http.Request) {
+	service, ok := s.requireExploService(w)
+	if !ok {
+		return
+	}
+	config, err := service.Config(r.Context())
+	if err != nil {
+		writeExploError(w, err)
+		return
+	}
+	snapshot, err := service.Ledger(r.Context(), 1000)
+	if err != nil {
+		writeExploError(w, err)
+		return
+	}
+	tracks := make([]exploLedgerTrack, 0, len(snapshot.Tracks))
+	for _, row := range snapshot.Tracks {
+		decorated := exploLedgerTrack{LedgerRow: row, Title: row.MatchedTitle, Artist: row.MatchedArtist}
+		if item, err := s.catalog.MusicTrack(row.TrackID); err == nil {
+			decorated.Title = item.Title
+			decorated.Artist = item.DisplayArtist
+			decorated.AlbumTitle = item.AlbumTitle
+			if item.AlbumID != "" {
+				decorated.AlbumID = item.AlbumID
+			}
+		}
+		if decorated.AlbumTitle == "" && decorated.AlbumID != "" {
+			if album, err := s.catalog.MusicAlbum(decorated.AlbumID); err == nil {
+				decorated.AlbumTitle = album.Title
+			}
+		}
+		tracks = append(tracks, decorated)
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"configured": config.Configured,
+		"enabled":    config.Enabled,
+		"summary":    snapshot.Summary,
+		"tracks":     tracks,
+	})
 }
 
 // validateExploFolder rejects a chosen folder before it's persisted so the

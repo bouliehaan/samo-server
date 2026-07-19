@@ -18,6 +18,11 @@ Environment=SAMO_DATA_DIR=/var/lib/samo
 Environment=SAMO_ADDR=:6969
 Environment=SAMO_SCAN_ON_START=false
 
+# REQUIRED: the PostgreSQL connection string, e.g.
+#   SAMO_DB_DSN=postgres://samo:password@localhost:5432/samo?sslmode=disable
+# Put it (and any other secrets) in /etc/samo-server.env, mode 0600.
+EnvironmentFile=-/etc/samo-server.env
+
 # Light hardening. The operator can tighten this with a drop-in if their
 # media folders aren't under common locations like /srv, /mnt, /media.
 NoNewPrivileges=true

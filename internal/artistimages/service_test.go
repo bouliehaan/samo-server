@@ -14,8 +14,7 @@ import (
 	"github.com/bouliehaan/samo-server/internal/catalog"
 	"github.com/bouliehaan/samo-server/internal/covers"
 	"github.com/bouliehaan/samo-server/internal/lastfm"
-	"github.com/bouliehaan/samo-server/internal/storage"
-	"github.com/bouliehaan/samo-server/migrations"
+	"github.com/bouliehaan/samo-server/internal/storage/storagetest"
 )
 
 type patchSpy struct {
@@ -28,15 +27,7 @@ func (p *patchSpy) SetMusicArtistImages(string, []catalog.Image) {
 
 func openTestDB(t *testing.T) *sql.DB {
 	t.Helper()
-	ctx := context.Background()
-	db, err := storage.Open(ctx, filepath.Join(t.TempDir(), "test.db"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := storage.ApplyMigrations(ctx, db, migrations.Files); err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = db.Close() })
+	db := storagetest.Open(t)
 	return db
 }
 

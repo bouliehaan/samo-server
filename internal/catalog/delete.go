@@ -9,9 +9,18 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+
+	"github.com/bouliehaan/samo-server/internal/storage"
 )
 
 var ErrRemoteItem = errors.New("remote items must be removed via feed delete")
+
+// deleteAttempts caps how many times a delete transaction re-runs when it
+// deadlocks or serialization-fails against a concurrent scan / explo write.
+// Deletes touch many rows across many tables (and refresh aggregate stats), so
+// they are a prime deadlock partner for the scanner; retrying keeps a user's
+// delete from surfacing a transient Postgres error.
+const deleteAttempts = 5
 
 type DeleteOptions struct {
 	DeleteFiles bool
@@ -49,49 +58,42 @@ func DeleteMusicAlbum(ctx context.Context, db *sql.DB, albumID string, opts Dele
 		return DeleteResult{}, err
 	}
 
-	tx, err := db.BeginTx(ctx, nil)
-	if err != nil {
-		return DeleteResult{}, err
-	}
-	defer tx.Rollback()
-
-	if err := deleteUserPlaybackTargets(ctx, tx, OverrideKindMusicAlbum, albumID); err != nil {
-		return DeleteResult{}, err
-	}
-	if err := deleteUserPlaybackTargets(ctx, tx, OverrideKindMusicTrack, trackIDs...); err != nil {
-		return DeleteResult{}, err
-	}
-	if err := deleteMetadataOverrides(ctx, tx, OverrideKindMusicAlbum, albumID); err != nil {
-		return DeleteResult{}, err
-	}
-	if err := deleteMetadataOverrides(ctx, tx, OverrideKindMusicTrack, trackIDs...); err != nil {
-		return DeleteResult{}, err
-	}
-	if err := removeTracksFromPlaylists(ctx, tx, trackIDs); err != nil {
-		return DeleteResult{}, err
-	}
-	if err := deleteRadioItemsForSources(ctx, tx, "music-track", trackIDs...); err != nil {
-		return DeleteResult{}, err
-	}
-	if len(trackIDs) > 0 {
-		query, args := inClause(`DELETE FROM media_files WHERE track_id IN (`, trackIDs)
-		if _, err := tx.ExecContext(ctx, query, args...); err != nil {
-			return DeleteResult{}, fmt.Errorf("delete album media files: %w", err)
+	if err := storage.WithRetryTx(ctx, db, deleteAttempts, func(tx *sql.Tx) error {
+		if err := deleteUserPlaybackTargets(ctx, tx, OverrideKindMusicAlbum, albumID); err != nil {
+			return err
 		}
-		if _, err := tx.ExecContext(ctx, `DELETE FROM music_tracks WHERE album_id = ?`, albumID); err != nil {
-			return DeleteResult{}, fmt.Errorf("delete album tracks: %w", err)
+		if err := deleteUserPlaybackTargets(ctx, tx, OverrideKindMusicTrack, trackIDs...); err != nil {
+			return err
 		}
-	}
-	if _, err := tx.ExecContext(ctx, `DELETE FROM music_albums WHERE id = ?`, albumID); err != nil {
-		return DeleteResult{}, fmt.Errorf("delete album: %w", err)
-	}
-	if err := pruneOrphanMusic(ctx, tx); err != nil {
-		return DeleteResult{}, err
-	}
-	if err := refreshAggregateStats(ctx, tx); err != nil {
-		return DeleteResult{}, err
-	}
-	if err := tx.Commit(); err != nil {
+		if err := deleteMetadataOverrides(ctx, tx, OverrideKindMusicAlbum, albumID); err != nil {
+			return err
+		}
+		if err := deleteMetadataOverrides(ctx, tx, OverrideKindMusicTrack, trackIDs...); err != nil {
+			return err
+		}
+		if err := removeTracksFromPlaylists(ctx, tx, trackIDs); err != nil {
+			return err
+		}
+		if err := deleteRadioItemsForSources(ctx, tx, "music-track", trackIDs...); err != nil {
+			return err
+		}
+		if len(trackIDs) > 0 {
+			query, args := inClause(`DELETE FROM media_files WHERE track_id IN (`, trackIDs)
+			if _, err := tx.ExecContext(ctx, query, args...); err != nil {
+				return fmt.Errorf("delete album media files: %w", err)
+			}
+			if _, err := tx.ExecContext(ctx, `DELETE FROM music_tracks WHERE album_id = ?`, albumID); err != nil {
+				return fmt.Errorf("delete album tracks: %w", err)
+			}
+		}
+		if _, err := tx.ExecContext(ctx, `DELETE FROM music_albums WHERE id = ?`, albumID); err != nil {
+			return fmt.Errorf("delete album: %w", err)
+		}
+		if err := pruneOrphanMusic(ctx, tx); err != nil {
+			return err
+		}
+		return refreshAggregateStats(ctx, tx)
+	}); err != nil {
 		return DeleteResult{}, err
 	}
 
@@ -124,33 +126,26 @@ func DeleteAudiobook(ctx context.Context, db *sql.DB, audiobookID string, opts D
 		return DeleteResult{}, err
 	}
 
-	tx, err := db.BeginTx(ctx, nil)
-	if err != nil {
-		return DeleteResult{}, err
-	}
-	defer tx.Rollback()
-
-	if err := deleteUserPlaybackTargets(ctx, tx, OverrideKindAudiobook, audiobookID); err != nil {
-		return DeleteResult{}, err
-	}
-	if err := deleteMetadataOverrides(ctx, tx, OverrideKindAudiobook, audiobookID); err != nil {
-		return DeleteResult{}, err
-	}
-	if err := deleteRadioItemsForSources(ctx, tx, "audiobook", audiobookID); err != nil {
-		return DeleteResult{}, err
-	}
-	res, err := tx.ExecContext(ctx, `DELETE FROM audiobooks WHERE id = ?`, audiobookID)
-	if err != nil {
-		return DeleteResult{}, fmt.Errorf("delete audiobook: %w", err)
-	}
-	rows, _ := res.RowsAffected()
-	if rows == 0 {
-		return DeleteResult{}, ErrNotFound
-	}
-	if err := refreshAggregateStats(ctx, tx); err != nil {
-		return DeleteResult{}, err
-	}
-	if err := tx.Commit(); err != nil {
+	if err := storage.WithRetryTx(ctx, db, deleteAttempts, func(tx *sql.Tx) error {
+		if err := deleteUserPlaybackTargets(ctx, tx, OverrideKindAudiobook, audiobookID); err != nil {
+			return err
+		}
+		if err := deleteMetadataOverrides(ctx, tx, OverrideKindAudiobook, audiobookID); err != nil {
+			return err
+		}
+		if err := deleteRadioItemsForSources(ctx, tx, "audiobook", audiobookID); err != nil {
+			return err
+		}
+		res, err := tx.ExecContext(ctx, `DELETE FROM audiobooks WHERE id = ?`, audiobookID)
+		if err != nil {
+			return fmt.Errorf("delete audiobook: %w", err)
+		}
+		rows, _ := res.RowsAffected()
+		if rows == 0 {
+			return ErrNotFound
+		}
+		return refreshAggregateStats(ctx, tx)
+	}); err != nil {
 		return DeleteResult{}, err
 	}
 
@@ -191,39 +186,32 @@ func DeletePodcastShow(ctx context.Context, db *sql.DB, podcastID string, opts D
 		paths = uniqueStrings(append(paths, episodePaths...))
 	}
 
-	tx, err := db.BeginTx(ctx, nil)
-	if err != nil {
-		return DeleteResult{}, err
-	}
-	defer tx.Rollback()
-
-	if err := deleteUserPlaybackTargets(ctx, tx, OverrideKindPodcast, podcastID); err != nil {
-		return DeleteResult{}, err
-	}
-	if err := deleteUserPlaybackTargets(ctx, tx, OverrideKindPodcastEpisode, episodeIDs...); err != nil {
-		return DeleteResult{}, err
-	}
-	if err := deleteMetadataOverrides(ctx, tx, OverrideKindPodcast, podcastID); err != nil {
-		return DeleteResult{}, err
-	}
-	if err := deleteMetadataOverrides(ctx, tx, OverrideKindPodcastEpisode, episodeIDs...); err != nil {
-		return DeleteResult{}, err
-	}
-	if err := deleteRadioItemsForSources(ctx, tx, "podcast-episode", episodeIDs...); err != nil {
-		return DeleteResult{}, err
-	}
-	res, err := tx.ExecContext(ctx, `DELETE FROM podcasts WHERE id = ?`, podcastID)
-	if err != nil {
-		return DeleteResult{}, fmt.Errorf("delete podcast show: %w", err)
-	}
-	rows, _ := res.RowsAffected()
-	if rows == 0 {
-		return DeleteResult{}, ErrNotFound
-	}
-	if err := refreshAggregateStats(ctx, tx); err != nil {
-		return DeleteResult{}, err
-	}
-	if err := tx.Commit(); err != nil {
+	if err := storage.WithRetryTx(ctx, db, deleteAttempts, func(tx *sql.Tx) error {
+		if err := deleteUserPlaybackTargets(ctx, tx, OverrideKindPodcast, podcastID); err != nil {
+			return err
+		}
+		if err := deleteUserPlaybackTargets(ctx, tx, OverrideKindPodcastEpisode, episodeIDs...); err != nil {
+			return err
+		}
+		if err := deleteMetadataOverrides(ctx, tx, OverrideKindPodcast, podcastID); err != nil {
+			return err
+		}
+		if err := deleteMetadataOverrides(ctx, tx, OverrideKindPodcastEpisode, episodeIDs...); err != nil {
+			return err
+		}
+		if err := deleteRadioItemsForSources(ctx, tx, "podcast-episode", episodeIDs...); err != nil {
+			return err
+		}
+		res, err := tx.ExecContext(ctx, `DELETE FROM podcasts WHERE id = ?`, podcastID)
+		if err != nil {
+			return fmt.Errorf("delete podcast show: %w", err)
+		}
+		rows, _ := res.RowsAffected()
+		if rows == 0 {
+			return ErrNotFound
+		}
+		return refreshAggregateStats(ctx, tx)
+	}); err != nil {
 		return DeleteResult{}, err
 	}
 

@@ -1,6 +1,6 @@
 # Storage and Scanning
 
-Samo uses SQLite as the catalog database. The server applies embedded migrations on startup, then optionally scans configured library folders before serving the API.
+Samo uses PostgreSQL as the catalog database. The server applies embedded migrations on startup, then optionally scans configured library folders before serving the API.
 
 ## Domain Tables
 
@@ -26,7 +26,7 @@ Libraries are typed by `kind`: `music`, `audiobook`, `podcast`, or `mixed`. Mixe
 ## Environment
 
 ```sh
-SAMO_DB_PATH=/srv/samo/samo.db
+SAMO_DB_DSN=postgres://samo:password@localhost:5432/samo?sslmode=disable
 SAMO_MUSIC_DIRS=/srv/media/music
 SAMO_AUDIOBOOK_DIRS=/srv/media/audiobooks
 SAMO_PODCAST_DIRS=/srv/media/podcasts
@@ -43,7 +43,7 @@ SAMO_MUSIC_DIRS="/srv/music-a:/srv/music-b"
 
 Defaults:
 
-- `SAMO_DB_PATH` defaults to `data/samo.db`
+- `SAMO_DB_DSN` has no default and is required
 - `SAMO_SCAN_ON_START` defaults to `false`
 - `SAMO_WATCH_LIBRARIES` defaults to `true`
 - `SAMO_WATCH_DEBOUNCE` defaults to `3s`
@@ -61,7 +61,7 @@ The watcher responds to:
 - `reader.txt`, `narrator.txt`, `narrators.txt`
 - local cover images: `jpg`, `jpeg`, `png`, `webp`
 
-After a watch-triggered scan, Samo reloads the catalog from SQLite and updates the in-memory API catalog, so clients can see new files without a server restart.
+After a watch-triggered scan, Samo reloads the catalog from the database and updates the in-memory API catalog, so clients can see new files without a server restart.
 
 ## Scanner Requirements
 

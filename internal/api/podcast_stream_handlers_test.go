@@ -10,9 +10,8 @@ import (
 	"github.com/bouliehaan/samo-server/internal/catalog"
 	"github.com/bouliehaan/samo-server/internal/playback"
 	"github.com/bouliehaan/samo-server/internal/podcaststream"
-	"github.com/bouliehaan/samo-server/internal/storage"
+	"github.com/bouliehaan/samo-server/internal/storage/storagetest"
 	"github.com/bouliehaan/samo-server/internal/users"
-	"github.com/bouliehaan/samo-server/migrations"
 )
 
 func TestStreamPodcastEpisodeProxiesRemoteEnclosure(t *testing.T) {
@@ -30,14 +29,7 @@ func TestStreamPodcastEpisodeProxiesRemoteEnclosure(t *testing.T) {
 	defer upstream.Close()
 
 	root := t.TempDir()
-	db, err := storage.Open(ctx, filepath.Join(root, "samo.db"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer db.Close()
-	if err := storage.ApplyMigrations(ctx, db, migrations.Files); err != nil {
-		t.Fatal(err)
-	}
+	db := storagetest.Open(t)
 	if _, err := db.ExecContext(ctx, `
 		INSERT INTO libraries (id, name, kind, path)
 		VALUES ('lib-pod', 'Podcasts', 'podcast', ?)`, filepath.Join(root, "podcasts")); err != nil {
@@ -58,7 +50,7 @@ func TestStreamPodcastEpisodeProxiesRemoteEnclosure(t *testing.T) {
 	}
 	if _, err := db.ExecContext(ctx, `
 		INSERT INTO user_playback (user_id, target_kind, target_id, state_json, updated_at)
-		VALUES (?, 'podcast-episode', 'ep-1', ?, datetime('now'))`,
+		VALUES (?, 'podcast-episode', 'ep-1', ?, CURRENT_TIMESTAMP)`,
 		users.BootstrapUserID, `{"progressSeconds":5}`); err != nil {
 		t.Fatal(err)
 	}

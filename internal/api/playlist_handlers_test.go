@@ -10,20 +10,12 @@ import (
 
 	"github.com/bouliehaan/samo-server/internal/catalog"
 	"github.com/bouliehaan/samo-server/internal/playlists"
-	"github.com/bouliehaan/samo-server/internal/storage"
-	"github.com/bouliehaan/samo-server/migrations"
+	"github.com/bouliehaan/samo-server/internal/storage/storagetest"
 )
 
 func TestPlaylistImportEndpointRebuildsFromLocalTracks(t *testing.T) {
 	ctx := context.Background()
-	db, err := storage.Open(ctx, t.TempDir()+"/samo.db")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer db.Close()
-	if err := storage.ApplyMigrations(ctx, db, migrations.Files); err != nil {
-		t.Fatal(err)
-	}
+	db := storagetest.Open(t)
 	if _, err := db.ExecContext(ctx, `
 		INSERT INTO music_tracks (id, title, display_artist, album_title, duration_seconds)
 		VALUES ('track-1', 'Ceremony', 'New Order', 'Substance', 263)`); err != nil {
@@ -80,14 +72,7 @@ func TestPlaylistImportEndpointRebuildsFromLocalTracks(t *testing.T) {
 
 func TestPlaylistVisibilityAllowsPublicSharingOnly(t *testing.T) {
 	ctx := context.Background()
-	db, err := storage.Open(ctx, t.TempDir()+"/samo.db")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer db.Close()
-	if err := storage.ApplyMigrations(ctx, db, migrations.Files); err != nil {
-		t.Fatal(err)
-	}
+	db := storagetest.Open(t)
 	userService, adminToken, listenerToken := testUserServiceWithTokens(t, ctx, db)
 	admin, err := userService.AuthenticateToken(ctx, adminToken)
 	if err != nil {
@@ -99,7 +84,10 @@ func TestPlaylistVisibilityAllowsPublicSharingOnly(t *testing.T) {
 	}
 	if _, err := db.ExecContext(ctx, `
 		INSERT INTO music_tracks (id, title, display_artist, album_title, duration_seconds)
-		VALUES ('track-1', 'Christmas Time Is Here', 'Vince Guaraldi Trio', 'A Charlie Brown Christmas', 166);
+		VALUES ('track-1', 'Christmas Time Is Here', 'Vince Guaraldi Trio', 'A Charlie Brown Christmas', 166)`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.ExecContext(ctx, `
 		INSERT INTO music_playlists (id, name, owner_id, public, track_ids_json, track_count, duration_seconds)
 		VALUES
 		  ('admin-private', 'Admin Secret', ?, 0, '[]', 0, 0),

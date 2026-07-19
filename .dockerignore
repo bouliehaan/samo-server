@@ -1,0 +1,17 @@
+# Keep the build context small and free of local state.
+.git
+.cache
+data
+dist
+bin
+quarantine
+*.db
+*.db-wal
+*.db-shm
+*.tar.gz
+.DS_Store
+**/.DS_Store
+._*
+**/._*
+docs
+README.md

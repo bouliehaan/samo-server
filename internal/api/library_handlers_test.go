@@ -13,8 +13,7 @@ import (
 
 	"github.com/bouliehaan/samo-server/internal/libraries"
 	"github.com/bouliehaan/samo-server/internal/scanner"
-	"github.com/bouliehaan/samo-server/internal/storage"
-	"github.com/bouliehaan/samo-server/migrations"
+	"github.com/bouliehaan/samo-server/internal/storage/storagetest"
 )
 
 func TestLibraryScanAPI(t *testing.T) {
@@ -25,14 +24,7 @@ func TestLibraryScanAPI(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	db, err := storage.Open(ctx, filepath.Join(root, "samo.db"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer db.Close()
-	if err := storage.ApplyMigrations(ctx, db, migrations.Files); err != nil {
-		t.Fatal(err)
-	}
+	db := storagetest.Open(t)
 
 	libraryService := libraries.New(db, scanner.New(db))
 	handler := NewServer(ServerOptions{Libraries: libraryService})

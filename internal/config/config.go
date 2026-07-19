@@ -2,6 +2,7 @@ package config
 
 import (
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -21,7 +22,7 @@ var defaultMetadataProviders = []string{"audible", "openlibrary", "googlebooks",
 type Config struct {
 	Addr                   string
 	DataDir                string
-	DBPath                 string
+	DBDSN                  string // Postgres connection string
 	RadioConfigPath        string
 	APIToken               string
 	BootstrapUsername      string
@@ -65,9 +66,10 @@ type Library struct {
 
 func LoadEnv() (Config, error) {
 	dataDir := envOrDefault("SAMO_DATA_DIR", defaultDataDir)
-	dbPath := strings.TrimSpace(os.Getenv("SAMO_DB_PATH"))
-	if dbPath == "" {
-		dbPath = filepath.Join(dataDir, "samo.db")
+	// The SQLite backend is gone. Fail loudly on config that still asks for it,
+	// instead of silently starting against the wrong database.
+	if backend := strings.ToLower(strings.TrimSpace(os.Getenv("SAMO_DB_BACKEND"))); backend != "" && backend != "postgres" && backend != "postgresql" {
+		return Config{}, fmt.Errorf("SAMO_DB_BACKEND=%q is no longer supported: samo-server is Postgres-only (the SQLite backend was removed; use a pre-removal release to migrate an old samo.db)", backend)
 	}
 	radioConfigPath := strings.TrimSpace(os.Getenv("SAMO_RADIO_CONFIG"))
 	if radioConfigPath == "" {
@@ -77,7 +79,7 @@ func LoadEnv() (Config, error) {
 	cfg := Config{
 		Addr:                   envOrDefault("SAMO_ADDR", defaultAddr),
 		DataDir:                dataDir,
-		DBPath:                 dbPath,
+		DBDSN:                  strings.TrimSpace(os.Getenv("SAMO_DB_DSN")),
 		RadioConfigPath:        radioConfigPath,
 		APIToken:               strings.TrimSpace(os.Getenv("SAMO_API_TOKEN")),
 		BootstrapUsername:      strings.TrimSpace(os.Getenv("SAMO_BOOTSTRAP_USERNAME")),
@@ -118,7 +120,7 @@ func LoadEnv() (Config, error) {
 func (c Config) Validate() (Config, error) {
 	c.Addr = strings.TrimSpace(c.Addr)
 	c.DataDir = strings.TrimSpace(c.DataDir)
-	c.DBPath = strings.TrimSpace(c.DBPath)
+	c.DBDSN = strings.TrimSpace(c.DBDSN)
 	c.RadioConfigPath = strings.TrimSpace(c.RadioConfigPath)
 	c.APIToken = strings.TrimSpace(c.APIToken)
 	c.MetadataUserAgent = strings.TrimSpace(c.MetadataUserAgent)
@@ -128,8 +130,8 @@ func (c Config) Validate() (Config, error) {
 		return Config{}, errors.New("server address cannot be empty")
 	case c.DataDir == "":
 		return Config{}, errors.New("data directory cannot be empty")
-	case c.DBPath == "":
-		return Config{}, errors.New("database path cannot be empty")
+	case c.DBDSN == "":
+		return Config{}, errors.New("SAMO_DB_DSN is required (e.g. postgres://samo:pass@localhost:5432/samo?sslmode=disable)")
 	case c.RadioConfigPath == "":
 		return Config{}, errors.New("radio config path cannot be empty")
 	default:

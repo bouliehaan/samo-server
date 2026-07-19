@@ -2,23 +2,14 @@ package users
 
 import (
 	"context"
-	"path/filepath"
 	"testing"
 
-	"github.com/bouliehaan/samo-server/internal/storage"
-	"github.com/bouliehaan/samo-server/migrations"
+	"github.com/bouliehaan/samo-server/internal/storage/storagetest"
 )
 
 func TestBootstrapDefersAdminWhenNoEnvVars(t *testing.T) {
 	ctx := context.Background()
-	db, err := storage.Open(ctx, filepath.Join(t.TempDir(), "samo.db"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer db.Close()
-	if err := storage.ApplyMigrations(ctx, db, migrations.Files); err != nil {
-		t.Fatal(err)
-	}
+	db := storagetest.Open(t)
 
 	// First boot with no env vars: bootstrap leaves admin creation to the
 	// /setup wizard rather than auto-generating a password and logging it.
@@ -37,14 +28,7 @@ func TestBootstrapDefersAdminWhenNoEnvVars(t *testing.T) {
 
 func TestBootstrapGeneratesPasswordWhenUsernameSet(t *testing.T) {
 	ctx := context.Background()
-	db, err := storage.Open(ctx, filepath.Join(t.TempDir(), "samo.db"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer db.Close()
-	if err := storage.ApplyMigrations(ctx, db, migrations.Files); err != nil {
-		t.Fatal(err)
-	}
+	db := storagetest.Open(t)
 
 	service := New(ServiceOptions{DB: db})
 	result, err := service.BootstrapWithResult(ctx, BootstrapInput{AdminUsername: "owner"})
@@ -64,14 +48,7 @@ func TestBootstrapGeneratesPasswordWhenUsernameSet(t *testing.T) {
 
 func TestBootstrapExplicitPasswordUpdatesExistingAdmin(t *testing.T) {
 	ctx := context.Background()
-	db, err := storage.Open(ctx, filepath.Join(t.TempDir(), "samo.db"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer db.Close()
-	if err := storage.ApplyMigrations(ctx, db, migrations.Files); err != nil {
-		t.Fatal(err)
-	}
+	db := storagetest.Open(t)
 
 	service := New(ServiceOptions{DB: db})
 	if _, err := service.BootstrapWithResult(ctx, BootstrapInput{

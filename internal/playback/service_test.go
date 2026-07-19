@@ -5,23 +5,15 @@ import (
 	"testing"
 
 	"github.com/bouliehaan/samo-server/internal/catalog"
-	"github.com/bouliehaan/samo-server/internal/storage"
+	"github.com/bouliehaan/samo-server/internal/storage/storagetest"
 	"github.com/bouliehaan/samo-server/internal/users"
-	"github.com/bouliehaan/samo-server/migrations"
 )
 
 const testUserID = users.BootstrapUserID
 
 func TestPlaybackPatchUpdatesMusicTrack(t *testing.T) {
 	ctx := context.Background()
-	db, err := storage.Open(ctx, t.TempDir()+"/samo.db")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer db.Close()
-	if err := storage.ApplyMigrations(ctx, db, migrations.Files); err != nil {
-		t.Fatal(err)
-	}
+	db := storagetest.Open(t)
 	if _, err := db.ExecContext(ctx, `
 		INSERT INTO music_tracks (id, title, duration_seconds, playback_json, added_at, updated_at)
 		VALUES ('track-1', 'Signal One', 120, '{}', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)`); err != nil {
@@ -53,14 +45,7 @@ func TestPlaybackPatchUpdatesMusicTrack(t *testing.T) {
 
 func TestPlaybackRejectsInvalidRating(t *testing.T) {
 	ctx := context.Background()
-	db, err := storage.Open(ctx, t.TempDir()+"/samo.db")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer db.Close()
-	if err := storage.ApplyMigrations(ctx, db, migrations.Files); err != nil {
-		t.Fatal(err)
-	}
+	db := storagetest.Open(t)
 	if _, err := db.ExecContext(ctx, `
 		INSERT INTO music_tracks (id, title, playback_json, added_at, updated_at)
 		VALUES ('track-1', 'Signal One', '{}', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)`); err != nil {
@@ -68,7 +53,7 @@ func TestPlaybackRejectsInvalidRating(t *testing.T) {
 	}
 
 	service := New(db)
-	_, err = service.Put(ctx, testUserID, TargetMusicTrack, "track-1", catalog.PlaybackState{Rating: 9})
+	_, err := service.Put(ctx, testUserID, TargetMusicTrack, "track-1", catalog.PlaybackState{Rating: 9})
 	if err == nil {
 		t.Fatal("expected invalid rating error")
 	}

@@ -6,20 +6,12 @@ import (
 	"testing"
 
 	"github.com/bouliehaan/samo-server/internal/scanner"
-	"github.com/bouliehaan/samo-server/internal/storage"
-	"github.com/bouliehaan/samo-server/migrations"
+	"github.com/bouliehaan/samo-server/internal/storage/storagetest"
 )
 
 func TestRemoveAllMissingFiles(t *testing.T) {
 	ctx := context.Background()
-	db, err := storage.Open(ctx, filepath.Join(t.TempDir(), "samo.db"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer db.Close()
-	if err := storage.ApplyMigrations(ctx, db, migrations.Files); err != nil {
-		t.Fatal(err)
-	}
+	db := storagetest.Open(t)
 
 	svc := New(db, scanner.New(db))
 	if _, err := db.ExecContext(ctx, `

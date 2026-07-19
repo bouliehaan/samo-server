@@ -2,6 +2,7 @@ package metadata
 
 import (
 	"context"
+	"encoding/json"
 	"net/http"
 	"net/url"
 	"strconv"
@@ -19,6 +20,12 @@ type MusicBrainzProvider struct {
 }
 
 func NewMusicBrainzProvider(client *http.Client, userAgent string) *MusicBrainzProvider {
+	if strings.TrimSpace(userAgent) == "" {
+		// MusicBrainz rejects requests with a missing/generic User-Agent
+		// (Go's default "Go-http-client" gets 403s). A blank configuration
+		// must not silently turn every search into zero results.
+		userAgent = "SamoServer/0.1 ( https://github.com/bouliehaan/samo-server )"
+	}
 	return &MusicBrainzProvider{
 		client:    client,
 		baseURL:   "https://musicbrainz.org/ws/2",
@@ -96,7 +103,7 @@ func (p *MusicBrainzProvider) artistResults(items []musicBrainzArtist) []SearchR
 			ID:          item.ID,
 			Provider:    p.Name(),
 			MediaType:   "musicArtist",
-			Score:       scoreFromString(item.Score),
+			Score:       int(item.Score),
 			Title:       item.Name,
 			SortTitle:   item.SortName,
 			Description: item.Disambiguation,
@@ -121,7 +128,7 @@ func (p *MusicBrainzProvider) releaseGroupResults(items []musicBrainzReleaseGrou
 			ID:            item.ID,
 			Provider:      p.Name(),
 			MediaType:     "musicAlbum",
-			Score:         scoreFromString(item.Score),
+			Score:         int(item.Score),
 			Title:         item.Title,
 			Authors:       musicBrainzContributors(item.ArtistCredit),
 			PublishedDate: item.FirstReleaseDate,
@@ -145,7 +152,7 @@ func (p *MusicBrainzProvider) recordingResults(items []musicBrainzRecording) []S
 			ID:              item.ID,
 			Provider:        p.Name(),
 			MediaType:       "musicTrack",
-			Score:           scoreFromString(item.Score),
+			Score:           int(item.Score),
 			Title:           item.Title,
 			Authors:         musicBrainzContributors(item.ArtistCredit),
 			PublishedDate:   item.FirstReleaseDate,
@@ -156,11 +163,19 @@ func (p *MusicBrainzProvider) recordingResults(items []musicBrainzRecording) []S
 			Links:           []Link{{Label: "MusicBrainz Recording", URL: "https://musicbrainz.org/recording/" + item.ID}},
 		}
 		if len(item.Releases) > 0 {
-			release := item.Releases[0]
+			// A hit recording appears on many releases, and taking
+			// Releases[0] used to hand consumers whichever compilation the
+			// search listed first ("Ultimate 90" instead of the song's own
+			// record). Prefer a release whose group is underived.
+			release := bestRecordingRelease(item.Releases)
 			result.Raw = map[string]any{
 				"releaseId":    release.ID,
 				"releaseTitle": release.Title,
 				"releaseDate":  release.Date,
+				// releaseIsDerived flags a Compilation/Live/Remix/... release
+				// group, so consumers (e.g. the explo fallback) can decline
+				// to adopt a sampler's title as the track's album.
+				"releaseIsDerived": len(release.ReleaseGroup.SecondaryTypes) > 0,
 			}
 			if release.ReleaseGroup.ID != "" {
 				result.ExternalIDs.MusicBrainzReleaseGroupID = release.ReleaseGroup.ID
@@ -190,7 +205,7 @@ type musicBrainzRecordingResponse struct {
 
 type musicBrainzArtist struct {
 	ID             string           `json:"id"`
-	Score          string           `json:"score"`
+	Score          flexibleScore    `json:"score"`
 	Name           string           `json:"name"`
 	SortName       string           `json:"sort-name"`
 	Disambiguation string           `json:"disambiguation"`
@@ -201,7 +216,7 @@ type musicBrainzArtist struct {
 
 type musicBrainzReleaseGroup struct {
 	ID               string                    `json:"id"`
-	Score            string                    `json:"score"`
+	Score            flexibleScore             `json:"score"`
 	Title            string                    `json:"title"`
 	FirstReleaseDate string                    `json:"first-release-date"`
 	PrimaryType      string                    `json:"primary-type"`
@@ -212,7 +227,7 @@ type musicBrainzReleaseGroup struct {
 
 type musicBrainzRecording struct {
 	ID               string                    `json:"id"`
-	Score            string                    `json:"score"`
+	Score            flexibleScore             `json:"score"`
 	Title            string                    `json:"title"`
 	Length           int                       `json:"length"`
 	FirstReleaseDate string                    `json:"first-release-date"`
@@ -235,6 +250,73 @@ type musicBrainzRelease struct {
 
 type musicBrainzTag struct {
 	Name string `json:"name"`
+}
+
+// flexibleScore decodes MusicBrainz's search relevance score whether the API
+// serializes it as a JSON number ("score": 100 — what the live ws/2 JSON
+// actually sends) or as a string ("score": "100" — the historical form).
+// This field being declared as plain string is what silently broke EVERY
+// live MusicBrainz search: each response failed to unmarshal, the aggregator
+// filed it as a per-provider error, and callers saw an empty, error-free
+// result set. The explo identification fallback ran dead for its entire
+// life because of this one field.
+type flexibleScore int
+
+func (s *flexibleScore) UnmarshalJSON(data []byte) error {
+	trimmed := strings.TrimSpace(string(data))
+	if trimmed == "null" || trimmed == `""` {
+		*s = 0
+		return nil
+	}
+	if strings.HasPrefix(trimmed, `"`) {
+		var value string
+		if err := json.Unmarshal(data, &value); err != nil {
+			return err
+		}
+		parsed, err := strconv.Atoi(strings.TrimSpace(value))
+		if err != nil {
+			*s = 0
+			return nil
+		}
+		*s = flexibleScore(parsed)
+		return nil
+	}
+	var value float64
+	if err := json.Unmarshal(data, &value); err != nil {
+		return err
+	}
+	*s = flexibleScore(int(value))
+	return nil
+}
+
+// bestRecordingRelease picks the release that best represents a recording's
+// own record: a clean (no secondary types) Album first, then a clean Single,
+// then a clean EP, then any other clean release group, and a derived one
+// (Compilation/Live/Remix/...) only when nothing better exists.
+func bestRecordingRelease(releases []musicBrainzRelease) musicBrainzRelease {
+	rankOf := func(release musicBrainzRelease) int {
+		if len(release.ReleaseGroup.SecondaryTypes) > 0 {
+			return 4
+		}
+		switch strings.ToLower(strings.TrimSpace(release.ReleaseGroup.PrimaryType)) {
+		case "album":
+			return 0
+		case "single":
+			return 1
+		case "ep":
+			return 2
+		}
+		return 3
+	}
+	best := releases[0]
+	bestRank := rankOf(best)
+	for _, release := range releases[1:] {
+		if rank := rankOf(release); rank < bestRank {
+			best = release
+			bestRank = rank
+		}
+	}
+	return best
 }
 
 func musicSearchType(request SearchRequest) MusicSearchType {

@@ -6,21 +6,13 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/bouliehaan/samo-server/internal/storage"
-	"github.com/bouliehaan/samo-server/migrations"
+	"github.com/bouliehaan/samo-server/internal/storage/storagetest"
 )
 
 func TestDeleteMusicAlbumRemovesTracksAndFiles(t *testing.T) {
 	ctx := context.Background()
 	root := t.TempDir()
-	db, err := storage.Open(ctx, filepath.Join(root, "samo.db"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer db.Close()
-	if err := storage.ApplyMigrations(ctx, db, migrations.Files); err != nil {
-		t.Fatal(err)
-	}
+	db := storagetest.Open(t)
 
 	libraryDir := filepath.Join(root, "music")
 	trackPath := filepath.Join(libraryDir, "Artist", "Album", "01-track.flac")
@@ -82,14 +74,7 @@ func TestDeleteMusicAlbumRemovesTracksAndFiles(t *testing.T) {
 func TestDeleteAudiobookRemovesRowAndFiles(t *testing.T) {
 	ctx := context.Background()
 	root := t.TempDir()
-	db, err := storage.Open(ctx, filepath.Join(root, "samo.db"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer db.Close()
-	if err := storage.ApplyMigrations(ctx, db, migrations.Files); err != nil {
-		t.Fatal(err)
-	}
+	db := storagetest.Open(t)
 
 	libraryDir := filepath.Join(root, "books")
 	bookPath := filepath.Join(libraryDir, "Author", "Title", "book.m4b")
@@ -136,15 +121,7 @@ func TestDeleteAudiobookRemovesRowAndFiles(t *testing.T) {
 
 func TestDeletePodcastShowRejectsRemoteFeed(t *testing.T) {
 	ctx := context.Background()
-	root := t.TempDir()
-	db, err := storage.Open(ctx, filepath.Join(root, "samo.db"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer db.Close()
-	if err := storage.ApplyMigrations(ctx, db, migrations.Files); err != nil {
-		t.Fatal(err)
-	}
+	db := storagetest.Open(t)
 
 	podcastID := "podcast_remote"
 	if _, err := db.ExecContext(ctx, `
@@ -163,7 +140,7 @@ func TestDeletePodcastShowRejectsRemoteFeed(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	_, err = DeletePodcastShow(ctx, db, podcastID, DeleteOptions{DeleteFiles: true})
+	_, err := DeletePodcastShow(ctx, db, podcastID, DeleteOptions{DeleteFiles: true})
 	if err == nil {
 		t.Fatal("expected remote podcast delete to fail")
 	}
@@ -175,14 +152,7 @@ func TestDeletePodcastShowRejectsRemoteFeed(t *testing.T) {
 func TestDeletePodcastShowRemovesFilesystemShow(t *testing.T) {
 	ctx := context.Background()
 	root := t.TempDir()
-	db, err := storage.Open(ctx, filepath.Join(root, "samo.db"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer db.Close()
-	if err := storage.ApplyMigrations(ctx, db, migrations.Files); err != nil {
-		t.Fatal(err)
-	}
+	db := storagetest.Open(t)
 
 	libraryDir := filepath.Join(root, "podcasts")
 	episodePath := filepath.Join(libraryDir, "Show", "01.mp3")
@@ -228,14 +198,7 @@ func TestDeletePodcastShowRemovesFilesystemShow(t *testing.T) {
 func TestDeletePodcastShowSucceedsWhenFileDeleteDenied(t *testing.T) {
 	ctx := context.Background()
 	root := t.TempDir()
-	db, err := storage.Open(ctx, filepath.Join(root, "samo.db"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer db.Close()
-	if err := storage.ApplyMigrations(ctx, db, migrations.Files); err != nil {
-		t.Fatal(err)
-	}
+	db := storagetest.Open(t)
 
 	libraryDir := filepath.Join(root, "podcasts")
 	showDir := filepath.Join(libraryDir, "Show")

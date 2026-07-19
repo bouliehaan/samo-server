@@ -12,22 +12,13 @@ import (
 
 	"github.com/bouliehaan/samo-server/internal/libraries"
 	"github.com/bouliehaan/samo-server/internal/scanner"
-	"github.com/bouliehaan/samo-server/internal/storage"
+	"github.com/bouliehaan/samo-server/internal/storage/storagetest"
 	"github.com/bouliehaan/samo-server/internal/users"
-	"github.com/bouliehaan/samo-server/migrations"
 )
 
 func TestSetupWizardFlow(t *testing.T) {
-	ctx := context.Background()
 	root := t.TempDir()
-	db, err := storage.Open(ctx, filepath.Join(root, "samo.db"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer db.Close()
-	if err := storage.ApplyMigrations(ctx, db, migrations.Files); err != nil {
-		t.Fatal(err)
-	}
+	db := storagetest.Open(t)
 
 	userService := users.New(users.ServiceOptions{DB: db})
 	libraryService := libraries.New(db, scanner.New(db))
@@ -110,15 +101,7 @@ func TestSetupWizardFlow(t *testing.T) {
 }
 
 func TestSetupDirectoryBrowserRootEntries(t *testing.T) {
-	ctx := context.Background()
-	db, err := storage.Open(ctx, t.TempDir()+"/samo.db")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer db.Close()
-	if err := storage.ApplyMigrations(ctx, db, migrations.Files); err != nil {
-		t.Fatal(err)
-	}
+	db := storagetest.Open(t)
 
 	handler := NewServer(ServerOptions{
 		Libraries: libraries.New(db, scanner.New(db)),
@@ -139,15 +122,7 @@ func TestSetupDirectoryBrowserRootEntries(t *testing.T) {
 }
 
 func TestSetupRejectsSystemPaths(t *testing.T) {
-	ctx := context.Background()
-	db, err := storage.Open(ctx, t.TempDir()+"/samo.db")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer db.Close()
-	if err := storage.ApplyMigrations(ctx, db, migrations.Files); err != nil {
-		t.Fatal(err)
-	}
+	db := storagetest.Open(t)
 	handler := NewServer(ServerOptions{
 		Libraries: libraries.New(db, scanner.New(db)),
 		Users:     users.New(users.ServiceOptions{DB: db}),
@@ -162,14 +137,7 @@ func TestSetupRejectsSystemPaths(t *testing.T) {
 func TestSetupPageRedirectsAfterCompletion(t *testing.T) {
 	ctx := context.Background()
 	root := t.TempDir()
-	db, err := storage.Open(ctx, filepath.Join(root, "samo.db"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer db.Close()
-	if err := storage.ApplyMigrations(ctx, db, migrations.Files); err != nil {
-		t.Fatal(err)
-	}
+	db := storagetest.Open(t)
 
 	userService := users.New(users.ServiceOptions{DB: db})
 	if err := userService.Bootstrap(ctx, users.BootstrapInput{AdminUsername: "admin", AdminPassword: "samo-rocks-12345"}); err != nil {

@@ -476,14 +476,18 @@ func (s *Scanner) prunePodcastEpisodes(ctx context.Context, libraryID string, se
 }
 
 func (s *Scanner) pruneOrphanMusic(ctx context.Context) (int, error) {
+	jsonEach := "json_each(p.track_ids_json) AS j"
+	if strings.Contains(fmt.Sprintf("%T", s.db.Driver()), "rewriteDriver") {
+		jsonEach = "json_array_elements_text(p.track_ids_json::json) AS j(value)"
+	}
 	statements := []string{
-		`DELETE FROM music_tracks
+		fmt.Sprintf(`DELETE FROM music_tracks
 		 WHERE id NOT IN (SELECT track_id FROM media_files WHERE track_id IS NOT NULL)
 		   AND id NOT IN (
 		     SELECT DISTINCT j.value
-		     FROM music_playlists p, json_each(p.track_ids_json) AS j
+		     FROM music_playlists p, %s
 		     WHERE j.value IS NOT NULL AND TRIM(j.value) != ''
-		   )`,
+		   )`, jsonEach),
 		`DELETE FROM music_albums
 		 WHERE id NOT IN (SELECT album_id FROM music_tracks WHERE album_id IS NOT NULL)`,
 		`DELETE FROM music_artists

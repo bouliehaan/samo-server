@@ -25,8 +25,16 @@ import (
 	"github.com/bouliehaan/samo-server/internal/catalog"
 	"github.com/bouliehaan/samo-server/internal/metadata"
 	"github.com/bouliehaan/samo-server/internal/playlists"
+	"github.com/bouliehaan/samo-server/internal/storage"
 	"github.com/bouliehaan/samo-server/internal/users"
 )
+
+// exploWriteAttempts is how many times an explo DB write retries on transient
+// Postgres contention (deadlock victim 40P01 / serialization failure 40001)
+// before giving up. explo is a slow background batch (throttled AcoustID +
+// MusicBrainz lookups), so it can afford to be patient when a concurrent scan
+// touches the same rows. Same storage.Retry mechanism the scanner uses.
+const exploWriteAttempts = 20
 
 // acoustidMinInterval keeps calls under AcoustID's published "no more than 3
 // requests per second" guideline.
@@ -51,6 +59,10 @@ type ServiceOptions struct {
 	// this fallback existed.
 	Metadata  *metadata.Service
 	Playlists *playlists.Service
+	// Covers is the local cover store the cover engine verifies every
+	// download into (and stores generated placeholder tiles in). Without it
+	// the cover backfill does not run.
+	Covers CoverStore
 	// ReloadCatalog refreshes the live in-memory catalog projection after a
 	// batch of overrides/playlist changes lands. Same callback main.go wires
 	// into the HTTP handlers after a manual metadata apply.
@@ -83,9 +95,13 @@ type Service struct {
 	cfgSource    string
 	cfgUpdatedAt *time.Time
 
+	covers CoverStore
+
 	rateMu       sync.Mutex
 	lastAcoustID time.Time
-	mbThrottle   musicbrainzThrottle
+	mbPacer      requestPacer
+	itunesPacer  requestPacer
+	deezerPacer  requestPacer
 
 	// processMu serializes ProcessNewTracks runs. OnScanComplete can fire in
 	// quick succession (file-watcher debounce during a large drop), and
@@ -96,6 +112,14 @@ type Service struct {
 	// backfillMu serializes cover-backfill runs. Kept separate from processMu
 	// so a slow, network-bound backfill doesn't block scan-triggered processing.
 	backfillMu sync.Mutex
+
+	// idleMu/lastIdleStatus deduplicate the "nothing due this pass" log line.
+	// With the periodic ticker driving passes every 30 minutes, an unchanged
+	// idle status would otherwise print ~48 identical lines a day; it still
+	// logs whenever the summary CHANGES (and on the first pass after boot),
+	// which is when it carries information.
+	idleMu         sync.Mutex
+	lastIdleStatus string
 }
 
 func NewService(options ServiceOptions) *Service {
@@ -126,6 +150,7 @@ func NewService(options ServiceOptions) *Service {
 		metadataApply: options.MetadataApply,
 		metadata:      options.Metadata,
 		playlists:     options.Playlists,
+		covers:        options.Covers,
 		reloadCatalog: options.ReloadCatalog,
 		playlistName:  playlistName,
 		logger:        logger,
@@ -187,6 +212,28 @@ func (s *Service) ProcessNewTracks(ctx context.Context) (Result, error) {
 		// lookups per track) and the completion line alone reads as a
 		// never-started pass to anyone tailing the journal.
 		s.logger("explo: identifying %d track(s)", len(candidates))
+
+		// Corral the drop BEFORE the slow identify loop. The loop below can
+		// run for many minutes on a weekly drop; without this the fresh
+		// albums sit in Recently Added (and every listing surface) as
+		// untagged, artless entries for that whole window — the exact flood
+		// this feature exists to prevent. Path-derived, so it needs no
+		// identification to be correct.
+		dirs := s.effectiveDirs()
+		flagged, _, flagErr := s.reconcileExploTracks(ctx, dirs)
+		if flagErr != nil {
+			s.logger("explo: %v", flagErr)
+		}
+		hiddenEarly, _, hideErr := s.reconcileHiddenAlbums(ctx, dirs)
+		if hideErr != nil {
+			s.logger("explo: %v", hideErr)
+		}
+		result.Hidden += hiddenEarly
+		if (flagged > 0 || hiddenEarly > 0) && s.reloadCatalog != nil {
+			if err := s.reloadCatalog(ctx); err != nil {
+				s.logger("explo: catalog reload failed: %v", err)
+			}
+		}
 	}
 
 	for _, candidate := range candidates {
@@ -224,6 +271,13 @@ func (s *Service) ProcessNewTracks(ctx context.Context) (Result, error) {
 		if err := s.recordProcessed(ctx, candidate.trackID, status, match, ""); err != nil {
 			s.logger("explo: record processed failed for %s: %v", candidate.trackID, err)
 		}
+		// A freshly identified drop may still carry a placeholder from an
+		// earlier unmatched cover pass; re-open its cover state so the next
+		// BackfillCovers resolves REAL art instead of leaving the placeholder in
+		// place (findCoverTargets would otherwise see it as already-attempted).
+		if err := s.resetTrackCoverState(ctx, candidate.trackID); err != nil {
+			s.logger("explo: reset cover state failed for %s: %v", candidate.trackID, err)
+		}
 	}
 
 	// Re-derive which albums belong out of Recently Added, the ledger, and the
@@ -233,13 +287,13 @@ func (s *Service) ProcessNewTracks(ctx context.Context) (Result, error) {
 	// tracks back out of the Explo playlist, while fresh ledger rows from the
 	// loop above become playlist members. Runs every pass, even when nothing
 	// new was found.
-	hidden, unhidden, playlistChanged, err := s.syncExploState(ctx, s.effectiveDirs())
+	hidden, unhidden, otherChanged, err := s.syncExploState(ctx, s.effectiveDirs())
 	if err != nil {
 		s.logger("explo: reconcile failed: %v", err)
 	}
-	result.Hidden = hidden
+	result.Hidden += hidden
 
-	if (result.Scanned > 0 || hidden > 0 || unhidden > 0 || playlistChanged) && s.reloadCatalog != nil {
+	if (result.Scanned > 0 || hidden > 0 || unhidden > 0 || otherChanged) && s.reloadCatalog != nil {
 		if err := s.reloadCatalog(ctx); err != nil {
 			s.logger("explo: catalog reload failed: %v", err)
 		}
@@ -277,12 +331,12 @@ func (s *Service) logIdlePassStatus(ctx context.Context) {
 		  COALESCE(SUM(CASE WHEN et.status IN ('matched', 'matched-fallback') THEN 1 ELSE 0 END), 0),
 		  COALESCE(SUM(CASE WHEN et.status IN ('unmatched', 'error') AND et.attempts <  %[1]d THEN 1 ELSE 0 END), 0),
 		  COALESCE(SUM(CASE WHEN et.status IN ('unmatched', 'error') AND et.attempts >= %[1]d THEN 1 ELSE 0 END), 0),
-		  COALESCE(MIN(CASE WHEN et.status IN ('unmatched', 'error') AND et.attempts < %[1]d THEN datetime(et.processed_at, %[2]s) END), '')
+		  COALESCE(MIN(CASE WHEN et.status IN ('unmatched', 'error') AND et.attempts < %[1]d THEN %[2]s END), '')
 		FROM music_tracks mt
 		JOIN media_files mf ON mf.track_id = mt.id
 		LEFT JOIN explo_tracks et ON et.track_id = mt.id
 		WHERE %[3]s`,
-		exploMaxIdentifyAttempts, exploBackoffCase("et.attempts", "+"), clause)
+		exploMaxIdentifyAttempts, exploNextDueTimeExpr("et.processed_at"), clause)
 	var inFolder, identified, waiting, retired int
 	var nextDue string
 	if err := s.db.QueryRowContext(ctx, query, args...).Scan(&inFolder, &identified, &waiting, &retired, &nextDue); err != nil {
@@ -294,19 +348,27 @@ func (s *Service) logIdlePassStatus(ctx context.Context) {
 	if len(dirs) > 0 {
 		folder = dirs[0]
 	}
+	var line string
 	if inFolder == 0 {
-		s.logger("explo: folder %q matches 0 tracks in the library — check the path is correct and inside a scanned library", folder)
-		return
+		line = fmt.Sprintf("explo: folder %q matches 0 tracks in the library — check the path is correct and inside a scanned library", folder)
+	} else {
+		parts := []string{fmt.Sprintf("%d identified", identified)}
+		if waiting > 0 {
+			parts = append(parts, fmt.Sprintf("%d awaiting retry (next due %s UTC)", waiting, nextDue))
+		}
+		if retired > 0 {
+			parts = append(parts, fmt.Sprintf("%d retired after %d failed attempts", retired, exploMaxIdentifyAttempts))
+		}
+		line = fmt.Sprintf("explo: nothing due this pass — %d track(s) under %q: %s", inFolder, folder, strings.Join(parts, ", "))
 	}
 
-	parts := []string{fmt.Sprintf("%d identified", identified)}
-	if waiting > 0 {
-		parts = append(parts, fmt.Sprintf("%d awaiting retry (next due %s UTC)", waiting, nextDue))
+	s.idleMu.Lock()
+	repeat := line == s.lastIdleStatus
+	s.lastIdleStatus = line
+	s.idleMu.Unlock()
+	if !repeat {
+		s.logger("%s", line)
 	}
-	if retired > 0 {
-		parts = append(parts, fmt.Sprintf("%d retired after %d failed attempts", retired, exploMaxIdentifyAttempts))
-	}
-	s.logger("explo: nothing due this pass — %d track(s) under %q: %s", inFolder, folder, strings.Join(parts, ", "))
 }
 
 // exploPathClause builds a SQL predicate matching media_files under any of the
@@ -316,12 +378,14 @@ func (s *Service) logIdlePassStatus(ctx context.Context) {
 // off" means "nothing is explo," which is exactly what we want for recovery.
 func exploPathClause(dirs []string) (string, []any) {
 	if len(dirs) == 0 {
-		return "0", nil
+		// A boolean literal, because the predicate lands in WHERE/AND
+		// positions where Postgres requires a boolean expression.
+		return "FALSE", nil
 	}
 	clauses := make([]string, 0, len(dirs))
 	args := make([]any, 0, len(dirs))
 	for _, dir := range dirs {
-		clauses = append(clauses, `mf.path LIKE ? ESCAPE '\'`)
+		clauses = append(clauses, `mf.path ILIKE ? ESCAPE '\'`)
 		args = append(args, likePrefix(dir)+"%")
 	}
 	return "(" + strings.Join(clauses, " OR ") + ")", args
@@ -355,8 +419,12 @@ func (s *Service) reconcileHiddenAlbums(ctx context.Context, dirs []string) (hid
 		  AND NOT EXISTS (
 		    SELECT 1 FROM music_tracks mt JOIN media_files mf ON mf.track_id = mt.id
 		    WHERE mt.album_id = music_albums.id AND NOT %s)`, match, match)
-	res, err := s.db.ExecContext(ctx, hideSQL, append(append([]any{}, args...), args...)...)
-	if err != nil {
+	var res sql.Result
+	if err := storage.Retry(ctx, exploWriteAttempts, func() error {
+		var retryErr error
+		res, retryErr = s.db.ExecContext(ctx, hideSQL, append(append([]any{}, args...), args...)...)
+		return retryErr
+	}); err != nil {
 		return 0, 0, fmt.Errorf("explo hide albums: %w", err)
 	}
 	hidden, _ = res.RowsAffected()
@@ -372,12 +440,63 @@ func (s *Service) reconcileHiddenAlbums(ctx context.Context, dirs []string) (hid
 		    OR EXISTS (
 		      SELECT 1 FROM music_tracks mt JOIN media_files mf ON mf.track_id = mt.id
 		      WHERE mt.album_id = music_albums.id AND NOT %s))`, match, match)
-	res2, err := s.db.ExecContext(ctx, unhideSQL, append(append([]any{}, args...), args...)...)
-	if err != nil {
+	var res2 sql.Result
+	if err := storage.Retry(ctx, exploWriteAttempts, func() error {
+		var retryErr error
+		res2, retryErr = s.db.ExecContext(ctx, unhideSQL, append(append([]any{}, args...), args...)...)
+		return retryErr
+	}); err != nil {
 		return hidden, 0, fmt.Errorf("explo unhide albums: %w", err)
 	}
 	unhidden, _ = res2.RowsAffected()
 	return hidden, unhidden, nil
+}
+
+// reconcileExploTracks makes music_tracks.is_explo match the CURRENTLY
+// configured explo folder(s), in both directions, exactly like the album
+// flag: a track is explo iff its media file lives under an explo folder.
+// This is the per-track silo marker the catalog projection reads — album
+// hiding keeps Recently Added clean, but only a track-level fact lets the
+// list/browse/search surfaces exclude explo content without path joins.
+// Bumps updated_at on flipped rows so delta-syncing clients re-pull them.
+// Returns how many rows it newly flagged and un-flagged.
+func (s *Service) reconcileExploTracks(ctx context.Context, dirs []string) (flagged, unflagged int64, err error) {
+	match, args := exploPathClause(dirs)
+
+	flagSQL := fmt.Sprintf(`
+		UPDATE music_tracks
+		SET is_explo = 1, updated_at = CURRENT_TIMESTAMP
+		WHERE is_explo = 0
+		  AND EXISTS (
+		    SELECT 1 FROM media_files mf
+		    WHERE mf.track_id = music_tracks.id AND %s)`, match)
+	var res sql.Result
+	if err := storage.Retry(ctx, exploWriteAttempts, func() error {
+		var retryErr error
+		res, retryErr = s.db.ExecContext(ctx, flagSQL, args...)
+		return retryErr
+	}); err != nil {
+		return 0, 0, fmt.Errorf("explo flag tracks: %w", err)
+	}
+	flagged, _ = res.RowsAffected()
+
+	unflagSQL := fmt.Sprintf(`
+		UPDATE music_tracks
+		SET is_explo = 0, updated_at = CURRENT_TIMESTAMP
+		WHERE is_explo = 1
+		  AND NOT EXISTS (
+		    SELECT 1 FROM media_files mf
+		    WHERE mf.track_id = music_tracks.id AND %s)`, match)
+	var res2 sql.Result
+	if err := storage.Retry(ctx, exploWriteAttempts, func() error {
+		var retryErr error
+		res2, retryErr = s.db.ExecContext(ctx, unflagSQL, args...)
+		return retryErr
+	}); err != nil {
+		return flagged, 0, fmt.Errorf("explo unflag tracks: %w", err)
+	}
+	unflagged, _ = res2.RowsAffected()
+	return flagged, unflagged, nil
 }
 
 // pruneVanishedFiles deletes tracks whose file has disappeared from an explo
@@ -433,7 +552,10 @@ func (s *Service) pruneVanishedFiles(ctx context.Context, dirs []string) (int, e
 			// File present, or an ambiguous error — never prune on doubt.
 			continue
 		}
-		if _, err := s.db.ExecContext(ctx, `DELETE FROM music_tracks WHERE id = ?`, c.trackID); err != nil {
+		if err := storage.Retry(ctx, exploWriteAttempts, func() error {
+			_, retryErr := s.db.ExecContext(ctx, `DELETE FROM music_tracks WHERE id = ?`, c.trackID)
+			return retryErr
+		}); err != nil {
 			s.logger("explo: prune vanished track %s failed: %v", c.trackID, err)
 			continue
 		}
@@ -456,7 +578,10 @@ func (s *Service) pruneExploLedger(ctx context.Context, dirs []string) error {
 		WHERE track_id NOT IN (
 		  SELECT mt.id FROM music_tracks mt JOIN media_files mf ON mf.track_id = mt.id
 		  WHERE %s)`, match)
-	if _, err := s.db.ExecContext(ctx, query, args...); err != nil {
+	if err := storage.Retry(ctx, exploWriteAttempts, func() error {
+		_, execErr := s.db.ExecContext(ctx, query, args...)
+		return execErr
+	}); err != nil {
 		return fmt.Errorf("explo prune ledger: %w", err)
 	}
 	return nil
@@ -537,9 +662,12 @@ func (s *Service) reconcileExploPlaylist(ctx context.Context) (bool, error) {
 	// Ownership repair: only ever adopts away from the internal bootstrap
 	// account - a playlist a human admin owns is left alone.
 	if currentOwner == users.BootstrapUserID && ownerID != users.BootstrapUserID {
-		if _, err := s.db.ExecContext(ctx, `
-			UPDATE music_playlists SET owner_id = ?, updated_at = CURRENT_TIMESTAMP
-			WHERE id = ?`, ownerID, playlistID); err != nil {
+		if err := storage.Retry(ctx, exploWriteAttempts, func() error {
+			_, retryErr := s.db.ExecContext(ctx, `
+				UPDATE music_playlists SET owner_id = ?, updated_at = CURRENT_TIMESTAMP
+				WHERE id = ?`, ownerID, playlistID)
+			return retryErr
+		}); err != nil {
 			return false, fmt.Errorf("re-own explo playlist: %w", err)
 		}
 		changed = true
@@ -549,9 +677,12 @@ func (s *Service) reconcileExploPlaylist(ctx context.Context) (bool, error) {
 	// renamed in place (adoption above is name-agnostic), keeping its id,
 	// members, and client references stable.
 	if currentName != s.playlistName {
-		if _, err := s.db.ExecContext(ctx, `
-			UPDATE music_playlists SET name = ?, updated_at = CURRENT_TIMESTAMP
-			WHERE id = ?`, s.playlistName, playlistID); err != nil {
+		if err := storage.Retry(ctx, exploWriteAttempts, func() error {
+			_, retryErr := s.db.ExecContext(ctx, `
+				UPDATE music_playlists SET name = ?, updated_at = CURRENT_TIMESTAMP
+				WHERE id = ?`, s.playlistName, playlistID)
+			return retryErr
+		}); err != nil {
 			return false, fmt.Errorf("rename explo playlist: %w", err)
 		}
 		changed = true
@@ -592,21 +723,25 @@ func (s *Service) reconcileExploPlaylist(ctx context.Context) (bool, error) {
 	return true, nil
 }
 
-// syncExploState reconciles all persisted explo side-effects (hidden flags,
-// the ledger, and the playlist) to the given folder set. Callers pass the
-// currently-effective dirs; an empty set fully un-does everything. Returns
-// how many albums were newly hidden/un-hidden and whether the playlist row
-// itself changed (membership, ownership, or creation).
-func (s *Service) syncExploState(ctx context.Context, dirs []string) (hidden, unhidden int64, playlistChanged bool, err error) {
+// syncExploState reconciles all persisted explo side-effects (track flags,
+// hidden album flags, the ledger, and the playlist) to the given folder set.
+// Callers pass the currently-effective dirs; an empty set fully un-does
+// everything. Returns how many albums were newly hidden/un-hidden and
+// whether anything else (track flags, playlist) changed.
+func (s *Service) syncExploState(ctx context.Context, dirs []string) (hidden, unhidden int64, otherChanged bool, err error) {
 	if err := s.pruneExploLedger(ctx, dirs); err != nil {
 		s.logger("explo: %v", err)
+	}
+	flagged, unflagged, tracksErr := s.reconcileExploTracks(ctx, dirs)
+	if tracksErr != nil {
+		s.logger("explo: %v", tracksErr)
 	}
 	playlistChanged, playlistErr := s.reconcileExploPlaylist(ctx)
 	if playlistErr != nil {
 		s.logger("explo: %v", playlistErr)
 	}
 	hidden, unhidden, err = s.reconcileHiddenAlbums(ctx, dirs)
-	return hidden, unhidden, playlistChanged, err
+	return hidden, unhidden, playlistChanged || flagged > 0 || unflagged > 0, err
 }
 
 // PruneRotatedOutFiles removes ghost tracks left behind when the explo exporter
@@ -654,131 +789,15 @@ func (s *Service) ReconcileRecentlyAdded(ctx context.Context) error {
 	}
 	s.processMu.Lock()
 	defer s.processMu.Unlock()
-	hidden, unhidden, playlistChanged, err := s.syncExploState(ctx, s.effectiveDirs())
+	hidden, unhidden, otherChanged, err := s.syncExploState(ctx, s.effectiveDirs())
 	if err != nil {
 		return err
 	}
-	if (hidden > 0 || unhidden > 0 || playlistChanged) && s.reloadCatalog != nil {
+	if (hidden > 0 || unhidden > 0 || otherChanged) && s.reloadCatalog != nil {
 		s.logger("explo: reconcile hid %d, un-hid %d album(s) in Recently Added", hidden, unhidden)
 		return s.reloadCatalog(ctx)
 	}
 	return nil
-}
-
-// BackfillCovers fetches album art for already-identified explo albums that
-// don't have it yet: the ones matched before cover support existed, plus any
-// where an earlier cover fetch failed. It resolves each album's cover from the
-// MusicBrainz recording ID stored at match time (no re-fingerprinting, no
-// AcoustID re-billing) and downloads it into the local cover store. Safe to
-// call repeatedly - each album is attempted once (tracked by
-// explo_tracks.cover_status), and it serializes on its own mutex so it never
-// blocks scan-triggered processing. Reloads the catalog if it applied any art.
-func (s *Service) BackfillCovers(ctx context.Context) error {
-	if s == nil || s.db == nil || s.metadataApply == nil {
-		return nil
-	}
-	s.backfillMu.Lock()
-	defer s.backfillMu.Unlock()
-	applied, err := s.backfillMissingCovers(ctx, s.effectiveDirs())
-	if err != nil {
-		return err
-	}
-	if applied > 0 {
-		s.logger("explo: backfilled cover art for %d album(s)", applied)
-		if s.reloadCatalog != nil {
-			return s.reloadCatalog(ctx)
-		}
-	}
-	return nil
-}
-
-func (s *Service) backfillMissingCovers(ctx context.Context, dirs []string) (int, error) {
-	match, args := exploPathClause(dirs)
-	// One representative recording MBID per explo album not yet attempted.
-	query := fmt.Sprintf(`
-		SELECT mt.album_id, MAX(et.musicbrainz_recording_id)
-		FROM explo_tracks et
-		JOIN music_tracks mt ON mt.id = et.track_id
-		JOIN media_files mf ON mf.track_id = mt.id
-		WHERE et.cover_status = ''
-		  AND et.musicbrainz_recording_id != ''
-		  AND COALESCE(mt.album_id, '') != ''
-		  AND %s
-		GROUP BY mt.album_id`, match)
-	rows, err := s.db.QueryContext(ctx, query, args...)
-	if err != nil {
-		return 0, fmt.Errorf("explo backfill query: %w", err)
-	}
-	type target struct{ albumID, recordingMBID string }
-	var targets []target
-	for rows.Next() {
-		var t target
-		if err := rows.Scan(&t.albumID, &t.recordingMBID); err != nil {
-			rows.Close()
-			return 0, err
-		}
-		targets = append(targets, t)
-	}
-	rows.Close()
-	if err := rows.Err(); err != nil {
-		return 0, err
-	}
-	if len(targets) > 0 {
-		// Announce up front: the MusicBrainz throttle stretches a batch over
-		// minutes, and the completion line only prints at the very end.
-		s.logger("explo: backfilling cover art for %d album(s)", len(targets))
-	}
-
-	applied := 0
-	for _, t := range targets {
-		select {
-		case <-ctx.Done():
-			return applied, ctx.Err()
-		default:
-		}
-		s.throttleMusicBrainz(ctx)
-		rg, err := fetchReleaseGroupID(ctx, s.httpClient, t.recordingMBID)
-		if err != nil {
-			// Transient - leave cover_status pending so it retries next run.
-			s.logger("explo: cover lookup failed for album %s: %v", t.albumID, err)
-			continue
-		}
-		if rg != "" {
-			if err := s.applyAlbumCover(ctx, t.albumID, rg); err != nil {
-				s.logger("explo: apply cover failed for album %s: %v", t.albumID, err)
-			} else {
-				applied++
-			}
-		}
-		// Mark every pending explo track on this album as attempted (cover found
-		// or not) so we don't re-query MusicBrainz for it on every scan.
-		if _, err := s.db.ExecContext(ctx, `
-			UPDATE explo_tracks SET cover_status = 'done'
-			WHERE cover_status = '' AND track_id IN (SELECT id FROM music_tracks WHERE album_id = ?)`, t.albumID); err != nil {
-			s.logger("explo: mark cover_status failed for album %s: %v", t.albumID, err)
-		}
-	}
-	return applied, nil
-}
-
-// applyAlbumCover applies a Cover Art Archive front cover (by release-group
-// MBID) to an album through the normal override pipeline, which downloads the
-// image into the local cover store so it serves same-origin (CSP-safe).
-func (s *Service) applyAlbumCover(ctx context.Context, albumID, releaseGroupMBID string) error {
-	url := coverArtArchiveURL(releaseGroupMBID)
-	if url == "" {
-		return nil
-	}
-	_, err := s.metadataApply.Apply(ctx, metadata.MetadataApplyRequest{
-		TargetKind: string(metadata.ApplyTargetMusicAlbum),
-		TargetID:   albumID,
-		// ID satisfies the apply validation (needs a Title or ID); only the
-		// "cover" field is actually applied, so nothing else on the album moves.
-		Candidate:          metadata.SearchResult{Provider: "explo", MediaType: "album", ID: releaseGroupMBID, Cover: &catalog.Image{URL: url}},
-		Fields:             []string{"cover"},
-		DeferCatalogReload: true,
-	})
-	return err
 }
 
 func (s *Service) identify(ctx context.Context, path string) (identifiedTrack, bool, error) {
@@ -811,7 +830,7 @@ func (s *Service) identifyWithFallback(ctx context.Context, candidate candidateT
 		return match, true, nil
 	}
 
-	fallback, fallbackMatched, fallbackErr := s.identifyByTextSearch(ctx, candidate.path, candidate.durationSeconds)
+	fallback, fallbackMatched, fallbackErr := s.identifyByTextSearch(ctx, candidate.path, candidate.title, candidate.artist, candidate.durationSeconds)
 	if fallbackErr != nil {
 		s.logger("explo: fallback text search failed for %q: %v", candidate.path, fallbackErr)
 	}
@@ -852,12 +871,15 @@ func (s *Service) applyMatch(ctx context.Context, trackID, albumID string, match
 	if match.Artist != "" {
 		trackCandidate.Authors = []catalog.ContributorRef{{Name: match.Artist}}
 	}
-	if _, err := s.metadataApply.Apply(ctx, metadata.MetadataApplyRequest{
-		TargetKind:         string(metadata.ApplyTargetMusicTrack),
-		TargetID:           trackID,
-		Candidate:          trackCandidate,
-		Fields:             []string{"title", "displayArtist", "externalIds"},
-		DeferCatalogReload: true,
+	if err := storage.Retry(ctx, exploWriteAttempts, func() error {
+		_, err := s.metadataApply.Apply(ctx, metadata.MetadataApplyRequest{
+			TargetKind:         string(metadata.ApplyTargetMusicTrack),
+			TargetID:           trackID,
+			Candidate:          trackCandidate,
+			Fields:             []string{"title", "displayArtist", "externalIds"},
+			DeferCatalogReload: true,
+		})
+		return err
 	}); err != nil {
 		return fmt.Errorf("apply track metadata: %w", err)
 	}
@@ -865,10 +887,22 @@ func (s *Service) applyMatch(ctx context.Context, trackID, albumID string, match
 	if albumID == "" {
 		return nil
 	}
+	if strings.TrimSpace(match.Album) == "" && strings.TrimSpace(match.Artist) == "" {
+		// Nothing identifiable to write at the album level. (Covers are NOT
+		// applied here at all anymore: the cover engine in covers.go owns
+		// them, verifies every download, and retries on a ladder - attaching
+		// an unverified CAA URL here is how albums used to end up serving a
+		// dead external redirect as their "art".)
+		return nil
+	}
 	albumCandidate := metadata.SearchResult{
 		Provider:  match.Source,
 		MediaType: "album",
 		Title:     match.Album,
+		// ID keeps the apply-layer validation satisfied when the match has an
+		// artist but no release-group title; only the fields listed below are
+		// ever applied.
+		ID: albumID,
 	}
 	if match.Artist != "" {
 		albumCandidate.Authors = []catalog.ContributorRef{{Name: match.Artist}}
@@ -877,21 +911,15 @@ func (s *Service) applyMatch(ctx context.Context, trackID, albumID string, match
 	if strings.TrimSpace(match.Album) != "" {
 		fields = append(fields, "title")
 	}
-	// Fetch album art from the Cover Art Archive so identified explo albums get
-	// a real cover instead of a blank tile. The apply pipeline downloads the URL
-	// into the local cover store, so it renders same-origin (CSP-safe) and
-	// survives even if CAA is later unreachable. A missing cover (CAA 404) just
-	// leaves the album art untouched - resolveCoverInCandidate soft-fails.
-	if url := coverArtArchiveURL(match.MusicBrainzReleaseGroupID); url != "" {
-		albumCandidate.Cover = &catalog.Image{URL: url}
-		fields = append(fields, "cover")
-	}
-	if _, err := s.metadataApply.Apply(ctx, metadata.MetadataApplyRequest{
-		TargetKind:         string(metadata.ApplyTargetMusicAlbum),
-		TargetID:           albumID,
-		Candidate:          albumCandidate,
-		Fields:             fields,
-		DeferCatalogReload: true,
+	if err := storage.Retry(ctx, exploWriteAttempts, func() error {
+		_, err := s.metadataApply.Apply(ctx, metadata.MetadataApplyRequest{
+			TargetKind:         string(metadata.ApplyTargetMusicAlbum),
+			TargetID:           albumID,
+			Candidate:          albumCandidate,
+			Fields:             fields,
+			DeferCatalogReload: true,
+		})
+		return err
 	}); err != nil {
 		return fmt.Errorf("apply album metadata: %w", err)
 	}
@@ -910,32 +938,117 @@ func coverArtArchiveURL(releaseGroupMBID string) string {
 }
 
 func (s *Service) recordProcessed(ctx context.Context, trackID, status string, match identifiedTrack, errText string) error {
-	// Upsert (not INSERT OR IGNORE): a retried track REPLACES its ledger row
-	// with the newest outcome and bumps `attempts`, so findCandidateTracks'
-	// retry budget is enforceable. cover_status is deliberately untouched —
-	// the cover backfill owns that column.
-	_, err := s.db.ExecContext(ctx, `
-		INSERT INTO explo_tracks (
-		  track_id, status, acoustid_id, musicbrainz_recording_id, matched_title, matched_artist, score, error, processed_at, attempts
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, 1)
-		ON CONFLICT(track_id) DO UPDATE SET
-		  status = excluded.status,
-		  acoustid_id = excluded.acoustid_id,
-		  musicbrainz_recording_id = excluded.musicbrainz_recording_id,
-		  matched_title = excluded.matched_title,
-		  matched_artist = excluded.matched_artist,
-		  score = excluded.score,
-		  error = excluded.error,
-		  processed_at = excluded.processed_at,
-		  attempts = explo_tracks.attempts + 1`,
-		trackID, status, match.AcoustID, match.MusicBrainzRecordingID, match.Title, match.Artist, match.Score, errText)
-	return err
+	// Upsert: a retried track REPLACES its ledger row with the newest outcome
+	// and bumps `attempts`, so findCandidateTracks' retry budget is
+	// enforceable. The cover columns are deliberately untouched — the cover
+	// engine (covers.go) owns them. The release group MBID IS persisted here
+	// so that engine can build Cover Art Archive URLs without re-asking
+	// MusicBrainz for an id AcoustID already reported. Wrapped in
+	// storage.Retry: a transient Postgres failure (serialization/deadlock)
+	// here would otherwise drop the ledger update even when identification
+	// succeeded, leaving the track "unmatched" to re-run forever.
+	return storage.Retry(ctx, exploWriteAttempts, func() error {
+		_, err := s.db.ExecContext(ctx, `
+			INSERT INTO explo_tracks (
+			  track_id, status, acoustid_id, musicbrainz_recording_id, musicbrainz_release_group_id, matched_title, matched_artist, score, error, processed_at, attempts
+			) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, 1)
+			ON CONFLICT(track_id) DO UPDATE SET
+			  status = excluded.status,
+			  acoustid_id = excluded.acoustid_id,
+			  musicbrainz_recording_id = excluded.musicbrainz_recording_id,
+			  musicbrainz_release_group_id = excluded.musicbrainz_release_group_id,
+			  matched_title = excluded.matched_title,
+			  matched_artist = excluded.matched_artist,
+			  score = excluded.score,
+			  error = excluded.error,
+			  processed_at = excluded.processed_at,
+			  attempts = explo_tracks.attempts + 1`,
+			trackID, status, match.AcoustID, match.MusicBrainzRecordingID, match.MusicBrainzReleaseGroupID, match.Title, match.Artist, match.Score, errText)
+		return err
+	})
+}
+
+// ReprocessResult summarizes a manual reprocess request.
+type ReprocessResult struct {
+	IdentificationReset int `json:"identificationReset"`
+	CoversReset         int `json:"coversReset"`
+}
+
+// Reprocess forces the explo pipeline to re-run for everything already in the
+// ledger — the manual escape hatch when tracks are stranded. Two independent
+// resets:
+//
+//  1. Failed identifications (unmatched/error) get their attempt budget and
+//     backoff cleared so they re-identify from scratch. Without this a track
+//     that failed exploMaxIdentifyAttempts times — e.g. during the AcoustID
+//     outage when the meta-encoding bug dropped every recording — is retired
+//     FOREVER, with no way back short of raw SQL. This is what makes "retry
+//     metadata grabbing" possible from the UI.
+//
+//  2. Matched tracks keep their identified title/artist but have their cover
+//     state reset, so the per-track cover engine re-resolves art. This also
+//     migrates data written by the old album-wide cover pass (which painted
+//     every drop with one shared cover) onto per-track art.
+//
+// Ledger rows are reset in place, not deleted, so the Explore playlist
+// membership never flickers. The caller kicks ProcessNewTracks + BackfillCovers
+// afterward to act on the reset rows.
+func (s *Service) Reprocess(ctx context.Context) (ReprocessResult, error) {
+	var res ReprocessResult
+	if s == nil || s.db == nil {
+		return res, ErrDisabled
+	}
+	if err := storage.Retry(ctx, exploWriteAttempts, func() error {
+		// processed_at is RFC3339 TEXT but exploNextDueTimeExpr casts it
+		// ::timestamp, so it must stay a valid timestamp string — NOT '' (that
+		// threw "invalid input syntax for type timestamp" and broke the ledger
+		// summary). The epoch is the oldest possible value, so the row is
+		// immediately eligible regardless of its backoff rung.
+		result, err := s.db.ExecContext(ctx, `
+			UPDATE explo_tracks
+			SET attempts = 0, processed_at = '1970-01-01T00:00:00Z'
+			WHERE status IN ('unmatched', 'error')`)
+		if err != nil {
+			return err
+		}
+		if n, affErr := result.RowsAffected(); affErr == nil {
+			res.IdentificationReset = int(n)
+		}
+		return nil
+	}); err != nil {
+		return res, fmt.Errorf("reset identification: %w", err)
+	}
+	if err := storage.Retry(ctx, exploWriteAttempts, func() error {
+		result, err := s.db.ExecContext(ctx, `
+			UPDATE explo_tracks
+			SET cover_status = '', cover_attempts = 0, cover_attempted_at = ''
+			WHERE status IN ('matched', 'matched-fallback') AND cover_status != ''`)
+		if err != nil {
+			return err
+		}
+		if n, affErr := result.RowsAffected(); affErr == nil {
+			res.CoversReset = int(n)
+		}
+		return nil
+	}); err != nil {
+		return res, fmt.Errorf("reset covers: %w", err)
+	}
+	s.logger("explo: reprocess reset %d failed identification(s) and %d cover(s)", res.IdentificationReset, res.CoversReset)
+	return res, nil
 }
 
 type candidateTrack struct {
 	trackID string
 	albumID string
 	path    string
+	// title/artist are the scanner's parsed tags (title + display artist). The
+	// text-search fallback prefers them over re-parsing the filename: the
+	// scanner already split "Artist - Album - Title.mp3" into clean fields,
+	// whereas a crude filename re-parse folds the album into the title and
+	// never matches. Either may be empty (a genuinely tag-less drop), in which
+	// case the fallback still parses the filename.
+	title  string
+	artist string
 	// durationSeconds is the scanner's (ffprobe-measured) duration, used as
 	// the trusted reference for the text-search fallback's duration gate -
 	// independent of whether fpcalc/AcoustID ever ran successfully.
@@ -943,36 +1056,62 @@ type candidateTrack struct {
 }
 
 // Identification retry policy. Explo drops are fresh releases: AcoustID
-// frequently has no fingerprint for a song until days/weeks after release, so
-// the first pass (hours after the drop lands) legitimately fails for much of
-// the batch. Failed rows retry on a front-loaded backoff — fresh releases
-// usually become identifiable within days, and a flat week-long first wait
-// left a whole drop visibly broken while the server had nothing to do.
-// Errors share the ladder: transient ones heal on the early rungs, persistent
-// ones back off instead of re-failing daily. Either way a row retires at the
-// attempt budget so a genuinely unidentifiable rip doesn't hit AcoustID
-// forever.
-const exploMaxIdentifyAttempts = 5
+// frequently has no fingerprint for a song until days or even WEEKS after
+// release, so early passes legitimately fail for much of the batch. Failed
+// rows retry on a front-loaded backoff; errors share the ladder (transient
+// ones heal on the early rungs, persistent ones back off instead of
+// re-failing daily). A row retires at the attempt budget so a genuinely
+// unidentifiable rip doesn't hit AcoustID forever.
+//
+// The budget is 10, up from 5 (2026-07-16): with the old 5-attempt budget a
+// fresh release's window closed after ~8 days — tracks off brand-new albums
+// (DONT TAP THE GLASS was the reported case) burned out before AcoustID knew
+// them and then sat retired FOREVER, even once every database had them.
+// Raising the budget also retroactively un-retires previously spent rows
+// (attempts 5..9 requalify against the new limit) — no migration needed.
+const exploMaxIdentifyAttempts = 10
 
 // exploRetryBackoff[i] is how long a row waits after its (i+1)-th failed
-// attempt; rows past the end of the table reuse the last wait until the budget
-// retires them. Front-loaded so a transiently-failed identify — or one blocked
-// by a since-fixed bug — is retried within the hour and its metadata written
-// promptly, instead of a drop sitting unidentified for a full day.
-var exploRetryBackoff = []string{"1 hour", "6 hours", "1 day", "3 days"}
+// attempt; rows past the end of the table reuse the last wait until the
+// budget retires them. Front-loaded so a transiently-failed identify is
+// retried within the hour, then settling to weekly: attempts 6..10 wait 7
+// days each, stretching total runway to roughly two months of coverage —
+// past the point where any real release is identifiable.
+var exploRetryBackoff = []string{"1 hour", "6 hours", "1 day", "3 days", "7 days"}
 
-// exploBackoffCase renders the ladder as a SQL CASE over an attempts column:
-// sign "-" for the eligibility check against datetime('now', ...), sign "+"
-// to project a row's next due time forward from its processed_at.
-func exploBackoffCase(column, sign string) string {
+// exploBackoffCaseOver renders a retry ladder as a SQL CASE over an attempts
+// column, yielding an interval literal ('1 hour', '6 hours', ...) for
+// ::interval casts. Shared by the identify and cover ladders.
+func exploBackoffCaseOver(column string, ladder []string) string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "CASE %s", column)
-	last := len(exploRetryBackoff) - 1
-	for i, wait := range exploRetryBackoff[:last] {
-		fmt.Fprintf(&b, " WHEN %d THEN '%s%s'", i+1, sign, wait)
+	last := len(ladder) - 1
+	for i, wait := range ladder[:last] {
+		fmt.Fprintf(&b, " WHEN %d THEN '%s'", i+1, wait)
 	}
-	fmt.Fprintf(&b, " ELSE '%s%s' END", sign, exploRetryBackoff[last])
+	fmt.Fprintf(&b, " ELSE '%s' END", ladder[last])
 	return b.String()
+}
+
+func exploBackoffCase(column string) string {
+	return exploBackoffCaseOver(column, exploRetryBackoff)
+}
+
+// exploNextDueTimeExpr projects a row's next due time forward from its processed_at.
+func exploNextDueTimeExpr(column string) string {
+	return fmt.Sprintf(`to_char(%s::timestamp + (%s)::interval, 'YYYY-MM-DD"T"HH24:MI:SS"Z"')`, column, exploBackoffCase("et.attempts"))
+}
+
+// exploEligibilityCheckExpr evaluates if a row's processed_at is old enough to
+// retry: a text comparison of RFC3339 UTC strings, which order
+// lexicographically exactly as they order in time. The now() operand MUST be
+// pinned with AT TIME ZONE 'UTC': the stored column is UTC text, but bare
+// to_char(now(), ...) formats in the session TimeZone — on a non-UTC Postgres
+// that skewed every retry window by the full UTC offset. Every other
+// timestamp site in this codebase (schema defaults, the CURRENT_TIMESTAMP
+// rewriter) already pins UTC the same way.
+func exploEligibilityCheckExpr(column string) string {
+	return fmt.Sprintf(`%s <= to_char((now() AT TIME ZONE 'UTC') - (%s)::interval, 'YYYY-MM-DD"T"HH24:MI:SS"Z"')`, column, exploBackoffCase("et.attempts"))
 }
 
 // findCandidateTracks returns explo-folder tracks that are due for an
@@ -988,11 +1127,11 @@ func (s *Service) findCandidateTracks(ctx context.Context) ([]candidateTrack, er
 	clauses := make([]string, 0, len(dirs))
 	args := make([]any, 0, len(dirs))
 	for _, dir := range dirs {
-		clauses = append(clauses, "mf.path LIKE ? ESCAPE '\\'")
+		clauses = append(clauses, `mf.path ILIKE ? ESCAPE '\'`)
 		args = append(args, likePrefix(dir)+"%")
 	}
 	query := fmt.Sprintf(`
-		SELECT mt.id, COALESCE(mt.album_id, ''), mf.path, mt.duration_seconds
+		SELECT mt.id, COALESCE(mt.album_id, ''), mf.path, COALESCE(mt.title, ''), COALESCE(mt.display_artist, ''), mt.duration_seconds
 		FROM music_tracks mt
 		JOIN media_files mf ON mf.track_id = mt.id
 		LEFT JOIN explo_tracks et ON et.track_id = mt.id
@@ -1001,12 +1140,12 @@ func (s *Service) findCandidateTracks(ctx context.Context) ([]candidateTrack, er
 		  OR (
 		    et.status IN ('unmatched', 'error')
 		    AND et.attempts < %d
-		    AND et.processed_at <= datetime('now', %s)
+		    AND %s
 		  )
 		) AND (%s)
 		ORDER BY mt.added_at, mt.id`,
 		exploMaxIdentifyAttempts,
-		exploBackoffCase("et.attempts", "-"),
+		exploEligibilityCheckExpr("et.processed_at"),
 		strings.Join(clauses, " OR "))
 
 	rows, err := s.db.QueryContext(ctx, query, args...)
@@ -1018,7 +1157,7 @@ func (s *Service) findCandidateTracks(ctx context.Context) ([]candidateTrack, er
 	var out []candidateTrack
 	for rows.Next() {
 		var candidate candidateTrack
-		if err := rows.Scan(&candidate.trackID, &candidate.albumID, &candidate.path, &candidate.durationSeconds); err != nil {
+		if err := rows.Scan(&candidate.trackID, &candidate.albumID, &candidate.path, &candidate.title, &candidate.artist, &candidate.durationSeconds); err != nil {
 			return nil, err
 		}
 		out = append(out, candidate)
@@ -1026,8 +1165,8 @@ func (s *Service) findCandidateTracks(ctx context.Context) ([]candidateTrack, er
 	return out, rows.Err()
 }
 
-// likePrefix escapes SQLite LIKE wildcard characters in a filesystem path so
-// it can be safely used as a `path LIKE prefix || '%' ESCAPE '\'` prefix
+// likePrefix escapes LIKE/ILIKE wildcard characters in a filesystem path so
+// it can be safely used as a `path ILIKE prefix || '%' ESCAPE '\'` prefix
 // match instead of an exact-equality comparison.
 func likePrefix(path string) string {
 	replacer := strings.NewReplacer(`\`, `\\`, `%`, `\%`, `_`, `\_`)

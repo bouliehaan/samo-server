@@ -85,7 +85,7 @@ When a music track becomes favorited or starred through playback updates, Samo c
 
 ## Queue, history, and recovery
 
-Failed upstream calls are stored in SQLite and retried by the background poller.
+Failed upstream calls are stored in the database and retried by the background poller.
 
 | Route | Purpose |
 |-------|---------|

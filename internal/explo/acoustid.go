@@ -62,6 +62,12 @@ type acoustidReleaseGrp struct {
 	ID    string `json:"id"`
 	Title string `json:"title"`
 	Type  string `json:"type"`
+	// SecondaryTypes flags derived release groups ("Compilation", "Live",
+	// "Remix", ...). A classic hit appears on hundreds of compilations, and
+	// picking one of those as "the album" gives the track a random disco
+	// sampler's title and artwork instead of its real record — the exact
+	// failure that made well-known songs render with wrong or missing art.
+	SecondaryTypes []string `json:"secondarytypes"`
 }
 
 // lookupAcoustID identifies a fingerprint against the AcoustID/MusicBrainz
@@ -169,19 +175,43 @@ func bestRecordingIn(recordings []acoustidRecording) (acoustidRecording, bool) {
 	return acoustidRecording{}, false
 }
 
-// bestReleaseGroup returns the MBID and title of the most album-like release
-// group (preferring an "Album" type), so the caller can both name the album and
-// fetch its cover art. Either value may be empty.
+// bestReleaseGroup returns the MBID and title of the release group that best
+// represents the track's OWN record, so the caller can both name the album
+// and fetch its cover art. Ranking: a clean (no secondary types) Album, then
+// a clean Single, then a clean EP, then anything else clean, and only as a
+// last resort a derived release group (Compilation/Live/Remix/...). Either
+// value may be empty.
 func bestReleaseGroup(groups []acoustidReleaseGrp) (id, title string) {
+	bestRank := len(releaseGroupRankOrder) + 2
 	for _, group := range groups {
-		if strings.EqualFold(group.Type, "Album") && strings.TrimSpace(group.Title) != "" {
-			return strings.TrimSpace(group.ID), strings.TrimSpace(group.Title)
+		if strings.TrimSpace(group.Title) == "" {
+			continue
+		}
+		rank := releaseGroupRank(group.Type, group.SecondaryTypes)
+		if rank < bestRank {
+			bestRank = rank
+			id, title = strings.TrimSpace(group.ID), strings.TrimSpace(group.Title)
 		}
 	}
-	for _, group := range groups {
-		if strings.TrimSpace(group.Title) != "" {
-			return strings.TrimSpace(group.ID), strings.TrimSpace(group.Title)
+	return id, title
+}
+
+// releaseGroupRankOrder is the primary-type preference for clean (underived)
+// release groups. Lower index wins.
+var releaseGroupRankOrder = []string{"album", "single", "ep"}
+
+// releaseGroupRank scores a release group for bestReleaseGroup /
+// fetchRecordingReleaseRefs: clean primaries by preference order, any other
+// clean primary next, derived (secondary-typed) groups last.
+func releaseGroupRank(primaryType string, secondaryTypes []string) int {
+	if len(secondaryTypes) > 0 {
+		return len(releaseGroupRankOrder) + 1
+	}
+	primary := strings.ToLower(strings.TrimSpace(primaryType))
+	for index, name := range releaseGroupRankOrder {
+		if primary == name {
+			return index
 		}
 	}
-	return "", ""
+	return len(releaseGroupRankOrder)
 }

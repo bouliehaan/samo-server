@@ -10,8 +10,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/bouliehaan/samo-server/internal/storage"
-	"github.com/bouliehaan/samo-server/migrations"
+	"github.com/bouliehaan/samo-server/internal/storage/storagetest"
 )
 
 func TestProbeIcyStreamCapturesHeadersAndStreamTitle(t *testing.T) {
@@ -100,14 +99,7 @@ func TestProbeIcyStreamWithoutMetadata(t *testing.T) {
 
 func TestProbeInternetRadioStationPersistsMetadata(t *testing.T) {
 	ctx := context.Background()
-	db, err := storage.Open(ctx, t.TempDir()+"/samo.db")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer db.Close()
-	if err := storage.ApplyMigrations(ctx, db, migrations.Files); err != nil {
-		t.Fatal(err)
-	}
+	db := storagetest.Open(t)
 
 	body := buildIcyBody(t, 4096, "StreamTitle='Boards of Canada - Roygbiv';")
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -171,14 +163,7 @@ func TestProbeInternetRadioStationPersistsMetadata(t *testing.T) {
 
 func TestProbeInternetRadioStationClearsStaleNowPlaying(t *testing.T) {
 	ctx := context.Background()
-	db, err := storage.Open(ctx, t.TempDir()+"/samo.db")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer db.Close()
-	if err := storage.ApplyMigrations(ctx, db, migrations.Files); err != nil {
-		t.Fatal(err)
-	}
+	db := storagetest.Open(t)
 
 	firstBody := buildIcyBody(t, 4096, "StreamTitle='Four Tet - Parallel 4';")
 	var requests atomic.Int32
@@ -224,14 +209,7 @@ func TestProbeInternetRadioStationClearsStaleNowPlaying(t *testing.T) {
 
 func TestProbeInternetRadioStationRecordsFailure(t *testing.T) {
 	ctx := context.Background()
-	db, err := storage.Open(ctx, t.TempDir()+"/samo.db")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer db.Close()
-	if err := storage.ApplyMigrations(ctx, db, migrations.Files); err != nil {
-		t.Fatal(err)
-	}
+	db := storagetest.Open(t)
 
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusServiceUnavailable)
@@ -266,14 +244,7 @@ func TestProbeInternetRadioStationRecordsFailure(t *testing.T) {
 
 func TestUpdateInternetRadioStationRejectsBadInterval(t *testing.T) {
 	ctx := context.Background()
-	db, err := storage.Open(ctx, t.TempDir()+"/samo.db")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer db.Close()
-	if err := storage.ApplyMigrations(ctx, db, migrations.Files); err != nil {
-		t.Fatal(err)
-	}
+	db := storagetest.Open(t)
 
 	service := New(db)
 	station, err := service.AddInternetRadioStation(ctx, AddInternetRadioStationInput{
@@ -306,14 +277,7 @@ func TestUpdateInternetRadioStationRejectsBadInterval(t *testing.T) {
 
 func TestUpdateInternetRadioStationPreservesNextProbeForMetadataOnlyEdit(t *testing.T) {
 	ctx := context.Background()
-	db, err := storage.Open(ctx, t.TempDir()+"/samo.db")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer db.Close()
-	if err := storage.ApplyMigrations(ctx, db, migrations.Files); err != nil {
-		t.Fatal(err)
-	}
+	db := storagetest.Open(t)
 
 	service := New(db)
 	station, err := service.AddInternetRadioStation(ctx, AddInternetRadioStationInput{

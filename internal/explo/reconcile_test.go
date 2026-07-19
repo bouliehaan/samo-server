@@ -9,9 +9,8 @@ import (
 	"testing"
 
 	"github.com/bouliehaan/samo-server/internal/playlists"
-	"github.com/bouliehaan/samo-server/internal/storage"
+	"github.com/bouliehaan/samo-server/internal/storage/storagetest"
 	"github.com/bouliehaan/samo-server/internal/users"
-	"github.com/bouliehaan/samo-server/migrations"
 )
 
 func assertCount(t *testing.T, db *sql.DB, query string, want int) {
@@ -55,8 +54,8 @@ func TestPruneVanishedFilesRemovesRotatedOutDrops(t *testing.T) {
 		  ('mf-present','lib-1','t-present','`+present+`','present.mp3','present.mp3',200),
 		  ('mf-rotated','lib-1','t-rotated','`+rotated+`','rotated.mp3','rotated.mp3',200);
 		INSERT INTO explo_tracks (track_id, status, processed_at, attempts) VALUES
-		  ('t-present','unmatched', datetime('now'), 1),
-		  ('t-rotated','error', datetime('now'), 1);`)
+		  ('t-present','unmatched', CURRENT_TIMESTAMP, 1),
+		  ('t-rotated','error', CURRENT_TIMESTAMP, 1);`)
 
 	svc := &Service{db: db, logger: func(string, ...any) {}}
 	pruned, err := svc.pruneVanishedFiles(ctx, []string{dir})
@@ -83,15 +82,7 @@ func TestPruneVanishedFilesRemovesRotatedOutDrops(t *testing.T) {
 
 func newMigratedDB(t *testing.T) *sql.DB {
 	t.Helper()
-	ctx := context.Background()
-	db, err := storage.Open(ctx, t.TempDir()+"/samo.db")
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { db.Close() })
-	if err := storage.ApplyMigrations(ctx, db, migrations.Files); err != nil {
-		t.Fatal(err)
-	}
+	db := storagetest.Open(t)
 	return db
 }
 

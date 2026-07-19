@@ -50,6 +50,7 @@ const appHTML = `<!doctype html>
       <button class="tab" data-tab="audiobooks">AUDIOBOOKS</button>
       <button class="tab" data-tab="podcasts">PODCASTS</button>
       <button class="tab" data-tab="radio">RADIO</button>
+      <button class="tab" data-tab="explo" id="exploTab" hidden>EXPLO</button>
       <button class="tab" data-tab="search">SEARCH</button>
     </nav>
     <div class="app-bar-right">
@@ -4642,6 +4643,8 @@ const appJS = `
       '<div class="actions"><button class="btn primary" type="submit">SAVE</button>' +
         '<button class="btn danger" type="button" id="exploClear">DISABLE &amp; CLEAR</button></div>' +
       '<div class="status-line" id="exploConfigMessage" hidden></div>' +
+      '<div class="actions"><button class="btn ghost" type="button" id="exploReprocess" title="Retry identification for tracks that never matched (e.g. after an AcoustID outage) and re-fetch per-track cover art.">RE-SCAN &amp; RETRY METADATA</button></div>' +
+      '<div class="status-line" id="exploReprocessMessage" hidden></div>' +
     '</form>';
     html += '</div></div>';
     return html;
@@ -5273,6 +5276,21 @@ const appJS = `
           } catch (err) { setMessage("exploConfigMessage", err.message, true); }
         });
       }
+      const reprocessBtn = document.getElementById("exploReprocess");
+      if (reprocessBtn) {
+        reprocessBtn.addEventListener("click", async () => {
+          if (!confirm("Re-scan explo: retry failed identifications and re-fetch cover art for every track? Runs in the background; may take a few minutes.")) return;
+          reprocessBtn.disabled = true;
+          setMessage("exploReprocessMessage", "reprocessing - retrying identification and covers in the background...", false);
+          try {
+            const res = await api("/api/v1/explo/reprocess", { method: "POST" });
+            const idn = (res && res.identificationReset) || 0;
+            const cov = (res && res.coversReset) || 0;
+            setMessage("exploReprocessMessage", "queued " + idn + " track(s) to re-identify and " + cov + " cover(s) to re-fetch - watch the server log for progress", false);
+          } catch (err) { setMessage("exploReprocessMessage", err.message, true); }
+          reprocessBtn.disabled = false;
+        });
+      }
       exploConfigForm.addEventListener("submit", async (event) => {
         event.preventDefault();
         const body = {
@@ -5775,12 +5793,91 @@ const appJS = `
    *   #audiobooks/item/<id>, #audiobooks/author/<id>, #audiobooks/series/<id>
    *   #podcasts/item/<id>
    * navigateTo() pushes the hash; dispatchHash() decides what to render. */
+  /* -------- EXPLO (weekly discovery silo) -------- */
+
+  /* The EXPLO tab lists the auto-identified weekly drop: what got matched,
+   * what's still awaiting an identify/cover retry, and what art it has.
+   * Visible only when explo is configured (boot() unhides #exploTab from
+   * /api/v1/explo/status); a deep-link to #explo on an unconfigured server
+   * renders a pointer to the settings panel instead. */
+  async function viewExplo() {
+    renderLoading();
+    let data;
+    try {
+      data = await api("/api/v1/explo/tracks");
+    } catch (err) { renderError(err.message); return; }
+    if (!data || !data.configured) {
+      main.innerHTML = '<section class="view">' +
+        '<div class="view-head"><h1>EXPLO</h1><span class="crumb">// weekly discovery silo</span></div>' +
+        '<div class="empty-state">// explo is not configured — an admin can point Samo at the weekly drop folder under SETTINGS &rarr; EXPLO</div>' +
+      '</section>';
+      return;
+    }
+    const s = data.summary || {};
+    let html = '<section class="view">' +
+      '<div class="view-head"><h1>EXPLO</h1><span class="crumb">// weekly discovery silo &mdash; kept out of your library, gathered here</span></div>';
+    if (!data.enabled) {
+      html += '<div class="empty-state explo-warn">// pipeline paused — ' + escapeHTML(data.disabledReason || "missing prerequisite") + '</div>';
+    }
+    const chips = [
+      (s.inFolder || 0) + ' IN FOLDER',
+      (s.identified || 0) + ' IDENTIFIED',
+      (s.awaitingRetry || 0) + ' AWAITING RETRY' + (s.nextRetryAt ? ' (next ' + escapeHTML(s.nextRetryAt) + ' UTC)' : ''),
+      (s.retired || 0) + ' RETIRED',
+      (s.coversDone || 0) + ' COVERS',
+      (s.placeholders || 0) + ' PLACEHOLDERS',
+      (s.coversPending || 0) + ' ART PENDING',
+    ];
+    html += '<div class="empty-state" style="margin-bottom:12px">// ' + chips.join(' &middot; ') + '</div>';
+
+    const tracks = data.tracks || [];
+    html += '<div class="section-row"><div class="section-label">// this drop, newest first</div>';
+    if (tracks.length === 0) {
+      html += '<div class="empty-state">// nothing in the explo folder yet — the next weekly drop lands here automatically</div>';
+    } else {
+      html += '<div class="list">';
+      tracks.forEach((t, index) => { html += exploTrackRow(t, index + 1); });
+      html += '</div>';
+    }
+    html += '</div></section>';
+    main.innerHTML = html;
+  }
+
+  function exploTrackRow(t, num) {
+    const title = t.title || t.matchedTitle || "(unidentified)";
+    const artist = t.artist || t.matchedArtist || "";
+    const albumBits = t.albumTitle ? escapeHTML(t.albumTitle) : "";
+    const meta = [artist ? escapeHTML(artist) : null, albumBits || null].filter(Boolean).join(" &middot; ");
+    let statusLabel;
+    if (t.status === "matched") statusLabel = "IDENTIFIED";
+    else if (t.status === "matched-fallback") statusLabel = "IDENTIFIED (TEXT)";
+    else if (t.attempts >= 5) statusLabel = "RETIRED (" + t.attempts + " TRIES)";
+    else if (t.status === "error") statusLabel = "ERROR &middot; RETRYING";
+    else statusLabel = "AWAITING RETRY " + t.attempts + "/5";
+    let coverLabel = "";
+    if (t.status === "matched" || t.status === "matched-fallback") {
+      if (t.coverStatus === "done") coverLabel = "ART OK";
+      else if (t.coverStatus === "placeholder") coverLabel = "PLACEHOLDER ART";
+      else coverLabel = "ART PENDING";
+    }
+    const spec = coverLabel ? statusLabel + " &middot; " + coverLabel : statusLabel;
+    const inner = '<div class="num">' + num + '</div>' +
+      '<div class="main"><div class="name">' + escapeHTML(title) + '</div>' +
+      (meta ? '<div class="meta">' + meta + '</div>' : '') + '</div>' +
+      '<div class="channel-spec">' + spec + '</div>';
+    if (t.albumId) {
+      return '<a class="list-row clickable" href="#music" data-action="album-detail" data-id="' + attr(t.albumId) + '">' + inner + '</a>';
+    }
+    return '<div class="list-row">' + inner + '</div>';
+  }
+
   const views = {
     home: viewHome,
     music: viewMusic,
     audiobooks: viewAudiobooks,
     podcasts: viewPodcasts,
     radio: viewRadio,
+    explo: viewExplo,
     search: viewSearch,
     settings: viewSettings,
   };
@@ -5848,6 +5945,16 @@ const appJS = `
       setStatus("ONLINE · CATALOG READY");
       await resumeActiveScan();
       await resumeArtistImageBackfill();
+      // Unhide the EXPLO tab when the feature is configured (even if
+      // currently unhealthy — the tab itself explains why). Runs before
+      // dispatchHash so a deep-link to #explo doesn't race the unhide.
+      try {
+        const exploStatus = await api("/api/v1/explo/status");
+        if (exploStatus && exploStatus.configured) {
+          const tab = document.getElementById("exploTab");
+          if (tab) tab.hidden = false;
+        }
+      } catch (err) { /* explo unavailable — tab stays hidden */ }
     } catch (err) {
       setStatus("ERROR · " + (err.message || "unknown"));
       return;

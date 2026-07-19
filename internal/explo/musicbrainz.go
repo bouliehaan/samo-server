@@ -16,52 +16,83 @@ var musicbrainzRecordingURL = "https://musicbrainz.org/ws/2/recording/"
 // descriptive User-Agent for unauthenticated clients.
 const musicbrainzUserAgent = "SamoServer/0.1 ( https://github.com/bouliehaan/samo-server )"
 
-// fetchReleaseGroupID resolves a MusicBrainz recording MBID to the MBID of its
-// most album-like release group, so the caller can build a Cover Art Archive
-// URL. Returns "" with no error when the recording has no usable release group
-// (a definitive "no cover to find here"); a non-nil error signals a transient
-// failure the caller should retry later rather than mark the album resolved.
-func fetchReleaseGroupID(ctx context.Context, client *http.Client, recordingMBID string) (string, error) {
+// recordingReleaseRefs is what one MusicBrainz recording lookup yields for
+// cover resolution: the most album-like release group, plus the individual
+// release MBIDs (Cover Art Archive frequently has art on a specific release
+// when the release group itself has none).
+type recordingReleaseRefs struct {
+	ReleaseGroupID string
+	ReleaseIDs     []string
+}
+
+// fetchRecordingReleaseRefs resolves a MusicBrainz recording MBID to its
+// release group and release MBIDs, so the caller can build Cover Art Archive
+// URLs. Returns empty refs with no error when the recording has no usable
+// releases (a definitive "no cover to find here"); a non-nil error signals a
+// transient failure the caller should retry later rather than mark resolved.
+func fetchRecordingReleaseRefs(ctx context.Context, client *http.Client, recordingMBID string) (recordingReleaseRefs, error) {
 	id := strings.TrimSpace(recordingMBID)
 	if id == "" {
-		return "", nil
+		return recordingReleaseRefs{}, nil
 	}
 	url := musicbrainzRecordingURL + id + "?inc=releases+release-groups&fmt=json"
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
-		return "", err
+		return recordingReleaseRefs{}, err
 	}
 	req.Header.Set("User-Agent", musicbrainzUserAgent)
 	req.Header.Set("Accept", "application/json")
 	resp, err := client.Do(req)
 	if err != nil {
-		return "", err
+		return recordingReleaseRefs{}, err
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
-		return "", fmt.Errorf("musicbrainz recording lookup %s: status %d", id, resp.StatusCode)
+		return recordingReleaseRefs{}, fmt.Errorf("musicbrainz recording lookup %s: status %d", id, resp.StatusCode)
 	}
 	var body struct {
 		Releases []struct {
+			ID           string `json:"id"`
 			ReleaseGroup struct {
-				ID          string `json:"id"`
-				PrimaryType string `json:"primary-type"`
+				ID             string   `json:"id"`
+				PrimaryType    string   `json:"primary-type"`
+				SecondaryTypes []string `json:"secondary-types"`
 			} `json:"release-group"`
 		} `json:"releases"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
-		return "", err
+		return recordingReleaseRefs{}, err
 	}
-	// Prefer an Album-type release group; otherwise take the first with an id.
+
+	// Pick the release group by the same anti-compilation ranking the
+	// AcoustID path uses: a hit song's recording sits on dozens of
+	// compilations, and "first Album-type" used to pick whichever disco
+	// sampler happened to be listed first.
+	refs := recordingReleaseRefs{}
+	bestRank := len(releaseGroupRankOrder) + 2
 	for _, r := range body.Releases {
-		if strings.EqualFold(r.ReleaseGroup.PrimaryType, "Album") && strings.TrimSpace(r.ReleaseGroup.ID) != "" {
-			return strings.TrimSpace(r.ReleaseGroup.ID), nil
+		rgID := strings.TrimSpace(r.ReleaseGroup.ID)
+		if rgID == "" {
+			continue
+		}
+		rank := releaseGroupRank(r.ReleaseGroup.PrimaryType, r.ReleaseGroup.SecondaryTypes)
+		if rank < bestRank {
+			bestRank = rank
+			refs.ReleaseGroupID = rgID
+		}
+	}
+	// Order candidate releases so the chosen release group's own releases
+	// come first: the per-release CAA rung should try the real record's
+	// pressings before any compilation appearance.
+	for _, r := range body.Releases {
+		if strings.TrimSpace(r.ID) != "" && strings.TrimSpace(r.ReleaseGroup.ID) == refs.ReleaseGroupID {
+			refs.ReleaseIDs = append(refs.ReleaseIDs, strings.TrimSpace(r.ID))
 		}
 	}
 	for _, r := range body.Releases {
-		if strings.TrimSpace(r.ReleaseGroup.ID) != "" {
-			return strings.TrimSpace(r.ReleaseGroup.ID), nil
+		if strings.TrimSpace(r.ID) != "" && strings.TrimSpace(r.ReleaseGroup.ID) != refs.ReleaseGroupID {
+			refs.ReleaseIDs = append(refs.ReleaseIDs, strings.TrimSpace(r.ID))
 		}
 	}
-	return "", nil
+	return refs, nil
 }

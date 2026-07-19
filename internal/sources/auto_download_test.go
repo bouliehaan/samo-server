@@ -10,8 +10,7 @@ import (
 
 	"github.com/bouliehaan/samo-server/internal/podcastcache"
 	"github.com/bouliehaan/samo-server/internal/podcaststream"
-	"github.com/bouliehaan/samo-server/internal/storage"
-	"github.com/bouliehaan/samo-server/migrations"
+	"github.com/bouliehaan/samo-server/internal/storage/storagetest"
 )
 
 func TestAddPodcastFeedAutoDownloadPrefetchesEpisodes(t *testing.T) {
@@ -23,14 +22,7 @@ func TestAddPodcastFeedAutoDownloadPrefetchesEpisodes(t *testing.T) {
 	defer upstream.Close()
 
 	root := t.TempDir()
-	db, err := storage.Open(ctx, filepath.Join(root, "samo.db"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer db.Close()
-	if err := storage.ApplyMigrations(ctx, db, migrations.Files); err != nil {
-		t.Fatal(err)
-	}
+	db := storagetest.Open(t)
 
 	cacheService, err := podcastcache.New(db, podcastcache.Options{
 		CacheDir: filepath.Join(root, "podcast-cache"),
@@ -89,14 +81,7 @@ func TestAddPodcastFeedAutoDownloadPrefetchesEpisodes(t *testing.T) {
 
 func TestUpdatePodcastFeedAutoDownloadEnabled(t *testing.T) {
 	ctx := context.Background()
-	db, err := storage.Open(ctx, t.TempDir()+"/samo.db")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer db.Close()
-	if err := storage.ApplyMigrations(ctx, db, migrations.Files); err != nil {
-		t.Fatal(err)
-	}
+	db := storagetest.Open(t)
 
 	service := New(db)
 	feedURL := "https://example.com/feed.xml"
@@ -130,14 +115,7 @@ func TestUpdatePodcastFeedAutoDownloadEnabled(t *testing.T) {
 
 func TestSavePodcastFeedPreservesAutoDownloadOnRefresh(t *testing.T) {
 	ctx := context.Background()
-	db, err := storage.Open(ctx, t.TempDir()+"/samo.db")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer db.Close()
-	if err := storage.ApplyMigrations(ctx, db, migrations.Files); err != nil {
-		t.Fatal(err)
-	}
+	db := storagetest.Open(t)
 
 	service := New(db)
 	feedURL := "https://example.com/feed.xml"
