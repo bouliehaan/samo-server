@@ -2,6 +2,7 @@ package metadata
 
 import (
 	"context"
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -235,5 +236,33 @@ func TestMusicBrainzProviderMapsRecordingMetadata(t *testing.T) {
 	}
 	if results[0].DurationSeconds != 245 {
 		t.Fatalf("duration = %d, want 245", results[0].DurationSeconds)
+	}
+}
+
+// TestFlexibleScoreDecodesNumberAndString locks in the fix for the bug that
+// silently killed every live MusicBrainz search: the ws/2 JSON serializes
+// "score" as a NUMBER, the struct field said string, and every response
+// failed to unmarshal — surfaced only as an empty result set. Both forms
+// must decode.
+func TestFlexibleScoreDecodesNumberAndString(t *testing.T) {
+	var payload struct {
+		Recordings []musicBrainzRecording `json:"recordings"`
+	}
+	body := `{"recordings":[
+		{"id":"r1","score":100,"title":"Number Score"},
+		{"id":"r2","score":"87","title":"String Score"},
+		{"id":"r3","score":null,"title":"Null Score"}
+	]}`
+	if err := json.Unmarshal([]byte(body), &payload); err != nil {
+		t.Fatalf("live-shaped response failed to decode: %v", err)
+	}
+	if got := int(payload.Recordings[0].Score); got != 100 {
+		t.Fatalf("number score = %d, want 100", got)
+	}
+	if got := int(payload.Recordings[1].Score); got != 87 {
+		t.Fatalf("string score = %d, want 87", got)
+	}
+	if got := int(payload.Recordings[2].Score); got != 0 {
+		t.Fatalf("null score = %d, want 0", got)
 	}
 }

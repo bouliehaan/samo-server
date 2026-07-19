@@ -4,21 +4,13 @@ import (
 	"context"
 	"testing"
 
-	"github.com/bouliehaan/samo-server/internal/storage"
+	"github.com/bouliehaan/samo-server/internal/storage/storagetest"
 	"github.com/bouliehaan/samo-server/internal/users"
-	"github.com/bouliehaan/samo-server/migrations"
 )
 
 func TestPlaylistCreateUpdateDelete(t *testing.T) {
 	ctx := context.Background()
-	db, err := storage.Open(ctx, t.TempDir()+"/samo.db")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer db.Close()
-	if err := storage.ApplyMigrations(ctx, db, migrations.Files); err != nil {
-		t.Fatal(err)
-	}
+	db := storagetest.Open(t)
 	if _, err := db.ExecContext(ctx, `
 		INSERT INTO music_tracks (id, title, duration_seconds)
 		VALUES ('track-1', 'One', 120), ('track-2', 'Two', 180)`); err != nil {
@@ -60,14 +52,7 @@ func TestPlaylistCreateUpdateDelete(t *testing.T) {
 
 func TestPlaylistUpdateRejectsOtherOwner(t *testing.T) {
 	ctx := context.Background()
-	db, err := storage.Open(ctx, t.TempDir()+"/samo.db")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer db.Close()
-	if err := storage.ApplyMigrations(ctx, db, migrations.Files); err != nil {
-		t.Fatal(err)
-	}
+	db := storagetest.Open(t)
 
 	service := New(db)
 	created, err := service.Create(ctx, "user-1", CreateInput{Name: "Private Mix"})
@@ -84,14 +69,7 @@ func TestPlaylistUpdateRejectsOtherOwner(t *testing.T) {
 // They must be refused loudly instead - even for the playlist's own owner.
 func TestSystemPlaylistRejectsClientMutation(t *testing.T) {
 	ctx := context.Background()
-	db, err := storage.Open(ctx, t.TempDir()+"/samo.db")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer db.Close()
-	if err := storage.ApplyMigrations(ctx, db, migrations.Files); err != nil {
-		t.Fatal(err)
-	}
+	db := storagetest.Open(t)
 	if _, err := db.ExecContext(ctx, `
 		INSERT INTO music_tracks (id, title, duration_seconds)
 		VALUES ('track-1', 'One', 120), ('track-2', 'Two', 180)`); err != nil {
@@ -140,14 +118,7 @@ func TestSystemPlaylistRejectsClientMutation(t *testing.T) {
 
 func TestPlaylistImportCSVMatchesLocalTracks(t *testing.T) {
 	ctx := context.Background()
-	db, err := storage.Open(ctx, t.TempDir()+"/samo.db")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer db.Close()
-	if err := storage.ApplyMigrations(ctx, db, migrations.Files); err != nil {
-		t.Fatal(err)
-	}
+	db := storagetest.Open(t)
 	if _, err := db.ExecContext(ctx, `
 		INSERT INTO music_tracks (id, title, display_artist, album_title, duration_seconds)
 		VALUES
@@ -178,14 +149,7 @@ func TestPlaylistImportCSVMatchesLocalTracks(t *testing.T) {
 
 func TestPlaylistImportM3UMatchesByPath(t *testing.T) {
 	ctx := context.Background()
-	db, err := storage.Open(ctx, t.TempDir()+"/samo.db")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer db.Close()
-	if err := storage.ApplyMigrations(ctx, db, migrations.Files); err != nil {
-		t.Fatal(err)
-	}
+	db := storagetest.Open(t)
 	if _, err := db.ExecContext(ctx, `
 		INSERT INTO libraries (id, name, kind, path)
 		VALUES ('lib-1', 'Music', 'music', '/music');
@@ -222,14 +186,7 @@ func TestPlaylistImportM3UMatchesByPath(t *testing.T) {
 // account is a last resort only.
 func TestFirstAdminOwnerIDPrefersHumanAdmin(t *testing.T) {
 	ctx := context.Background()
-	db, err := storage.Open(ctx, t.TempDir()+"/samo.db")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer db.Close()
-	if err := storage.ApplyMigrations(ctx, db, migrations.Files); err != nil {
-		t.Fatal(err)
-	}
+	db := storagetest.Open(t)
 	// Migration 008 seeds the bootstrap admin; give it the zero created_at it
 	// carries on servers bootstrapped by older code, which is what made it sort
 	// first and win the old ORDER BY created_at.

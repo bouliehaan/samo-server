@@ -10,8 +10,7 @@ import (
 
 	"github.com/bouliehaan/samo-server/internal/config"
 	"github.com/bouliehaan/samo-server/internal/scanner"
-	"github.com/bouliehaan/samo-server/internal/storage"
-	"github.com/bouliehaan/samo-server/migrations"
+	"github.com/bouliehaan/samo-server/internal/storage/storagetest"
 )
 
 func TestLibraryCRUDAndScanJob(t *testing.T) {
@@ -22,14 +21,7 @@ func TestLibraryCRUDAndScanJob(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	db, err := storage.Open(ctx, filepath.Join(root, "samo.db"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer db.Close()
-	if err := storage.ApplyMigrations(ctx, db, migrations.Files); err != nil {
-		t.Fatal(err)
-	}
+	db := storagetest.Open(t)
 
 	service := New(db, scanner.New(db))
 	if err := service.SyncConfigured(ctx, []config.Library{{
@@ -98,14 +90,7 @@ func TestScanLibraryRejectsDifferentActiveJob(t *testing.T) {
 		}
 	}
 
-	db, err := storage.Open(ctx, filepath.Join(root, "samo.db"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer db.Close()
-	if err := storage.ApplyMigrations(ctx, db, migrations.Files); err != nil {
-		t.Fatal(err)
-	}
+	db := storagetest.Open(t)
 
 	service := New(db, scanner.New(db))
 	music, err := service.Create(ctx, CreateLibraryInput{Name: "Music", Kind: KindMusic, Path: musicDir})
@@ -144,15 +129,7 @@ func TestScanLibraryRejectsDifferentActiveJob(t *testing.T) {
 
 func TestCancelScanRejectsFinishedJob(t *testing.T) {
 	ctx := context.Background()
-	root := t.TempDir()
-	db, err := storage.Open(ctx, filepath.Join(root, "samo.db"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer db.Close()
-	if err := storage.ApplyMigrations(ctx, db, migrations.Files); err != nil {
-		t.Fatal(err)
-	}
+	db := storagetest.Open(t)
 
 	service := New(db, scanner.New(db))
 	job := ScanJob{
@@ -176,15 +153,7 @@ func TestCancelScanRejectsFinishedJob(t *testing.T) {
 
 func TestReconcileOrphanScansClosesStaleRunningRows(t *testing.T) {
 	ctx := context.Background()
-	root := t.TempDir()
-	db, err := storage.Open(ctx, filepath.Join(root, "samo.db"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer db.Close()
-	if err := storage.ApplyMigrations(ctx, db, migrations.Files); err != nil {
-		t.Fatal(err)
-	}
+	db := storagetest.Open(t)
 
 	service := New(db, scanner.New(db))
 
@@ -244,15 +213,7 @@ func TestReconcileOrphanScansClosesStaleRunningRows(t *testing.T) {
 
 func TestCancelScanClearsOrphanRunningRow(t *testing.T) {
 	ctx := context.Background()
-	root := t.TempDir()
-	db, err := storage.Open(ctx, filepath.Join(root, "samo.db"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer db.Close()
-	if err := storage.ApplyMigrations(ctx, db, migrations.Files); err != nil {
-		t.Fatal(err)
-	}
+	db := storagetest.Open(t)
 
 	service := New(db, scanner.New(db))
 	orphan := ScanJob{
@@ -292,15 +253,7 @@ func TestCancelScanClearsOrphanRunningRow(t *testing.T) {
 
 func TestFinishScanJobPersistsOnCancelledContext(t *testing.T) {
 	ctx := context.Background()
-	root := t.TempDir()
-	db, err := storage.Open(ctx, filepath.Join(root, "samo.db"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer db.Close()
-	if err := storage.ApplyMigrations(ctx, db, migrations.Files); err != nil {
-		t.Fatal(err)
-	}
+	db := storagetest.Open(t)
 
 	service := New(db, scanner.New(db))
 	job := ScanJob{

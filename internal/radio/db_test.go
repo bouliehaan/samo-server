@@ -5,20 +5,12 @@ import (
 	"database/sql"
 	"testing"
 
-	"github.com/bouliehaan/samo-server/internal/storage"
-	"github.com/bouliehaan/samo-server/migrations"
+	"github.com/bouliehaan/samo-server/internal/storage/storagetest"
 )
 
 func TestImportConfigIfEmptySeedsStations(t *testing.T) {
 	ctx := context.Background()
-	db, err := storage.Open(ctx, t.TempDir()+"/samo.db")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer db.Close()
-	if err := storage.ApplyMigrations(ctx, db, migrations.Files); err != nil {
-		t.Fatal(err)
-	}
+	db := storagetest.Open(t)
 
 	cfg := Config{Stations: []StationConfig{{
 		ID:          "static-fm",
@@ -66,14 +58,7 @@ func TestImportConfigIfEmptySeedsStations(t *testing.T) {
 
 func TestCreateAndDeleteStation(t *testing.T) {
 	ctx := context.Background()
-	db, err := storage.Open(ctx, t.TempDir()+"/samo.db")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer db.Close()
-	if err := storage.ApplyMigrations(ctx, db, migrations.Files); err != nil {
-		t.Fatal(err)
-	}
+	db := storagetest.Open(t)
 
 	record, err := CreateStation(ctx, db, CreateStationInput{
 		Name:        "Memory Drift",
@@ -122,14 +107,7 @@ func TestCreateAndDeleteStation(t *testing.T) {
 
 func TestResolveMusicTrackJoinsMediaFile(t *testing.T) {
 	ctx := context.Background()
-	db, err := storage.Open(ctx, t.TempDir()+"/samo.db")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer db.Close()
-	if err := storage.ApplyMigrations(ctx, db, migrations.Files); err != nil {
-		t.Fatal(err)
-	}
+	db := storagetest.Open(t)
 
 	mustExec(t, db, `INSERT INTO libraries (id, name, kind, media_type, path) VALUES ('lib1', 'Music', 'music', '', '/srv/music')`)
 	mustExec(t, db, `INSERT INTO music_artists (id, name) VALUES ('artist1', 'Test Artist')`)
@@ -168,14 +146,7 @@ func TestResolveMusicTrackJoinsMediaFile(t *testing.T) {
 
 func TestServiceFromDBUsesResolvedItems(t *testing.T) {
 	ctx := context.Background()
-	db, err := storage.Open(ctx, t.TempDir()+"/samo.db")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer db.Close()
-	if err := storage.ApplyMigrations(ctx, db, migrations.Files); err != nil {
-		t.Fatal(err)
-	}
+	db := storagetest.Open(t)
 
 	if _, err := CreateStation(ctx, db, CreateStationInput{
 		Name: "Pulse",

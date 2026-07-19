@@ -4,25 +4,15 @@ import (
 	"context"
 	"net/http"
 	"net/http/httptest"
-	"path/filepath"
 	"testing"
 
 	"github.com/bouliehaan/samo-server/internal/catalog"
-	"github.com/bouliehaan/samo-server/internal/storage"
-	"github.com/bouliehaan/samo-server/migrations"
+	"github.com/bouliehaan/samo-server/internal/storage/storagetest"
 )
 
 func TestDeleteMusicAlbumRequiresAdmin(t *testing.T) {
 	ctx := context.Background()
-	root := t.TempDir()
-	db, err := storage.Open(ctx, filepath.Join(root, "samo.db"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer db.Close()
-	if err := storage.ApplyMigrations(ctx, db, migrations.Files); err != nil {
-		t.Fatal(err)
-	}
+	db := storagetest.Open(t)
 
 	userService, adminToken, _ := testUserServiceWithTokens(t, ctx, db)
 
@@ -66,15 +56,7 @@ func TestDeleteMusicAlbumRequiresAdmin(t *testing.T) {
 
 func TestDeleteMusicAlbumRejectsNonAdmin(t *testing.T) {
 	ctx := context.Background()
-	root := t.TempDir()
-	db, err := storage.Open(ctx, filepath.Join(root, "samo.db"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer db.Close()
-	if err := storage.ApplyMigrations(ctx, db, migrations.Files); err != nil {
-		t.Fatal(err)
-	}
+	db := storagetest.Open(t)
 
 	userService, _, userToken := testUserServiceWithTokens(t, ctx, db)
 	handler := NewServer(ServerOptions{

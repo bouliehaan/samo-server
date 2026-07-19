@@ -9,20 +9,12 @@ import (
 
 	"github.com/bouliehaan/samo-server/internal/catalog"
 	"github.com/bouliehaan/samo-server/internal/playback"
-	"github.com/bouliehaan/samo-server/internal/storage"
-	"github.com/bouliehaan/samo-server/migrations"
+	"github.com/bouliehaan/samo-server/internal/storage/storagetest"
 )
 
 func TestMusicDetailEndpointsOverlayUserPlayback(t *testing.T) {
 	ctx := context.Background()
-	db, err := storage.Open(ctx, t.TempDir()+"/samo.db")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer db.Close()
-	if err := storage.ApplyMigrations(ctx, db, migrations.Files); err != nil {
-		t.Fatal(err)
-	}
+	db := storagetest.Open(t)
 	if _, err := db.ExecContext(ctx, `
 		INSERT INTO music_tracks (id, title, playback_json, added_at, updated_at)
 		VALUES ('track-1', 'Song', '{}', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)`); err != nil {

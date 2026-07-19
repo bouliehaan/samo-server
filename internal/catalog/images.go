@@ -310,6 +310,25 @@ func (s *Service) resolvedImagesLocked(images []Image) []Image {
 		if path := strings.TrimSpace(image.Path); path != "" {
 			if _, err := os.Stat(path); err == nil {
 				out = append(out, image)
+				continue
+			}
+			// The stored local path is gone (a rotated cover-store entry, or a
+			// container path that drifted between deploys). A store-backed cover
+			// (cover_*) or catalog image (image_*) STILL serves by id via /media,
+			// exactly as every client renders it — so don't silently drop it. That
+			// drop is what collapsed the Explore tile: its drops all share ONE
+			// folder-derived album, so once each track's per-track cover was
+			// dropped for a stale path, every track fell back to the single shared
+			// album cover and the 2x2 grid never formed. Keep it by id (minus the
+			// dead path) so downstream re-resolves the live file. A bare/unknown
+			// id (e.g. an upload whose file is truly gone) stays dropped so the
+			// caller falls back to real art.
+			if id := strings.TrimSpace(image.ID); strings.HasPrefix(id, "cover_") || strings.HasPrefix(id, "image_") {
+				byID := image
+				byID.Path = ""
+				out = append(out, byID)
+			} else if strings.TrimSpace(image.URL) != "" {
+				out = append(out, image)
 			}
 			continue
 		}

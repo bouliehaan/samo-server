@@ -39,7 +39,6 @@ import (
 	"github.com/bouliehaan/samo-server/internal/toolchain"
 	"github.com/bouliehaan/samo-server/internal/users"
 	"github.com/bouliehaan/samo-server/internal/watch"
-	"github.com/bouliehaan/samo-server/migrations"
 )
 
 func main() {
@@ -60,18 +59,14 @@ func main() {
 		log.Fatal(err)
 	}
 
-	db, err := storage.Open(ctx, cfg.DBPath)
+	db, err := openAndMigrate(ctx, cfg)
 	if err != nil {
 		log.Fatal(err)
 	}
 	defer db.Close()
-	storage.StartOptimizer(ctx, db)
+	log.Printf("database: %s", redactDSN(cfg.DBDSN))
 
-	if err := storage.ApplyMigrations(ctx, db, migrations.Files); err != nil {
-		log.Fatal(err)
-	}
-
-	readDB, err := storage.OpenReadOnly(ctx, cfg.DBPath)
+	readDB, err := storage.OpenReadOnly(ctx, cfg.DBDSN)
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -286,8 +281,12 @@ func main() {
 		// when AcoustID can't identify a file. Reuses the same search
 		// providers (MusicBrainz etc.) already configured via
 		// SAMO_METADATA_PROVIDERS for the manual "apply metadata" feature.
-		Metadata:      metadataService,
-		Playlists:     playlistService,
+		Metadata:  metadataService,
+		Playlists: playlistService,
+		// The cover store verifies every downloaded cover as local bytes and
+		// holds the generated placeholder tiles; without it the cover engine
+		// stays off.
+		Covers:        coverService,
 		ReloadCatalog: reloadCatalog,
 		PlaylistName:  cfg.ExploPlaylistName,
 		Logger:        log.Printf,
@@ -336,6 +335,37 @@ func main() {
 		// reconcile's critical path.
 		if err := exploService.BackfillCovers(ctx); err != nil {
 			log.Printf("explo: startup cover backfill failed: %v", err)
+		}
+	}()
+
+	// Periodic driver for the explo retry ladders. Identification and cover
+	// retries are scheduled in SQL (front-loaded backoff per row), but until
+	// this ticker existed nothing RAN between scans and restarts, so "retry
+	// in 1 hour" silently meant "retry at the next scan or reboot" — the
+	// main reason a weekly drop took days to fill in. Every pass is a cheap
+	// no-op (two indexed SELECTs) when nothing is due.
+	go func() {
+		ticker := time.NewTicker(30 * time.Minute)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+			}
+			if pruned, err := exploService.PruneRotatedOutFiles(ctx); err != nil {
+				log.Printf("explo: periodic prune of rotated-out files failed: %v", err)
+			} else if pruned > 0 {
+				log.Printf("explo: periodic pass pruned %d rotated-out file(s)", pruned)
+			}
+			if exploService.Enabled() {
+				if _, err := exploService.ProcessNewTracks(ctx); err != nil {
+					log.Printf("explo: periodic identify pass failed: %v", err)
+				}
+			}
+			if err := exploService.BackfillCovers(ctx); err != nil {
+				log.Printf("explo: periodic cover pass failed: %v", err)
+			}
 		}
 	}()
 
@@ -517,7 +547,6 @@ func main() {
 	if setupHintNeeded {
 		log.Printf("no admin user configured; open http://localhost%s/setup in a browser to finish first-run setup", normalizedDisplayPort(actualAddr))
 	}
-	log.Printf("sqlite database: %s", cfg.DBPath)
 	log.Printf("ffmpeg: %s", tools.FFmpeg)
 	log.Printf("ffprobe: %s", tools.FFprobe)
 	if cfg.ScanFFprobe {

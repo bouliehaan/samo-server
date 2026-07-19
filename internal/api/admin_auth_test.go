@@ -15,22 +15,14 @@ import (
 	"github.com/bouliehaan/samo-server/internal/metadata"
 	"github.com/bouliehaan/samo-server/internal/scanner"
 	"github.com/bouliehaan/samo-server/internal/sources"
-	"github.com/bouliehaan/samo-server/internal/storage"
+	"github.com/bouliehaan/samo-server/internal/storage/storagetest"
 	"github.com/bouliehaan/samo-server/internal/users"
-	"github.com/bouliehaan/samo-server/migrations"
 )
 
 func TestAdminOnlyRoutesRejectNormalUsers(t *testing.T) {
 	ctx := context.Background()
 	root := t.TempDir()
-	db, err := storage.Open(ctx, filepath.Join(root, "samo.db"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer db.Close()
-	if err := storage.ApplyMigrations(ctx, db, migrations.Files); err != nil {
-		t.Fatal(err)
-	}
+	db := storagetest.Open(t)
 
 	userService, adminToken, userToken := testUserServiceWithTokens(t, ctx, db)
 	handler := NewServer(ServerOptions{

@@ -12,9 +12,8 @@ import (
 	"github.com/bouliehaan/samo-server/internal/catalog"
 	"github.com/bouliehaan/samo-server/internal/files"
 	"github.com/bouliehaan/samo-server/internal/playback"
-	"github.com/bouliehaan/samo-server/internal/storage"
+	"github.com/bouliehaan/samo-server/internal/storage/storagetest"
 	"github.com/bouliehaan/samo-server/internal/users"
-	"github.com/bouliehaan/samo-server/migrations"
 )
 
 func TestStreamAudiobookSelectsFileFromPlaybackProgress(t *testing.T) {
@@ -34,14 +33,7 @@ func TestStreamAudiobookSelectsFileFromPlaybackProgress(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	db, err := storage.Open(ctx, filepath.Join(root, "samo.db"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer db.Close()
-	if err := storage.ApplyMigrations(ctx, db, migrations.Files); err != nil {
-		t.Fatal(err)
-	}
+	db := storagetest.Open(t)
 
 	libraryID := "library-books"
 	itemID := "item-signal"
@@ -59,7 +51,7 @@ func TestStreamAudiobookSelectsFileFromPlaybackProgress(t *testing.T) {
 	}
 	if _, err := db.ExecContext(ctx, `
 		INSERT INTO user_playback (user_id, target_kind, target_id, state_json, updated_at)
-		VALUES (?, 'audiobook', ?, ?, datetime('now'))`,
+		VALUES (?, 'audiobook', ?, ?, CURRENT_TIMESTAMP)`,
 		users.BootstrapUserID, itemID, `{"progressSeconds":12}`); err != nil {
 		t.Fatal(err)
 	}
@@ -130,14 +122,7 @@ func TestStreamMediaFileReturnsExactSourceBytes(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	db, err := storage.Open(ctx, filepath.Join(root, "samo.db"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer db.Close()
-	if err := storage.ApplyMigrations(ctx, db, migrations.Files); err != nil {
-		t.Fatal(err)
-	}
+	db := storagetest.Open(t)
 	if _, err := db.ExecContext(ctx, `
 		INSERT INTO libraries (id, name, kind, media_type, path)
 		VALUES ('library-1', 'Music', 'music', '', ?)`, libraryDir); err != nil {

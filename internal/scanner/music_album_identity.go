@@ -105,7 +105,7 @@ func albumIdentityArtistKey(tags catalog.Tags, albumArtistNames []string, relAlb
 // PID uses releasedate only; normalizing to a four-digit year keeps "1964" and
 // "1964-01-01" on the same album instead of minting duplicates per track.
 func albumIdentityReleaseDateKey(tags catalog.Tags) string {
-	raw := firstTag(tags, "releasedate", "release_date", "originaldate", "originalyear", "date", "year")
+	raw := firstTag(tags, "releasedate", "release_date", "date", "year", "originaldate", "originalyear")
 	raw = strings.TrimSpace(raw)
 	if raw == "" {
 		return ""

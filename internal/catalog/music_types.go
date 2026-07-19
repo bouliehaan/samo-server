@@ -28,6 +28,13 @@ type MusicArtist struct {
 	Playback       PlaybackState      `json:"playback"`
 	AddedAt        *time.Time         `json:"addedAt,omitempty"`
 	UpdatedAt      *time.Time         `json:"updatedAt,omitempty"`
+	// IsExplo marks an artist whose every attributable track came from an
+	// explo drop folder. Derived at catalog load (never stored): an artist
+	// with even one real library track is NOT explo. Explo-only artists are
+	// excluded from the default listing/browse/search surfaces but stay
+	// resolvable by ID so the Explo tab and Explore playlist can navigate
+	// to them.
+	IsExplo bool `json:"isExplo,omitempty"`
 }
 
 // SimilarArtistRef is a reference shown in the "Similar Artists" rail. When the
@@ -82,14 +89,18 @@ type MusicAlbum struct {
 	AddedAt       *time.Time    `json:"addedAt,omitempty"`
 	UpdatedAt     *time.Time    `json:"updatedAt,omitempty"`
 	// HiddenFromRecentlyAdded is set by the explo service once every track on
-	// the album came from an unmanaged auto-tagged drop folder, so it doesn't
-	// flood the home "Recently Added" shelves. The album is still fully
-	// browsable everywhere else. Exposed in JSON (unlike a purely internal
-	// flag) because the Android client's home "Recently Added" shelf reads
-	// from an on-device mirror synced from this payload, not from the
-	// server-filtered /recently-added endpoints - it needs to see this flag
-	// to apply the same exclusion itself.
+	// the album came from an unmanaged auto-tagged drop folder. Retained as
+	// the legacy JSON name for clients that already consume it (the Android
+	// mirror re-applies the Recently Added exclusion on-device from this
+	// payload); IsExplo is the go-forward name for the same fact.
 	HiddenFromRecentlyAdded bool `json:"hiddenFromRecentlyAdded,omitempty"`
+	// IsExplo marks an album whose every file-backed track lives under an
+	// explo drop folder. Explo albums are excluded from the default
+	// listing/browse/search surfaces server-side but still travel through
+	// the sync manifest (with this marker) and stay resolvable by ID, so
+	// clients can build dedicated explo shelves without the content ever
+	// blending into the regular library.
+	IsExplo bool `json:"isExplo,omitempty"`
 }
 
 type MusicTrack struct {
@@ -125,6 +136,12 @@ type MusicTrack struct {
 	Playback         PlaybackState `json:"playback"`
 	AddedAt          *time.Time    `json:"addedAt,omitempty"`
 	UpdatedAt        *time.Time    `json:"updatedAt,omitempty"`
+	// IsExplo mirrors music_tracks.is_explo, maintained by the explo
+	// reconciler from the configured drop folder(s). Explo tracks are
+	// excluded from the default listing/browse/search surfaces but stay
+	// resolvable by ID (playlists, album detail) and travel through the
+	// sync manifest with the marker so clients can silo them deliberately.
+	IsExplo bool `json:"isExplo,omitempty"`
 }
 
 type Lyric struct {

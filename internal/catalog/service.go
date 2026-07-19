@@ -7,6 +7,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/bouliehaan/samo-server/internal/users"
 )
 
 var ErrNotFound = errors.New("catalog item not found")
@@ -78,9 +80,28 @@ func (s *Service) Overview() Overview {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
+	// The explo silo: library stats describe the user's own library, so
+	// explo content is excluded from every music count.
 	musicDuration := 0
+	musicTrackCount := 0
 	for _, track := range s.musicTracks {
+		if track.IsExplo {
+			continue
+		}
+		musicTrackCount++
 		musicDuration += track.DurationSeconds
+	}
+	musicArtistCount := 0
+	for _, artist := range s.musicArtists {
+		if !artist.IsExplo {
+			musicArtistCount++
+		}
+	}
+	musicAlbumCount := 0
+	for _, album := range s.musicAlbums {
+		if !album.IsExplo {
+			musicAlbumCount++
+		}
 	}
 
 	audiobookDuration := 0
@@ -98,9 +119,9 @@ func (s *Service) Overview() Overview {
 
 	return Overview{
 		Music: MusicOverview{
-			ArtistCount:     len(s.musicArtists),
-			AlbumCount:      len(s.musicAlbums),
-			TrackCount:      len(s.musicTracks),
+			ArtistCount:     musicArtistCount,
+			AlbumCount:      musicAlbumCount,
+			TrackCount:      musicTrackCount,
 			PlaylistCount:   len(s.musicPlaylists),
 			GenreCount:      len(s.genres),
 			DurationSeconds: musicDuration,
@@ -373,10 +394,20 @@ func PlaylistVisibleToUser(item MusicPlaylist, userID string) bool {
 	if item.System {
 		return true
 	}
-	if item.Public || strings.TrimSpace(item.OwnerID) == "" {
+	owner := strings.TrimSpace(item.OwnerID)
+	// A playlist owned by the reserved bootstrap account (user-server) is
+	// server-managed, not a private user playlist: filesystem m3u imports land
+	// there, as does anything that resolves an admin owner before a human admin
+	// exists (the FirstAdminOwnerID zero-created_at case). No human ever
+	// authenticates as user-server, so a non-system playlist it owns is
+	// invisible to EVERYONE - the same "invisible to every real user" bug the
+	// explo reconcile repairs for the system playlist, but regular imports get
+	// no such repair and silently empty the Playlists tab. Treat it like a
+	// public/ownerless playlist. See reconcileExploPlaylist.
+	if item.Public || owner == "" || owner == users.BootstrapUserID {
 		return true
 	}
-	return strings.TrimSpace(userID) != "" && item.OwnerID == strings.TrimSpace(userID)
+	return strings.TrimSpace(userID) != "" && owner == strings.TrimSpace(userID)
 }
 
 func (s *Service) ListGenres(page PageRequest) Page[GenreSummary] {
