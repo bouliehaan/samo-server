@@ -2,7 +2,6 @@ package api
 
 import (
 	"bytes"
-	"context"
 	"encoding/json"
 	"io"
 	"net/http"
@@ -13,8 +12,7 @@ import (
 	"github.com/bouliehaan/samo-server/internal/catalog"
 	"github.com/bouliehaan/samo-server/internal/lastfm"
 	"github.com/bouliehaan/samo-server/internal/playback"
-	"github.com/bouliehaan/samo-server/internal/storage"
-	"github.com/bouliehaan/samo-server/migrations"
+	"github.com/bouliehaan/samo-server/internal/storage/storagetest"
 )
 
 func TestScrobbleEventsEndpointRequiresLastFM(t *testing.T) {
@@ -30,15 +28,7 @@ func TestScrobbleEventsEndpointRequiresLastFM(t *testing.T) {
 }
 
 func TestLastFMStatusWhenConfigured(t *testing.T) {
-	ctx := context.Background()
-	db, err := storage.Open(ctx, t.TempDir()+"/samo.db")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer db.Close()
-	if err := storage.ApplyMigrations(ctx, db, migrations.Files); err != nil {
-		t.Fatal(err)
-	}
+	db := storagetest.Open(t)
 
 	handler := NewServer(ServerOptions{
 		LastFM: lastfm.NewService(lastfm.ServiceOptions{
@@ -61,15 +51,7 @@ func TestLastFMStatusWhenConfigured(t *testing.T) {
 }
 
 func TestLastFMConfigCanBeSavedViaAPI(t *testing.T) {
-	ctx := context.Background()
-	db, err := storage.Open(ctx, t.TempDir()+"/samo.db")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer db.Close()
-	if err := storage.ApplyMigrations(ctx, db, migrations.Files); err != nil {
-		t.Fatal(err)
-	}
+	db := storagetest.Open(t)
 
 	service := lastfm.NewService(lastfm.ServiceOptions{
 		DB: db,

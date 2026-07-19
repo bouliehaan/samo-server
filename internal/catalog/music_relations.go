@@ -14,9 +14,17 @@ func (s *Service) MusicAlbumsForArtist(artistID string) []MusicAlbum {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
+	includeExplo := s.artistIsExploLocked(artistID)
 	items := make([]MusicAlbum, 0)
 	for _, album := range s.musicAlbums {
 		if album.TrackCount <= 0 {
+			continue
+		}
+		if album.IsExplo && !includeExplo {
+			// The explo silo: a real artist's page never mixes in an explo
+			// drop of theirs. An explo-only artist (reached from the Explo
+			// tab / Explore playlist) shows their explo albums — that page
+			// would otherwise be empty.
 			continue
 		}
 		if musicAlbumMatchesArtist(album, artistID) {
@@ -24,6 +32,13 @@ func (s *Service) MusicAlbumsForArtist(artistID string) []MusicAlbum {
 		}
 	}
 	return items
+}
+
+// artistIsExploLocked reports whether the artist is explo-only (per the
+// derived projection flag). Callers must hold s.mu.
+func (s *Service) artistIsExploLocked(artistID string) bool {
+	artist, ok := s.musicArtistByID[artistID]
+	return ok && artist.IsExplo
 }
 
 func (s *Service) MusicTracksForArtist(artistID string) []MusicTrack {
@@ -35,8 +50,12 @@ func (s *Service) MusicTracksForArtist(artistID string) []MusicTrack {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
+	includeExplo := s.artistIsExploLocked(artistID)
 	items := make([]MusicTrack, 0)
 	for _, track := range s.musicTracks {
+		if track.IsExplo && !includeExplo {
+			continue
+		}
 		if musicTrackMatchesArtistLocked(s, track, artistID) {
 			items = append(items, track)
 		}
@@ -80,6 +99,7 @@ func (s *Service) MusicArtistAppearsOnAlbums(artistID string) []MusicAlbum {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
+	includeExplo := s.artistIsExploLocked(artistID)
 	seen := make(map[string]struct{})
 	items := make([]MusicAlbum, 0)
 	for _, track := range s.musicTracks {
@@ -95,6 +115,11 @@ func (s *Service) MusicArtistAppearsOnAlbums(artistID string) []MusicAlbum {
 		}
 		album, ok := s.musicAlbumByID[albumID]
 		if !ok || album.TrackCount <= 0 {
+			continue
+		}
+		if album.IsExplo && !includeExplo {
+			// The explo silo: features on someone's explo drop don't belong
+			// on a real artist's Appears On rail.
 			continue
 		}
 		// The artist's OWN albums belong in the main grid, not "Appears On".

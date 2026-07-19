@@ -13,9 +13,7 @@ import (
 	"github.com/bouliehaan/samo-server/internal/metadata"
 	"github.com/bouliehaan/samo-server/internal/playlists"
 	"github.com/bouliehaan/samo-server/internal/scanner"
-	"github.com/bouliehaan/samo-server/internal/storage"
 	"github.com/bouliehaan/samo-server/internal/toolchain"
-	"github.com/bouliehaan/samo-server/migrations"
 )
 
 // chapterProviderForConfig returns the Audnexus-backed chapter provider when the
@@ -36,14 +34,11 @@ func runScanSubprocess(ctx context.Context, payloadPath string) {
 	if err != nil {
 		log.Fatal(err)
 	}
-	db, err := storage.Open(ctx, cfg.DBPath)
+	db, err := openAndMigrate(ctx, cfg)
 	if err != nil {
 		log.Fatal(err)
 	}
 	defer db.Close()
-	if err := storage.ApplyMigrations(ctx, db, migrations.Files); err != nil {
-		log.Fatal(err)
-	}
 	tools, err := toolchain.Resolve(toolchain.Options{DataDir: cfg.DataDir})
 	if err != nil {
 		log.Fatal(err)

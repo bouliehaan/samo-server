@@ -11,8 +11,7 @@ import (
 
 	"github.com/bouliehaan/samo-server/internal/catalog"
 	"github.com/bouliehaan/samo-server/internal/podcaststream"
-	"github.com/bouliehaan/samo-server/internal/storage"
-	"github.com/bouliehaan/samo-server/migrations"
+	"github.com/bouliehaan/samo-server/internal/storage/storagetest"
 )
 
 func TestEnsureCachedDownloadsAndLookupServesPath(t *testing.T) {
@@ -25,14 +24,7 @@ func TestEnsureCachedDownloadsAndLookupServesPath(t *testing.T) {
 	defer upstream.Close()
 
 	root := t.TempDir()
-	db, err := storage.Open(ctx, filepath.Join(root, "samo.db"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer db.Close()
-	if err := storage.ApplyMigrations(ctx, db, migrations.Files); err != nil {
-		t.Fatal(err)
-	}
+	db := storagetest.Open(t)
 	if _, err := db.ExecContext(ctx, `
 		INSERT INTO libraries (id, name, kind, path)
 		VALUES ('lib-1', 'Podcasts', 'podcast', 'samo://podcast-feeds')`); err != nil {
@@ -81,14 +73,7 @@ func TestEnsureCachedDownloadsAndLookupServesPath(t *testing.T) {
 func TestClearAllRemovesRowsAndFiles(t *testing.T) {
 	ctx := context.Background()
 	root := t.TempDir()
-	db, err := storage.Open(ctx, filepath.Join(root, "samo.db"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer db.Close()
-	if err := storage.ApplyMigrations(ctx, db, migrations.Files); err != nil {
-		t.Fatal(err)
-	}
+	db := storagetest.Open(t)
 	if _, err := db.ExecContext(ctx, `
 		INSERT INTO libraries (id, name, kind, path)
 		VALUES ('lib-1', 'Podcasts', 'podcast', 'samo://podcast-feeds')`); err != nil {
@@ -152,14 +137,7 @@ func TestClearAllRemovesRowsAndFiles(t *testing.T) {
 func TestPruneRetentionRemovesOldestWhenOverMaxBytes(t *testing.T) {
 	ctx := context.Background()
 	root := t.TempDir()
-	db, err := storage.Open(ctx, filepath.Join(root, "samo.db"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer db.Close()
-	if err := storage.ApplyMigrations(ctx, db, migrations.Files); err != nil {
-		t.Fatal(err)
-	}
+	db := storagetest.Open(t)
 
 	cacheDir := filepath.Join(root, "podcast-cache")
 	service, err := New(db, Options{

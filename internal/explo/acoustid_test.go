@@ -138,3 +138,35 @@ func TestCoverArtArchiveURL(t *testing.T) {
 		t.Fatalf("blank id should yield empty URL, got %q", got)
 	}
 }
+
+// TestBestReleaseGroupAvoidsCompilations locks in the anti-compilation
+// ranking: a classic hit's recording lists dozens of release groups and the
+// old "first Album-type" rule happily picked "Ultimate Disco Vol. 7". A clean
+// Single must beat a compilation-tainted Album; a derived group is only ever
+// a last resort.
+func TestBestReleaseGroupAvoidsCompilations(t *testing.T) {
+	id, title := bestReleaseGroup([]acoustidReleaseGrp{
+		{ID: "rg-comp", Title: "Ultimate Disco", Type: "Album", SecondaryTypes: []string{"Compilation"}},
+		{ID: "rg-single", Title: "I Love the Nightlife", Type: "Single"},
+	})
+	if id != "rg-single" || title != "I Love the Nightlife" {
+		t.Fatalf("picked (%q, %q), want the clean single over the compilation album", id, title)
+	}
+
+	// Clean Album still beats clean Single.
+	id, _ = bestReleaseGroup([]acoustidReleaseGrp{
+		{ID: "rg-single", Title: "Single", Type: "Single"},
+		{ID: "rg-album", Title: "The Album", Type: "Album"},
+	})
+	if id != "rg-album" {
+		t.Fatalf("picked %q, want the clean album", id)
+	}
+
+	// Only derived groups available: better than nothing.
+	id, _ = bestReleaseGroup([]acoustidReleaseGrp{
+		{ID: "rg-live", Title: "Live at Wembley", Type: "Album", SecondaryTypes: []string{"Live"}},
+	})
+	if id != "rg-live" {
+		t.Fatalf("picked %q, want the derived group as last resort", id)
+	}
+}

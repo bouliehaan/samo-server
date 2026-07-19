@@ -9,8 +9,7 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/bouliehaan/samo-server/internal/storage"
-	"github.com/bouliehaan/samo-server/migrations"
+	"github.com/bouliehaan/samo-server/internal/storage/storagetest"
 )
 
 func TestValidateLocalPathAllowsLibraryFiles(t *testing.T) {
@@ -25,14 +24,7 @@ func TestValidateLocalPathAllowsLibraryFiles(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	db, err := storage.Open(ctx, filepath.Join(root, "samo.db"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer db.Close()
-	if err := storage.ApplyMigrations(ctx, db, migrations.Files); err != nil {
-		t.Fatal(err)
-	}
+	db := storagetest.Open(t)
 	if _, err := db.ExecContext(ctx, `
 		INSERT INTO libraries (id, name, kind, media_type, path)
 		VALUES ('library-1', 'Music', 'music', '', ?)`, libraryDir); err != nil {
@@ -68,14 +60,7 @@ func TestValidateLocalPathRejectsSymlinkEscape(t *testing.T) {
 		t.Skipf("symlinks unavailable: %v", err)
 	}
 
-	db, err := storage.Open(ctx, filepath.Join(root, "samo.db"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer db.Close()
-	if err := storage.ApplyMigrations(ctx, db, migrations.Files); err != nil {
-		t.Fatal(err)
-	}
+	db := storagetest.Open(t)
 	if _, err := db.ExecContext(ctx, `
 		INSERT INTO libraries (id, name, kind, media_type, path)
 		VALUES ('library-1', 'Music', 'music', '', ?)`, libraryDir); err != nil {
@@ -101,14 +86,7 @@ func TestServeMediaFileSupportsRangeRequests(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	db, err := storage.Open(ctx, filepath.Join(root, "samo.db"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer db.Close()
-	if err := storage.ApplyMigrations(ctx, db, migrations.Files); err != nil {
-		t.Fatal(err)
-	}
+	db := storagetest.Open(t)
 	if _, err := db.ExecContext(ctx, `
 		INSERT INTO libraries (id, name, kind, media_type, path)
 		VALUES ('library-1', 'Music', 'music', '', ?)`, libraryDir); err != nil {
@@ -148,14 +126,7 @@ func TestServeMediaFileReturnsExactSourceBytes(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	db, err := storage.Open(ctx, filepath.Join(root, "samo.db"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer db.Close()
-	if err := storage.ApplyMigrations(ctx, db, migrations.Files); err != nil {
-		t.Fatal(err)
-	}
+	db := storagetest.Open(t)
 	if _, err := db.ExecContext(ctx, `
 		INSERT INTO libraries (id, name, kind, media_type, path)
 		VALUES ('library-1', 'Music', 'music', '', ?)`, libraryDir); err != nil {
@@ -208,14 +179,7 @@ func TestServeMediaFileSetsDirectPlaybackHeaders(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	db, err := storage.Open(ctx, filepath.Join(root, "samo.db"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer db.Close()
-	if err := storage.ApplyMigrations(ctx, db, migrations.Files); err != nil {
-		t.Fatal(err)
-	}
+	db := storagetest.Open(t)
 	if _, err := db.ExecContext(ctx, `
 		INSERT INTO libraries (id, name, kind, media_type, path)
 		VALUES ('library-1', 'Music', 'music', '', ?)`, libraryDir); err != nil {
@@ -259,14 +223,7 @@ func TestServeMediaFileAtResumeSupportsRangeRequests(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	db, err := storage.Open(ctx, filepath.Join(root, "samo.db"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer db.Close()
-	if err := storage.ApplyMigrations(ctx, db, migrations.Files); err != nil {
-		t.Fatal(err)
-	}
+	db := storagetest.Open(t)
 	if _, err := db.ExecContext(ctx, `
 		INSERT INTO libraries (id, name, kind, media_type, path)
 		VALUES ('library-1', 'Music', 'music', '', ?)`, libraryDir); err != nil {
@@ -307,14 +264,7 @@ func TestServeMediaFileAtResumeReturnsUnmodifiedTailBytes(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	db, err := storage.Open(ctx, filepath.Join(root, "samo.db"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer db.Close()
-	if err := storage.ApplyMigrations(ctx, db, migrations.Files); err != nil {
-		t.Fatal(err)
-	}
+	db := storagetest.Open(t)
 	if _, err := db.ExecContext(ctx, `
 		INSERT INTO libraries (id, name, kind, media_type, path)
 		VALUES ('library-1', 'Music', 'music', '', ?)`, libraryDir); err != nil {

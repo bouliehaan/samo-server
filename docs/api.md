@@ -8,7 +8,7 @@ Legacy installs can keep using `SAMO_API_TOKEN`; it maps to the bootstrap `serve
 
 ## Users
 
-User accounts live in SQLite. Each user has their own playback state and can link their own Last.fm account.
+User accounts live in the database. Each user has their own playback state and can link their own Last.fm account.
 
 | Route | Purpose |
 |-------|---------|
@@ -39,7 +39,7 @@ Public routes (no user token): `GET /health`, `POST /api/v1/auth/login`, radio/i
 
 ## Libraries
 
-Filesystem libraries are stored in SQLite. Env-configured paths from `SAMO_MUSIC_DIRS`, `SAMO_AUDIOBOOK_DIRS`, and `SAMO_PODCAST_DIRS` are synced into the database on startup.
+Filesystem libraries are stored in the database. Env-configured paths from `SAMO_MUSIC_DIRS`, `SAMO_AUDIOBOOK_DIRS`, and `SAMO_PODCAST_DIRS` are synced into the database on startup.
 
 All `/api/v1/libraries` and `/api/v1/scan` routes are admin-only. General catalog clients should use the per-domain read routes under `/api/v1/music/*`, `/api/v1/audiobooks/*`, and `/api/v1/podcasts/*` instead.
 
@@ -80,7 +80,7 @@ Scan routes run asynchronously and return a scan job record. A scan removes data
 
 ## Playback
 
-Playback state is stored in SQLite and surfaced on catalog reads after refresh.
+Playback state is stored in the database and surfaced on catalog reads after refresh.
 
 Routes:
 
@@ -207,7 +207,7 @@ Routes:
 
 Provider/search routes are authenticated user routes. Apply/preview and override routes are admin-only because they mutate shared catalog metadata.
 
-Apply writes user-confirmed fields to `metadata_overrides`. Scanner and RSS ingestion skip overwriting guarded columns in SQLite; catalog load and podcast feed API reads project overrides for clients.
+Apply writes user-confirmed fields to `metadata_overrides`. Scanner and RSS ingestion skip overwriting guarded columns; catalog load and podcast feed API reads project overrides for clients.
 
 Override inspection example:
 

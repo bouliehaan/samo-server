@@ -2,24 +2,15 @@ package users
 
 import (
 	"context"
-	"path/filepath"
 	"testing"
 	"time"
 
-	"github.com/bouliehaan/samo-server/internal/storage"
-	"github.com/bouliehaan/samo-server/migrations"
+	"github.com/bouliehaan/samo-server/internal/storage/storagetest"
 )
 
 func TestStreamTokenRoundTrip(t *testing.T) {
 	ctx := context.Background()
-	db, err := storage.Open(ctx, filepath.Join(t.TempDir(), "samo.db"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer db.Close()
-	if err := storage.ApplyMigrations(ctx, db, migrations.Files); err != nil {
-		t.Fatal(err)
-	}
+	db := storagetest.Open(t)
 	service := New(ServiceOptions{DB: db})
 	if _, err := service.BootstrapWithResult(ctx, BootstrapInput{AdminUsername: "owner", AdminPassword: "samo-stream-1234"}); err != nil {
 		t.Fatal(err)

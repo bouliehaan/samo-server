@@ -13,8 +13,7 @@ import (
 
 	"github.com/bouliehaan/samo-server/internal/catalog"
 	"github.com/bouliehaan/samo-server/internal/chapteraudio"
-	"github.com/bouliehaan/samo-server/internal/storage"
-	"github.com/bouliehaan/samo-server/migrations"
+	"github.com/bouliehaan/samo-server/internal/storage/storagetest"
 )
 
 // alignTestDB opens a migrated scratch DB with one audiobook and its media_files
@@ -22,14 +21,7 @@ import (
 func alignTestDB(t *testing.T, ffmpeg, bookPath string, files []catalog.AudioFile, chapterSource string, chapters []catalog.AudioChapter) (*Scanner, *sql.DB, string) {
 	t.Helper()
 	ctx := context.Background()
-	db, err := storage.Open(ctx, t.TempDir()+"/samo.db")
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { db.Close() })
-	if err := storage.ApplyMigrations(ctx, db, migrations.Files); err != nil {
-		t.Fatal(err)
-	}
+	db := storagetest.Open(t)
 
 	s := NewWithOptions(db, Options{FFmpegPath: ffmpeg})
 	lib := Library{ID: "lib-books", Name: "Books", Kind: "audiobook", Path: filepath.Dir(bookPath)}

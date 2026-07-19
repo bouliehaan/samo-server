@@ -6,20 +6,12 @@ import (
 
 	"github.com/bouliehaan/samo-server/internal/catalog"
 	"github.com/bouliehaan/samo-server/internal/media"
-	"github.com/bouliehaan/samo-server/internal/storage"
-	"github.com/bouliehaan/samo-server/migrations"
+	"github.com/bouliehaan/samo-server/internal/storage/storagetest"
 )
 
 func TestScannerWritesHydratableMusicRows(t *testing.T) {
 	ctx := context.Background()
-	db, err := storage.Open(ctx, t.TempDir()+"/samo.db")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer db.Close()
-	if err := storage.ApplyMigrations(ctx, db, migrations.Files); err != nil {
-		t.Fatal(err)
-	}
+	db := storagetest.Open(t)
 
 	scanner := New(db)
 	library := Library{ID: "library-1", Name: "Music", Kind: "music", Path: "/music"}
@@ -102,14 +94,7 @@ func TestScannerWritesHydratableMusicRows(t *testing.T) {
 // setAudiobookContributors (it upserts every contributor before linking).
 func TestSetAudiobookContributorsUpsertsNarrators(t *testing.T) {
 	ctx := context.Background()
-	db, err := storage.Open(ctx, t.TempDir()+"/samo.db")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer db.Close()
-	if err := storage.ApplyMigrations(ctx, db, migrations.Files); err != nil {
-		t.Fatal(err)
-	}
+	db := storagetest.Open(t)
 
 	scanner := New(db)
 	library := Library{ID: "library-books", Name: "Books", Kind: "audiobook", Path: "/books"}
@@ -176,14 +161,7 @@ func TestSetAudiobookContributorsUpsertsNarrators(t *testing.T) {
 // constraint failed`).
 func TestUpsertAudiobookPathCollisionReturnsExistingID(t *testing.T) {
 	ctx := context.Background()
-	db, err := storage.Open(ctx, t.TempDir()+"/samo.db")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer db.Close()
-	if err := storage.ApplyMigrations(ctx, db, migrations.Files); err != nil {
-		t.Fatal(err)
-	}
+	db := storagetest.Open(t)
 
 	scanner := New(db)
 	library := Library{ID: "library-books", Name: "Books", Kind: "audiobook", Path: "/books"}

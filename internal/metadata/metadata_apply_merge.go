@@ -107,7 +107,13 @@ func candidateHasValue(candidate SearchResult, field string) bool {
 	case "siteUrl":
 		return firstLinkURL(candidate.Links) != ""
 	case "imageUrl", "cover":
-		return candidate.Cover != nil && strings.TrimSpace(candidate.Cover.URL) != ""
+		// A cover can be URL-backed (downloaded/redirected later) or already
+		// local: Path/ID-backed images come from callers that resolved the
+		// bytes themselves (e.g. explo's verified downloads and generated
+		// placeholder tiles).
+		return candidate.Cover != nil && (strings.TrimSpace(candidate.Cover.URL) != "" ||
+			strings.TrimSpace(candidate.Cover.Path) != "" ||
+			strings.TrimSpace(candidate.Cover.ID) != "")
 	case "genres", "categories", "styles", "moods":
 		return len(candidate.Genres) > 0
 	case "tags":
@@ -188,7 +194,7 @@ func coverFromCandidate(candidate SearchResult) *catalog.Image {
 		return nil
 	}
 	url := strings.TrimSpace(candidate.Cover.URL)
-	if url == "" {
+	if url == "" && strings.TrimSpace(candidate.Cover.Path) == "" && strings.TrimSpace(candidate.Cover.ID) == "" {
 		return nil
 	}
 	image := *candidate.Cover

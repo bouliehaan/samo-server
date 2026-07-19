@@ -289,10 +289,35 @@ func (s *Service) waitForBackfillTerminal(ctx context.Context, timeout time.Dura
 }
 
 func listMusicArtistsForBackfill(ctx context.Context, db *sql.DB) ([]catalog.MusicArtist, error) {
+	// Explo-only artists are excluded: the backfill would spend external API
+	// quota making silo'd artists more prominent. An artist counts as explo
+	// when they have attributable tracks (track or album-artist credit) and
+	// every one of them is explo — the SQL twin of the catalog projection's
+	// deriveExploArtists.
 	rows, err := db.QueryContext(ctx, `
-		SELECT id, name, sort_name, images_json, external_ids_json
-		FROM music_artists
-		ORDER BY name COLLATE NOCASE`)
+		SELECT ma.id, ma.name, ma.sort_name, ma.images_json, ma.external_ids_json
+		FROM music_artists ma
+		WHERE NOT (
+		  EXISTS (
+		    SELECT 1 FROM music_track_artists mta
+		    JOIN music_tracks mt ON mt.id = mta.track_id
+		    WHERE mta.artist_id = ma.id
+		    UNION
+		    SELECT 1 FROM music_album_artists maa
+		    JOIN music_tracks mt ON mt.album_id = maa.album_id
+		    WHERE maa.artist_id = ma.id
+		  )
+		  AND NOT EXISTS (
+		    SELECT 1 FROM music_track_artists mta
+		    JOIN music_tracks mt ON mt.id = mta.track_id
+		    WHERE mta.artist_id = ma.id AND mt.is_explo = 0
+		    UNION
+		    SELECT 1 FROM music_album_artists maa
+		    JOIN music_tracks mt ON mt.album_id = maa.album_id
+		    WHERE maa.artist_id = ma.id AND mt.is_explo = 0
+		  )
+		)
+		ORDER BY ma.name COLLATE NOCASE`)
 	if err != nil {
 		return nil, fmt.Errorf("list music artists for backfill: %w", err)
 	}

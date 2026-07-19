@@ -5,8 +5,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/bouliehaan/samo-server/internal/storage"
-	"github.com/bouliehaan/samo-server/migrations"
+	"github.com/bouliehaan/samo-server/internal/storage/storagetest"
 )
 
 func TestPollBackoffCapsAtSixHours(t *testing.T) {
@@ -20,14 +19,7 @@ func TestPollBackoffCapsAtSixHours(t *testing.T) {
 
 func TestUpdatePodcastFeedPreservesPollScheduleOnRefresh(t *testing.T) {
 	ctx := context.Background()
-	db, err := storage.Open(ctx, t.TempDir()+"/samo.db")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer db.Close()
-	if err := storage.ApplyMigrations(ctx, db, migrations.Files); err != nil {
-		t.Fatal(err)
-	}
+	db := storagetest.Open(t)
 
 	service := New(db)
 	feedURL := "https://example.com/feed.xml"
@@ -83,14 +75,7 @@ func TestUpdatePodcastFeedPreservesPollScheduleOnRefresh(t *testing.T) {
 
 func TestUpdatePodcastFeedPreservesNextPollForMetadataOnlyEdit(t *testing.T) {
 	ctx := context.Background()
-	db, err := storage.Open(ctx, t.TempDir()+"/samo.db")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer db.Close()
-	if err := storage.ApplyMigrations(ctx, db, migrations.Files); err != nil {
-		t.Fatal(err)
-	}
+	db := storagetest.Open(t)
 
 	service := New(db)
 	feedURL := "https://example.com/feed.xml"
@@ -116,14 +101,7 @@ func TestUpdatePodcastFeedPreservesNextPollForMetadataOnlyEdit(t *testing.T) {
 
 func TestListDuePodcastFeedsRespectsNextPollAt(t *testing.T) {
 	ctx := context.Background()
-	db, err := storage.Open(ctx, t.TempDir()+"/samo.db")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer db.Close()
-	if err := storage.ApplyMigrations(ctx, db, migrations.Files); err != nil {
-		t.Fatal(err)
-	}
+	db := storagetest.Open(t)
 
 	service := New(db)
 	now := time.Date(2026, 5, 22, 12, 0, 0, 0, time.UTC)
@@ -136,7 +114,7 @@ func TestListDuePodcastFeedsRespectsNextPollAt(t *testing.T) {
 		}
 	}
 
-	_, err = db.ExecContext(ctx, `
+	_, err := db.ExecContext(ctx, `
 		UPDATE podcast_feeds SET next_poll_at = ? WHERE feed_url = ?`,
 		"2026-05-22T11:00:00Z", dueURL,
 	)

@@ -9,9 +9,8 @@ import (
 	"testing"
 	"time"
 
-	_ "modernc.org/sqlite"
-
 	"github.com/bouliehaan/samo-server/internal/catalog"
+	"github.com/bouliehaan/samo-server/internal/storage/storagetest"
 )
 
 // stubCatalog returns fixed episode pages for a single podcast id so
@@ -30,23 +29,21 @@ func (s *stubCatalog) EpisodesForPodcast(podcastID string, page catalog.PageRequ
 	return catalog.Page[catalog.PodcastEpisode]{Items: items, Total: len(items), Limit: page.Limit}, nil
 }
 
+// newTestDB hands back a real migrated database, so scheduler queries run
+// against the actual channels schema instead of a hand-rolled shadow copy.
 func newTestDB(t *testing.T) *sql.DB {
 	t.Helper()
-	dir := t.TempDir()
-	db, err := sql.Open("sqlite", filepath.Join(dir, "channels.db"))
-	if err != nil {
-		t.Fatalf("open sqlite: %v", err)
+	return storagetest.Open(t)
+}
+
+// mustChannel seeds the parent channels row the real schema's foreign keys
+// require before sources/rules can reference it.
+func mustChannel(t *testing.T, db *sql.DB, id string) {
+	t.Helper()
+	if _, err := db.ExecContext(context.Background(),
+		`INSERT INTO channels (id, name) VALUES (?, ?)`, id, "Channel "+id); err != nil {
+		t.Fatalf("seed channel %s: %v", id, err)
 	}
-	t.Cleanup(func() { db.Close() })
-	if _, err := db.Exec(`
-		CREATE TABLE channels (id TEXT PRIMARY KEY, name TEXT, description TEXT, codec TEXT, bitrate_kbps INTEGER, sample_rate_hz INTEGER, enabled INTEGER, created_at TEXT, updated_at TEXT);
-		CREATE TABLE channel_sources (id TEXT PRIMARY KEY, channel_id TEXT, kind TEXT, label TEXT, config_json TEXT, enabled INTEGER, weight INTEGER, default_rotation INTEGER, created_at TEXT, updated_at TEXT);
-		CREATE TABLE channel_schedule_rules (id TEXT PRIMARY KEY, channel_id TEXT, source_id TEXT, label TEXT, weekday_mask INTEGER, start_minute INTEGER, end_minute INTEGER, priority INTEGER, enabled INTEGER, created_at TEXT);
-		CREATE TABLE channel_play_log (id TEXT PRIMARY KEY, channel_id TEXT, source_id TEXT, item_ref TEXT, title TEXT, artist TEXT, kind TEXT, started_at TEXT, ended_at TEXT, duration_seconds INTEGER);
-	`); err != nil {
-		t.Fatalf("create schema: %v", err)
-	}
-	return db
 }
 
 func TestPickActiveRuleRespectsPriorityAndWindow(t *testing.T) {
@@ -283,6 +280,7 @@ func TestLiveStreamResolvesURL(t *testing.T) {
 func TestNextItemPrefersRuleOverRotation(t *testing.T) {
 	db := newTestDB(t)
 	ctx := context.Background()
+	mustChannel(t, db, "ch-1")
 
 	rotation, err := InsertSource(ctx, db, "ch-1", CreateSourceInput{
 		Kind: SourceLiveStream, Label: "Background", Config: map[string]any{"url": "https://bg.example.com/x.mp3"},
@@ -324,6 +322,7 @@ func TestNextItemPrefersRuleOverRotation(t *testing.T) {
 func TestNextItemTagsRuleDriven(t *testing.T) {
 	db := newTestDB(t)
 	ctx := context.Background()
+	mustChannel(t, db, "ch-3")
 	scheduled, err := InsertSource(ctx, db, "ch-3", CreateSourceInput{
 		Kind: SourceLiveStream, Label: "Cut-in", Config: map[string]any{"url": "https://cut.example.com/x.mp3"},
 	})
@@ -356,6 +355,7 @@ func TestNextItemTagsRuleDriven(t *testing.T) {
 func TestNextItemFallsBackToRotationWhenNoRule(t *testing.T) {
 	db := newTestDB(t)
 	ctx := context.Background()
+	mustChannel(t, db, "ch-2")
 	dir := t.TempDir()
 	a := filepath.Join(dir, "a.mp3")
 	os.WriteFile(a, []byte("x"), 0o644)

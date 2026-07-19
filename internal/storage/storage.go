@@ -1,3 +1,6 @@
+// Package storage owns samo-server's PostgreSQL access: the connection pools,
+// the schema migration runner, and the driver-level rewriting that lets the
+// rest of the codebase keep writing `?` placeholders (see rewrite.go).
 package storage
 
 import (
@@ -6,134 +9,121 @@ import (
 	"fmt"
 	"io/fs"
 	"net/url"
-	"os"
-	"path/filepath"
 	"sort"
 	"strings"
 	"time"
-
-	// modernc.org/sqlite is a pure-Go SQLite driver — no CGO, no libc
-	// dependency. This is what lets samo-server ship as a single statically-
-	// linked binary on any Linux distro.
-	_ "modernc.org/sqlite"
 )
 
-type OpenOptions struct {
-	ReadOnly     bool
-	MaxOpenConns int
-	MaxIdleConns int
-	BusyTimeout  time.Duration
-	ForeignKeys  bool
-	JournalMode  string
-	Synchronous  string
-	CacheShared  bool
-}
+// Pool sizing. The server process holds two pools (Open + OpenReadOnly =
+// 2×maxOpenConns), and each scan runs in a subprocess that opens one more write
+// pool (maxOpenConns). Even with a couple of concurrent scans the worst case
+// stays well under the default max_connections=100.
+const (
+	maxOpenConns = 16
+	maxIdleConns = 8
+)
 
-var defaultOpenOptions = OpenOptions{
-	MaxOpenConns: 16,
-	MaxIdleConns: 8,
-	BusyTimeout:  60 * time.Second,
-	ForeignKeys:  true,
-	JournalMode:  "WAL",
-	Synchronous:  "NORMAL",
-	CacheShared:  false,
-}
+// migrationLockKey is the pg_advisory_lock key that serializes schema
+// migration across every process sharing the database: the server, a scan
+// subprocess that opens+migrates on launch, and two instances racing during a
+// restart. Postgres DDL is not safe to apply from two sessions at once (a bare
+// CREATE fails once the other commits, and a killed process could leave a
+// half-applied file), so the whole apply sequence runs under this lock. The
+// value is arbitrary but must stay stable and distinct from any other advisory
+// lock the codebase takes (see storagetest's template lock).
+const migrationLockKey = 0x53414D4F4D4947 // ASCII "SAMOMIG"
 
-// Open returns the read-WRITE handle.
-//
-// NOTE: this pool must keep MORE than one connection. SQLite (WAL) only allows
-// one writer at a time, so it is tempting to pin this to MaxOpenConns=1 to make
-// writes serialize and never hit SQLITE_BUSY — but this codebase holds open
-// `rows` cursors while issuing nested queries during startup, and a
-// single-connection pool deadlocks the boot (the nested query waits forever for
-// the connection the cursor still holds). SQLITE_BUSY must be solved another way
-// (an app-level write-serialization mutex that leaves the pool multi-connection),
-// NOT by shrinking this pool. See git history for the reverted single-writer
-// attempt that hung the server on boot.
-func Open(ctx context.Context, path string) (*sql.DB, error) {
-	return OpenWithOptions(ctx, path, defaultOpenOptions)
-}
-
-func OpenReadOnly(ctx context.Context, path string) (*sql.DB, error) {
-	opts := defaultOpenOptions
-	opts.ReadOnly = true
-	return OpenWithOptions(ctx, path, opts)
-}
-
-func OpenWithOptions(ctx context.Context, path string, opts OpenOptions) (*sql.DB, error) {
-	path = strings.TrimSpace(path)
-	if path == "" {
-		return nil, fmt.Errorf("database path cannot be empty")
-	}
-	if !opts.ReadOnly {
-		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
-			return nil, fmt.Errorf("create database directory: %w", err)
-		}
+// Open opens the read-write PostgreSQL pool through the rewriting driver.
+func Open(ctx context.Context, dsn string) (*sql.DB, error) {
+	dsn = strings.TrimSpace(dsn)
+	if dsn == "" {
+		return nil, fmt.Errorf("postgres DSN cannot be empty (set SAMO_DB_DSN)")
 	}
 
-	// _pragma query params apply to every connection in the pool. Exec'ing PRAGMA
-	// once after Open only affects the first pooled connection, which caused
-	// SQLITE_BUSY under scan load when progress and catalog writes used other conns.
-	db, err := sql.Open("sqlite", sqliteDSN(path, opts))
+	db, err := sql.Open(pgDriverName, dsn)
 	if err != nil {
-		return nil, fmt.Errorf("open sqlite database: %w", err)
+		return nil, fmt.Errorf("open postgres database: %w", err)
 	}
-	if opts.MaxOpenConns > 0 {
-		db.SetMaxOpenConns(opts.MaxOpenConns)
-	}
-	if opts.MaxIdleConns > 0 {
-		db.SetMaxIdleConns(opts.MaxIdleConns)
-	}
+	db.SetMaxOpenConns(maxOpenConns)
+	db.SetMaxIdleConns(maxIdleConns)
+	// Recycle connections so a long-lived server survives Postgres restarts and
+	// server-side idle-timeout disconnects without surfacing dead conns.
+	db.SetConnMaxIdleTime(5 * time.Minute)
+	db.SetConnMaxLifetime(time.Hour)
 
-	// Ensure WAL on existing databases created before DSN pragmas.
-	if !opts.ReadOnly {
-		if _, err := db.ExecContext(ctx, `PRAGMA journal_mode = WAL`); err != nil {
-			db.Close()
-			return nil, fmt.Errorf("apply sqlite journal_mode: %w", err)
-		}
+	pingCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+	if err := db.PingContext(pingCtx); err != nil {
+		db.Close()
+		return nil, fmt.Errorf("connect to postgres: %w", err)
 	}
-
 	return db, nil
 }
 
-func sqliteDSN(path string, opts OpenOptions) string {
-	abs := path
-	if a, err := filepath.Abs(path); err == nil {
-		abs = a
-	}
-	u := url.URL{
-		Scheme: "file",
-		Path:   filepath.ToSlash(abs),
-	}
-	q := url.Values{}
-	q.Add("_pragma", fmt.Sprintf("busy_timeout(%d)", int(opts.BusyTimeout.Milliseconds())))
-	q.Add("_pragma", fmt.Sprintf("foreign_keys(%s)", boolToOnOff(opts.ForeignKeys)))
-	if opts.ReadOnly {
-		q.Add("mode", "ro")
-		q.Add("_pragma", "query_only(ON)")
-	} else {
-		q.Add("_pragma", fmt.Sprintf("journal_mode(%s)", opts.JournalMode))
-		q.Add("_pragma", fmt.Sprintf("synchronous(%s)", opts.Synchronous))
-		q.Add("_txlock", "immediate")
-	}
-	q.Add("_pragma", "mmap_size(30000000000)")
-	q.Add("_pragma", "temp_store(MEMORY)")
-
-	if opts.CacheShared {
-		q.Add("cache", "shared")
-	}
-	u.RawQuery = q.Encode()
-	return u.String()
+// OpenReadOnly opens a companion pool for read traffic whose sessions are
+// pinned read-only (default_transaction_read_only=on). Keeping interactive
+// reads on their own pool means a scan or import that saturates the write
+// pool's connections can't starve catalog loads — and the server-side
+// read-only pin turns any accidental write through this handle into a loud
+// error instead of silent state drift.
+func OpenReadOnly(ctx context.Context, dsn string) (*sql.DB, error) {
+	return Open(ctx, readOnlyDSN(dsn))
 }
 
-func boolToOnOff(value bool) string {
-	if value {
-		return "ON"
+// readOnlyDSN appends default_transaction_read_only=on to a DSN in either
+// URL form (postgres://...?k=v) or keyword form (host=... dbname=...). pgx
+// forwards parameters it doesn't recognize to the server as session GUCs.
+func readOnlyDSN(dsn string) string {
+	dsn = strings.TrimSpace(dsn)
+	if strings.Contains(dsn, "://") {
+		u, err := url.Parse(dsn)
+		if err != nil {
+			// Malformed URL: leave it for Open to reject with pgx's error.
+			return dsn
+		}
+		q := u.Query()
+		q.Set("default_transaction_read_only", "on")
+		u.RawQuery = q.Encode()
+		return u.String()
 	}
-	return "OFF"
+	return dsn + " default_transaction_read_only=on"
 }
 
+// ApplyMigrations applies the ordered *.sql migration set to the database,
+// recording each file in the schema_migrations ledger so re-runs are no-ops.
+//
+// The entire sequence runs under a session-level advisory lock (see
+// migrationLockKey) so concurrent callers — the server plus a scan subprocess,
+// or two instances racing during a restart — serialize instead of colliding on
+// a CREATE or half-applying a file. After first run every caller takes the
+// lock, sees an empty work list, and releases in well under a millisecond.
 func ApplyMigrations(ctx context.Context, db *sql.DB, migrationFS fs.FS) error {
+	// A dedicated connection holds the lock for the whole run. Session-level
+	// (not xact) because each migration below opens its own transaction.
+	conn, err := db.Conn(ctx)
+	if err != nil {
+		return fmt.Errorf("acquire migration lock connection: %w", err)
+	}
+	defer conn.Close()
+
+	if _, err := conn.ExecContext(ctx, `SELECT pg_advisory_lock(?)`, migrationLockKey); err != nil {
+		return fmt.Errorf("acquire migration lock: %w", err)
+	}
+	defer func() {
+		// Release on a fresh context so a cancelled ctx still frees the lock
+		// before conn.Close() hands the still-locked session back to the pool
+		// (Close returns a connection to the pool; it does not end the session).
+		unlockCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		_, _ = conn.ExecContext(unlockCtx, `SELECT pg_advisory_unlock(?)`, migrationLockKey)
+	}()
+
+	return applyMigrationsLocked(ctx, db, migrationFS)
+}
+
+// applyMigrationsLocked runs the migration sequence. The caller must already
+// hold migrationLockKey.
+func applyMigrationsLocked(ctx context.Context, db *sql.DB, migrationFS fs.FS) error {
 	entries, err := fs.ReadDir(migrationFS, ".")
 	if err != nil {
 		return fmt.Errorf("read migrations: %w", err)
@@ -141,13 +131,22 @@ func ApplyMigrations(ctx context.Context, db *sql.DB, migrationFS fs.FS) error {
 
 	names := make([]string, 0, len(entries))
 	for _, entry := range entries {
-		if !entry.IsDir() && strings.HasSuffix(entry.Name(), ".sql") {
-			names = append(names, entry.Name())
+		name := entry.Name()
+		// Skip dot/underscore-prefixed files. macOS tar can inject AppleDouble
+		// "._foo.sql" sidecars into a build context, and //go:embed *.sql sweeps
+		// them in; applying that binary junk as SQL corrupts the connection.
+		if entry.IsDir() || !strings.HasSuffix(name, ".sql") ||
+			strings.HasPrefix(name, ".") || strings.HasPrefix(name, "_") {
+			continue
 		}
+		names = append(names, name)
 	}
 	sort.Strings(names)
 
-	if _, err := db.ExecContext(ctx, `CREATE TABLE IF NOT EXISTS schema_migrations (version TEXT PRIMARY KEY, applied_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP)`); err != nil {
+	// applied_at is TEXT for portability with rows migrated from the SQLite
+	// era; it is only read for human inspection.
+	const ledgerDDL = `CREATE TABLE IF NOT EXISTS schema_migrations (version TEXT PRIMARY KEY, applied_at TEXT NOT NULL DEFAULT to_char((now() AT TIME ZONE 'UTC'), 'YYYY-MM-DD"T"HH24:MI:SS"Z"'))`
+	if _, err := db.ExecContext(ctx, ledgerDDL); err != nil {
 		return fmt.Errorf("ensure schema migrations table: %w", err)
 	}
 
@@ -202,25 +201,4 @@ func applyMigration(ctx context.Context, db *sql.DB, version string, body string
 	}
 
 	return nil
-}
-
-// StartOptimizer runs SQLite's PRAGMA optimize periodically to update query
-// planner statistics. It should be called once per database connection pool.
-func StartOptimizer(ctx context.Context, db *sql.DB) {
-	go func() {
-		ticker := time.NewTicker(12 * time.Hour)
-		defer ticker.Stop()
-		for {
-			select {
-			case <-ctx.Done():
-				// SQLite recommends running optimize right before close.
-				// Since we share the context, we make one final attempt here,
-				// though db.Close() might race with this.
-				db.Exec("PRAGMA optimize")
-				return
-			case <-ticker.C:
-				db.ExecContext(ctx, "PRAGMA optimize")
-			}
-		}
-	}()
 }

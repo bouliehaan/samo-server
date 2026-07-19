@@ -82,7 +82,7 @@ func TestFindCandidateTracksRetriesFailedIdentifications(t *testing.T) {
 		t.Fatal("third retry must be due after 1 day")
 	}
 
-	// ...and attempts=4 waits the final 3-day rung.
+	// ...attempts=4 waits the 3-day rung...
 	mustExec(t, db, `UPDATE explo_tracks SET attempts = 4, processed_at = datetime('now', '-2 days') WHERE track_id = 'track-unmatched'`)
 	if ids := candidateTrackIDs(t, svc); ids["track-unmatched"] {
 		t.Fatal("fourth retry fired before its 3-day wait")
@@ -92,8 +92,21 @@ func TestFindCandidateTracksRetriesFailedIdentifications(t *testing.T) {
 		t.Fatal("fourth retry must be due after 3 days")
 	}
 
+	// ...and attempts 5..9 ride the final weekly rung. This is the range the
+	// old 5-attempt budget retired forever — tracks off releases AcoustID
+	// didn't know yet (fresh albums) burned out in ~8 days and never came
+	// back. They must requalify now.
+	mustExec(t, db, `UPDATE explo_tracks SET attempts = 5, processed_at = datetime('now', '-4 days') WHERE track_id = 'track-unmatched'`)
+	if ids := candidateTrackIDs(t, svc); ids["track-unmatched"] {
+		t.Fatal("fifth retry fired before its 7-day wait")
+	}
+	mustExec(t, db, `UPDATE explo_tracks SET processed_at = datetime('now', '-8 days') WHERE track_id = 'track-unmatched'`)
+	if ids := candidateTrackIDs(t, svc); !ids["track-unmatched"] {
+		t.Fatal("previously-retired rows (attempts=5) must requalify under the raised budget")
+	}
+
 	// Exhausted attempt budget: retired for good, no matter how old.
-	mustExec(t, db, `UPDATE explo_tracks SET attempts = 5, processed_at = datetime('now', '-60 days') WHERE track_id = 'track-unmatched'`)
+	mustExec(t, db, `UPDATE explo_tracks SET attempts = 10, processed_at = datetime('now', '-60 days') WHERE track_id = 'track-unmatched'`)
 	if ids := candidateTrackIDs(t, svc); ids["track-unmatched"] {
 		t.Fatal("unmatched track past the attempt budget must stay retired")
 	}
@@ -125,7 +138,7 @@ func TestProcessNewTracksLogsIdleStatusBreakdown(t *testing.T) {
 	mustExec(t, db, `
 		INSERT INTO explo_tracks (track_id, status, processed_at, attempts) VALUES
 		  ('track-matched', 'unmatched', datetime('now', '-10 minutes'), 1),
-		  ('track-unmatched', 'error', datetime('now', '-60 days'), 5);
+		  ('track-unmatched', 'error', datetime('now', '-60 days'), 10);
 	`)
 	// One warm-up reconcile absorbs first-pass side effects (album hiding,
 	// playlist creation) whose non-zero counts would print the processed
@@ -142,7 +155,7 @@ func TestProcessNewTracksLogsIdleStatusBreakdown(t *testing.T) {
 	if !strings.Contains(joined, "1 awaiting retry (next due ") {
 		t.Fatalf("idle status did not report the pending retry, logs:\n%s", joined)
 	}
-	if !strings.Contains(joined, "1 retired after 5 failed attempts") {
+	if !strings.Contains(joined, "1 retired after 10 failed attempts") {
 		t.Fatalf("idle status did not report the retired row, logs:\n%s", joined)
 	}
 

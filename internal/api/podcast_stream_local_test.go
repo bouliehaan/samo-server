@@ -12,8 +12,7 @@ import (
 	"github.com/bouliehaan/samo-server/internal/catalog"
 	"github.com/bouliehaan/samo-server/internal/files"
 	"github.com/bouliehaan/samo-server/internal/playback"
-	"github.com/bouliehaan/samo-server/internal/storage"
-	"github.com/bouliehaan/samo-server/migrations"
+	"github.com/bouliehaan/samo-server/internal/storage/storagetest"
 )
 
 func TestStreamPodcastEpisodeServesLocalFileFromStart(t *testing.T) {
@@ -30,14 +29,7 @@ func TestStreamPodcastEpisodeServesLocalFileFromStart(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	db, err := storage.Open(ctx, filepath.Join(root, "samo.db"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer db.Close()
-	if err := storage.ApplyMigrations(ctx, db, migrations.Files); err != nil {
-		t.Fatal(err)
-	}
+	db := storagetest.Open(t)
 
 	libraryID := "lib-pod"
 	podcastID := "pod-1"

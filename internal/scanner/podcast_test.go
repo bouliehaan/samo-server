@@ -7,8 +7,7 @@ import (
 	"testing"
 
 	"github.com/bouliehaan/samo-server/internal/catalog"
-	"github.com/bouliehaan/samo-server/internal/storage"
-	"github.com/bouliehaan/samo-server/migrations"
+	"github.com/bouliehaan/samo-server/internal/storage/storagetest"
 )
 
 // TestGroupPodcastsFlatAndNested verifies that podcast file layouts produce
@@ -82,14 +81,7 @@ func TestGroupPodcastsFlatAndNested(t *testing.T) {
 // against the path UNIQUE constraint.
 func TestScanLibraryPreservesProvidedID(t *testing.T) {
 	ctx := context.Background()
-	db, err := storage.Open(ctx, t.TempDir()+"/samo.db")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer db.Close()
-	if err := storage.ApplyMigrations(ctx, db, migrations.Files); err != nil {
-		t.Fatal(err)
-	}
+	db := storagetest.Open(t)
 
 	// Seed a library row with a manually chosen id (simulating a row that
 	// migration 016 carried forward with the old shelf-derived hash).
@@ -141,14 +133,7 @@ func TestScanLibraryPreservesProvidedID(t *testing.T) {
 // "0 albums and songs from Drake" / "Audiobooks Library 0 items" bug.
 func TestRefreshStatsUpdatesLibraryAndArtistCounts(t *testing.T) {
 	ctx := context.Background()
-	db, err := storage.Open(ctx, t.TempDir()+"/samo.db")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer db.Close()
-	if err := storage.ApplyMigrations(ctx, db, migrations.Files); err != nil {
-		t.Fatal(err)
-	}
+	db := storagetest.Open(t)
 
 	scanner := New(db)
 	// Music library with one track linked to one album and one artist.

@@ -3,7 +3,10 @@
 Samo Server ships as a single static binary plus bundled ffmpeg/ffprobe.
 There is no apt dependency, no runtime, and no CGO toolchain on the target
 host. If you have a stock Ubuntu (or Debian-class) box with systemd, you
-have everything you need.
+have everything you need — except a **PostgreSQL server**, which Samo
+requires (`apt install postgresql`, or run the bundled `docker compose`
+which brings its own; see the repo README). Point the service at it by
+writing `SAMO_DB_DSN=postgres://...` into `/etc/samo-server.env`.
 
 ## Quick install
 
@@ -58,7 +61,7 @@ What gets touched:
 
 What stays untouched:
 
-- `/var/lib/samo/*` — the entire data directory, including SQLite,
+- `/var/lib/samo/*` — the entire data directory, including the
   cover cache, podcast cache, and metadata overrides.
 - The `samo` system user.
 - Your library mounts.
@@ -153,7 +156,6 @@ Each tarball contains everything the install script needs.
   bin/ffmpeg          static GPL ffmpeg
   bin/ffprobe
 /var/lib/samo/
-  samo.db             SQLite catalog
   covers/             cover art cache
   podcast-cache/      enclosure cache
 /etc/systemd/system/
