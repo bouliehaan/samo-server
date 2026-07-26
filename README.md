@@ -75,3 +75,11 @@ Tests run against a real PostgreSQL (each test gets its own database cloned from
 - no throwaway glue-server architecture
 - small boring reliable pieces
 - client talks to Samo-native concepts, not backend-specific hacks
+
+## Clients
+
+The client half of the project lives in [bouliehaan/samo](https://github.com/bouliehaan/samo) — a desktop app (Electron) and an Android app, sharing one server client so both inherit the same behaviour.
+
+## Licence
+
+[GPL-3.0-only](LICENSE), matching the Samo client.
