@@ -22,16 +22,23 @@ const (
 	queueKindScrobble   = "scrobble"
 	queueKindLove       = "love"
 	queueKindUnlove     = "unlove"
-	maxQueueAttempts    = 8
+
+	sourceStream = "stream"
 )
 
 type Service struct {
-	db            *sql.DB
-	httpClient    *http.Client
-	mu            sync.RWMutex
-	client        *Client
-	logger        func(format string, args ...any)
-	playbackLocks sync.Map // per-user *sync.Mutex for processPlayback serialization
+	db         *sql.DB
+	httpClient *http.Client
+	mu         sync.RWMutex
+	client     *Client
+	logger     func(format string, args ...any)
+
+	// clock and playID are indirected so the listen engine can be driven
+	// deterministically in tests.
+	clock  func() time.Time
+	playID func() string
+
+	playbackLocks sync.Map // per-user *sync.Mutex serializing playback observations
 }
 
 type ServiceOptions struct {
@@ -40,6 +47,8 @@ type ServiceOptions struct {
 	SharedSecret string
 	HTTPClient   *http.Client
 	Logger       func(format string, args ...any)
+	Now          func() time.Time
+	NewPlayID    func() string
 }
 
 func NewService(options ServiceOptions) *Service {
@@ -47,11 +56,21 @@ func NewService(options ServiceOptions) *Service {
 	if logger == nil {
 		logger = log.Printf
 	}
+	clock := options.Now
+	if clock == nil {
+		clock = func() time.Time { return time.Now().UTC() }
+	}
+	playID := options.NewPlayID
+	if playID == nil {
+		playID = newPlayToken
+	}
 	return &Service{
 		db:         options.DB,
 		httpClient: options.HTTPClient,
 		client:     NewClient(options.APIKey, options.SharedSecret, options.HTTPClient),
 		logger:     logger,
+		clock:      clock,
+		playID:     playID,
 	}
 }
 
@@ -276,6 +295,21 @@ func (s *Service) CompleteAuth(ctx context.Context, userID, token string) (AuthC
 	if err != nil {
 		return AuthCompleteResponse{}, err
 	}
+	// Anything that piled up while the account was disconnected is now
+	// deliverable: send it immediately rather than waiting for a poller tick,
+	// and reset the backoff so long-deferred items go out at once.
+	if err := resetQueueBackoff(ctx, s.db, userID); err != nil {
+		s.logger("last.fm queue backoff reset failed: %v", err)
+	}
+	go func() {
+		flushCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 2*time.Minute)
+		defer cancel()
+		if flushed, err := s.FlushQueue(flushCtx, userID, 200); err != nil {
+			s.logger("last.fm post-auth flush failed: %v", err)
+		} else if flushed > 0 {
+			s.logger("last.fm delivered %d submission(s) held while disconnected", flushed)
+		}
+	}()
 	return AuthCompleteResponse{
 		Username:    record.Username,
 		Connected:   true,
@@ -312,14 +346,26 @@ func (s *Service) ListHistory(ctx context.Context, userID string, limit, offset 
 	return HistoryPage{Items: items, Total: total}, nil
 }
 
+// ---------------------------------------------------------------------------
+// playback entry points
+// ---------------------------------------------------------------------------
+
+// HandlePlayback folds one observation of a track into the listen engine. It is
+// the single entry point for every automatic trigger; callers stamp ObservedAt
+// when the request arrived so that observations overtaking each other in flight
+// can be ordered.
+func (s *Service) HandlePlayback(ctx context.Context, input PlaybackInput) {
+	s.processPlayback(ctx, input, input.DurationSeconds)
+}
+
 func (s *Service) HandleStreamStart(ctx context.Context, userID string, track catalog.MusicTrack, resumeSeconds int) {
-	s.ProcessPlayback(ctx, PlaybackInput{
+	s.HandlePlayback(ctx, PlaybackInput{
 		UserID:        userID,
 		Track:         track,
-		Source:        "stream",
+		Source:        sourceStream,
 		ResumeSeconds: resumeSeconds,
-		Event:         EventStart,
 		After:         catalog.PlaybackState{ProgressSeconds: resumeSeconds},
+		ObservedAt:    s.clock(),
 	})
 }
 
@@ -331,13 +377,14 @@ func (s *Service) HandlePlaybackUpdate(
 	after catalog.PlaybackState,
 	patch playback.PatchInput,
 ) {
-	s.ProcessPlayback(ctx, PlaybackInput{
-		UserID: userID,
-		Track:  track,
-		Before: before,
-		After:  after,
-		Patch:  &patch,
-		Source: "playback-patch",
+	s.HandlePlayback(ctx, PlaybackInput{
+		UserID:     userID,
+		Track:      track,
+		Before:     before,
+		After:      after,
+		Patch:      &patch,
+		Source:     "playback-patch",
+		ObservedAt: s.clock(),
 	})
 }
 
@@ -348,12 +395,13 @@ func (s *Service) HandlePlaybackPut(
 	before catalog.PlaybackState,
 	after catalog.PlaybackState,
 ) {
-	s.ProcessPlayback(ctx, PlaybackInput{
-		UserID: userID,
-		Track:  track,
-		Before: before,
-		After:  after,
-		Source: "playback-put",
+	s.HandlePlayback(ctx, PlaybackInput{
+		UserID:     userID,
+		Track:      track,
+		Before:     before,
+		After:      after,
+		Source:     "playback-put",
+		ObservedAt: s.clock(),
 	})
 }
 
@@ -362,18 +410,15 @@ func (s *Service) HandleScrobbleEvent(ctx context.Context, userID string, track 
 	if err != nil {
 		return ScrobbleEventResponse{}, err
 	}
-	after := catalog.PlaybackState{ProgressSeconds: input.ProgressSeconds}
-	if input.StartedAt != nil {
-		after.LastPlayedAt = input.StartedAt
-	}
-	durationOverride := input.DurationSeconds
 	result := s.processPlayback(ctx, PlaybackInput{
-		UserID: userID,
-		Track:  track,
-		After:  after,
-		Source: "scrobble-event",
-		Event:  event,
-	}, durationOverride)
+		UserID:     userID,
+		Track:      track,
+		After:      catalog.PlaybackState{ProgressSeconds: input.ProgressSeconds},
+		Source:     "scrobble-event",
+		Event:      event,
+		ObservedAt: s.clock(),
+		StartedAt:  input.StartedAt,
+	}, input.DurationSeconds)
 	return ScrobbleEventResponse{
 		TrackID:         track.ID,
 		Event:           string(event),
@@ -384,10 +429,176 @@ func (s *Service) HandleScrobbleEvent(ctx context.Context, userID string, track 
 	}, nil
 }
 
+// ProcessPlayback is retained for callers that do not need the result.
+func (s *Service) ProcessPlayback(ctx context.Context, input PlaybackInput) {
+	s.processPlayback(ctx, input, input.DurationSeconds)
+}
+
+func (s *Service) processPlayback(ctx context.Context, input PlaybackInput, durationOverride int) playbackResult {
+	result := playbackResult{}
+	if !s.Enabled() || strings.TrimSpace(input.UserID) == "" || strings.TrimSpace(input.Track.ID) == "" {
+		return result
+	}
+	if _, err := loadSession(ctx, s.db, input.UserID); err != nil {
+		return result
+	}
+	submission, err := trackSubmission(input.Track, durationOverride)
+	if err != nil {
+		s.logger("last.fm skipping track %s: %v", input.Track.ID, err)
+		return result
+	}
+	if input.ObservedAt.IsZero() {
+		input.ObservedAt = s.clock()
+	}
+
+	// One observation at a time per user. Combined with the ObservedAt ordering
+	// inside the engine, concurrent notifications settle deterministically.
+	mu := s.playbackMutex(input.UserID)
+	mu.Lock()
+	defer mu.Unlock()
+
+	current, err := loadPlay(ctx, s.db, input.UserID, input.Track.ID)
+	if err != nil {
+		s.logger("last.fm play load failed for %s: %v", input.Track.ID, err)
+		return result
+	}
+
+	update, earned := settle(current, observationFrom(input, submission.DurationSeconds), s.playID())
+	if update.Started && input.StartedAt != nil && !input.StartedAt.IsZero() {
+		// An explicit client event may declare when the play really began.
+		update.Play.StartedAt = input.StartedAt.UTC()
+	}
+
+	if earned {
+		submission.Timestamp = scrobbleTimestamp(update.Play.StartedAt, input.ObservedAt)
+		submission.PlayedSeconds = update.Play.ListenedSeconds
+		submission.DedupeKey = scrobbleDedupeKey(submission.TrackID, submission.Artist, submission.Track, submission.Timestamp)
+		s.logger("last.fm scrobbling: track=%q artist=%q listened=%d/%d source=%s",
+			submission.Track, submission.Artist, update.Play.ListenedSeconds, submission.DurationSeconds, playbackSource(input))
+		queued, owned, err := s.scrobble(ctx, input.UserID, submission, playbackSource(input))
+		switch {
+		case err != nil:
+			// Leave Scrobbled false so the next observation tries again.
+			s.logger("last.fm scrobble claim failed for %s: %v", input.Track.ID, err)
+		case owned:
+			update.Play.Scrobbled = true
+			result.Scrobbled = true
+			result.Queued = queued
+		default:
+			// Already claimed elsewhere; stop re-evaluating this play.
+			update.Play.Scrobbled = true
+		}
+	}
+
+	if err := savePlay(ctx, s.db, update.Play); err != nil {
+		s.logger("last.fm play save failed for %s: %v", input.Track.ID, err)
+	}
+
+	if s.announceNowPlaying(ctx, update, submission, input) {
+		result.NowPlaying = true
+	}
+
+	if loved, unloved := loveStateChanged(input.Before, input.After, input.Patch); loved || unloved {
+		s.handleLoveChange(ctx, input.UserID, submission, loved)
+	}
+	return result
+}
+
+func playbackSource(input PlaybackInput) string {
+	if source := strings.TrimSpace(input.Source); source != "" {
+		return source
+	}
+	return "playback"
+}
+
+// announceNowPlaying updates Last.fm's "now playing" when this observation
+// shows the track is what the user is actually hearing.
+func (s *Service) announceNowPlaying(ctx context.Context, update playUpdate, submission TrackSubmission, input PlaybackInput) bool {
+	pointer, err := loadNowPlaying(ctx, s.db, input.UserID)
+	if err != nil {
+		s.logger("last.fm now playing state load failed: %v", err)
+		return false
+	}
+	otherAdvancedAt := time.Time{}
+	if !update.Advanced {
+		if otherAdvancedAt, err = latestOtherAdvance(ctx, s.db, input.UserID, input.Track.ID); err != nil {
+			s.logger("last.fm now playing prefetch check failed: %v", err)
+			return false
+		}
+	}
+	if !shouldAnnounceNowPlaying(update, pointer, otherAdvancedAt, input.ObservedAt) {
+		return false
+	}
+
+	// The first attempt for a play is the one worth auditing; retries after it
+	// say nothing new.
+	first := !pointer.Exists || pointer.PlayID != update.Play.PlayID
+	submission.Timestamp = input.ObservedAt
+	sendErr := s.sendNowPlaying(ctx, input.UserID, submission, playbackSource(input), first)
+
+	// The pointer moves either way. A zero SentAt marks the attempt as
+	// unannounced, so the listener's next position report retries at once while
+	// the audit log and the failure logging stay quiet.
+	next := nowPlayingPointer{TrackID: update.Play.TrackID, PlayID: update.Play.PlayID}
+	if sendErr == nil {
+		next.SentAt = input.ObservedAt
+	}
+	if err := saveNowPlaying(ctx, s.db, input.UserID, next); err != nil {
+		s.logger("last.fm now playing state save failed: %v", err)
+	}
+	return sendErr == nil
+}
+
+// sendNowPlaying delivers a "now playing" update. It is deliberately never
+// queued: it describes this instant, and replaying a stale one later announces
+// the wrong song.
+func (s *Service) sendNowPlaying(ctx context.Context, userID string, submission TrackSubmission, source string, record bool) error {
+	client, ok := s.activeClient()
+	if !ok {
+		return ErrDisabled
+	}
+	session, err := loadSession(ctx, s.db, userID)
+	if err != nil {
+		return err
+	}
+	if err := client.UpdateNowPlaying(ctx, session.SessionKey, submission); err != nil {
+		if isSessionRejection(err) {
+			s.invalidateSession(ctx, userID, err)
+		}
+		if record {
+			s.logger("last.fm now playing failed for %q: %v", submission.Track, err)
+			_ = recordSubmission(ctx, s.db, userID, queueKindNowPlaying, submission, submissionStatusFailed, source, err)
+		}
+		return err
+	}
+	s.logger("last.fm now playing: track=%q artist=%q source=%s", submission.Track, submission.Artist, source)
+	if record {
+		// One audit row per play, not per refresh.
+		_ = recordSubmission(ctx, s.db, userID, queueKindNowPlaying, submission, submissionStatusSubmitted, source, nil)
+	}
+	return nil
+}
+
+func (s *Service) handleLoveChange(ctx context.Context, userID string, submission TrackSubmission, loved bool) {
+	kind := queueKindUnlove
+	if loved {
+		kind = queueKindLove
+	}
+	if err := s.submitLove(ctx, userID, kind, submission); err != nil {
+		s.logger("last.fm %s failed for %q: %v", kind, submission.Track, err)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// explicit submissions
+// ---------------------------------------------------------------------------
+
 func (s *Service) SubmitManualScrobble(ctx context.Context, userID string, track catalog.MusicTrack, playedAt time.Time, playedSeconds int) error {
 	return s.SubmitScrobble(ctx, userID, track, playedAt, playedSeconds, "manual")
 }
 
+// SubmitScrobble records one play directly, bypassing the listen engine. It
+// still goes through the ledger, so submitting the same play twice is a no-op.
 func (s *Service) SubmitScrobble(ctx context.Context, userID string, track catalog.MusicTrack, playedAt time.Time, playedSeconds int, source string) error {
 	if !s.Enabled() {
 		return ErrDisabled
@@ -399,9 +610,10 @@ func (s *Service) SubmitScrobble(ctx context.Context, userID string, track catal
 	if err != nil {
 		return err
 	}
-	submission.Timestamp = playedAt.UTC()
+	submission.Timestamp = scrobbleTimestamp(playedAt.UTC(), s.clock())
 	submission.PlayedSeconds = playedSeconds
-	_, err = s.submitScrobble(ctx, userID, submission, normalizeSubmissionSource(source, "manual"))
+	submission.DedupeKey = scrobbleDedupeKey(submission.TrackID, submission.Artist, submission.Track, submission.Timestamp)
+	_, _, err = s.scrobble(ctx, userID, submission, normalizeSubmissionSource(source, "manual"))
 	return err
 }
 
@@ -409,16 +621,12 @@ func (s *Service) SubmitNowPlaying(ctx context.Context, userID string, track cat
 	if !s.Enabled() {
 		return ErrDisabled
 	}
-	if _, err := loadSession(ctx, s.db, userID); err != nil {
-		return err
-	}
 	submission, err := trackSubmission(track, 0)
 	if err != nil {
 		return err
 	}
-	submission.Timestamp = time.Now().UTC()
-	_, err = s.submitNowPlaying(ctx, userID, submission, normalizeSubmissionSource(source, "external"))
-	return err
+	submission.Timestamp = s.clock()
+	return s.sendNowPlaying(ctx, userID, submission, normalizeSubmissionSource(source, "external"), true)
 }
 
 func normalizeSubmissionSource(source, fallback string) string {
@@ -429,302 +637,12 @@ func normalizeSubmissionSource(source, fallback string) string {
 	return source
 }
 
-func (s *Service) ProcessPlayback(ctx context.Context, input PlaybackInput) {
-	s.processPlayback(ctx, input, 0)
-}
-
-func (s *Service) processPlayback(ctx context.Context, input PlaybackInput, durationOverride int) playbackResult {
-	result := playbackResult{}
-	if !s.Enabled() {
-		return result
-	}
-
-	mu := s.playbackMutex(input.UserID)
-	mu.Lock()
-	defer mu.Unlock()
-
-	if _, err := loadSession(ctx, s.db, input.UserID); err != nil {
-		return result
-	}
-
-	submission, err := trackSubmission(input.Track, durationOverride)
-	if err != nil {
-		return result
-	}
-
-	session, err := loadTrackSession(ctx, s.db, input.UserID, input.Track.ID)
-	if err != nil {
-		s.logger("last.fm track session load failed for %s: %v", input.Track.ID, err)
-		return result
-	}
-
-	switch input.Event {
-	case EventSkip:
-		session = trackSession{UserID: input.UserID, TrackID: input.Track.ID}
-		_ = saveTrackSession(ctx, s.db, session)
-		return result
-	case EventStart:
-		session = s.resetTrackSession(input, session)
-		result = s.tryNowPlaying(ctx, &session, submission, input, result)
-	default:
-		if shouldAbandonSession(input.Before, input.After, input.Patch) {
-			session = trackSession{UserID: input.UserID, TrackID: input.Track.ID}
-			_ = saveTrackSession(ctx, s.db, session)
-			return result
-		}
-		if shouldStartNewPlaySession(input.Before, input.After, input.Patch) || input.Source == "stream" {
-			session = s.resetTrackSession(input, session)
-		}
-		if input.Event == EventProgress || input.Event == EventComplete || input.Event == "" {
-			result = s.tryNowPlaying(ctx, &session, submission, input, result)
-		}
-	}
-
-	progress := progressFromInput(input)
-	if input.Event == EventComplete {
-		input.After.Completed = true
-	}
-	forceComplete := input.After.Completed || (input.Patch != nil && input.Patch.Completed != nil && *input.Patch.Completed)
-	if !session.Scrobbled && shouldScrobble(progress, submission.DurationSeconds, forceComplete) {
-		s.logger("last.fm scrobbling: track=%q artist=%q progress=%d/%d source=%s",
-			submission.Track, submission.Artist, progress, submission.DurationSeconds, input.Source)
-		submission.Timestamp = playStartedAt(session, input)
-		submission.PlayedSeconds = progress
-		queued, err := s.submitScrobble(ctx, input.UserID, submission, input.Source)
-		if err != nil {
-			s.logger("last.fm scrobble failed for %s: %v", input.Track.ID, err)
-		} else {
-			session.Scrobbled = true
-			result.Scrobbled = true
-			result.Queued = queued
-		}
-	}
-
-	if loved, unloved := loveStateChanged(input.Before, input.After, input.Patch); loved || unloved {
-		s.handleLoveChange(ctx, input.UserID, submission, loved)
-	}
-
-	if err := saveTrackSession(ctx, s.db, session); err != nil {
-		s.logger("last.fm track session save failed for %s: %v", input.Track.ID, err)
-	}
-	return result
-}
-
-func (s *Service) resetTrackSession(input PlaybackInput, current trackSession) trackSession {
-	startedAt := time.Now().UTC()
-	if input.ResumeSeconds > 0 {
-		startedAt = startedAt.Add(-time.Duration(input.ResumeSeconds) * time.Second)
-	}
-	if input.After.LastPlayedAt != nil {
-		startedAt = input.After.LastPlayedAt.UTC()
-	}
-	return trackSession{
-		UserID:        input.UserID,
-		TrackID:       input.Track.ID,
-		PlayToken:     newPlayToken(),
-		PlayStartedAt: startedAt,
-	}
-}
-
-func (s *Service) tryNowPlaying(ctx context.Context, session *trackSession, submission TrackSubmission, input PlaybackInput, result playbackResult) playbackResult {
-	if session.NowPlayingSent {
-		return result
-	}
-	progress := progressFromInput(input)
-	if progress <= 0 && input.Event != EventStart && input.Source != "stream" {
-		return result
-	}
-	s.logger("last.fm sending now-playing: track=%q artist=%q source=%s progress=%d",
-		submission.Track, submission.Artist, input.Source, progress)
-	submission.Timestamp = playStartedAt(*session, input)
-	queued, err := s.submitNowPlaying(ctx, input.UserID, submission, input.Source)
-	if err != nil {
-		s.logger("last.fm now playing failed for %s: %v", input.Track.ID, err)
-		return result
-	}
-	session.NowPlayingSent = true
-	result.NowPlaying = true
-	result.Queued = queued
-	return result
-}
-
-func (s *Service) handleLoveChange(ctx context.Context, userID string, submission TrackSubmission, loved bool) {
-	if loved {
-		if err := s.submitLove(ctx, userID, submission, true); err != nil {
-			s.logger("last.fm love failed for %q: %v", submission.Track, err)
-		}
+func (s *Service) invalidateSession(ctx context.Context, userID string, cause error) {
+	if err := deleteSession(ctx, s.db, userID); err != nil {
+		s.logger("last.fm session delete failed: %v", err)
 		return
 	}
-	if err := s.submitLove(ctx, userID, submission, false); err != nil {
-		s.logger("last.fm unlove failed for %q: %v", submission.Track, err)
-	}
-}
-
-func (s *Service) FlushQueue(ctx context.Context, userID string, limit int) (int, error) {
-	if !s.Enabled() {
-		return 0, ErrDisabled
-	}
-
-	items, err := listQueuedSubmissions(ctx, s.db, userID, limit)
-	if err != nil {
-		return 0, err
-	}
-
-	flushed := 0
-	for _, item := range items {
-		session, err := loadSession(ctx, s.db, item.UserID)
-		if err != nil {
-			continue
-		}
-		submission := TrackSubmission{
-			TrackID:              item.TrackID,
-			Artist:               item.Artist,
-			Track:                item.Track,
-			Album:                item.Album,
-			DurationSeconds:      item.DurationSeconds,
-			Timestamp:            item.Timestamp,
-			MusicBrainzRecording: item.MusicBrainzRecording,
-		}
-		submitErr := s.dispatchQueued(ctx, session.SessionKey, item.Kind, submission)
-		if submitErr != nil {
-			if s.invalidateSessionOnAuthError(ctx, item.UserID, submitErr) {
-				return flushed, ErrSessionExpired
-			}
-			attempts := item.Attempts + 1
-			if attempts >= maxQueueAttempts {
-				s.logger("last.fm dropping queued %s for %q after %d attempts: %v", item.Kind, item.Track, attempts, submitErr)
-				_ = recordSubmission(ctx, s.db, item.UserID, item.Kind, submission, submissionStatusDropped, "queue-flush", submitErr)
-				_ = deleteQueueItem(ctx, s.db, item.ID)
-				continue
-			}
-			_ = markQueueFailure(ctx, s.db, item.ID, attempts, submitErr.Error())
-			continue
-		}
-		_ = recordSubmission(ctx, s.db, item.UserID, item.Kind, submission, submissionStatusSubmitted, "queue-flush", nil)
-		if err := deleteQueueItem(ctx, s.db, item.ID); err != nil {
-			return flushed, err
-		}
-		flushed++
-	}
-	return flushed, nil
-}
-
-func (s *Service) dispatchQueued(ctx context.Context, sessionKey, kind string, submission TrackSubmission) error {
-	client, ok := s.activeClient()
-	if !ok {
-		return ErrDisabled
-	}
-	switch kind {
-	case queueKindNowPlaying:
-		return client.UpdateNowPlaying(ctx, sessionKey, submission)
-	case queueKindScrobble:
-		return client.Scrobble(ctx, sessionKey, submission)
-	case queueKindLove:
-		return client.LoveTrack(ctx, sessionKey, submission)
-	case queueKindUnlove:
-		return client.UnloveTrack(ctx, sessionKey, submission)
-	default:
-		return fmt.Errorf("unknown queue kind %q", kind)
-	}
-}
-
-func (s *Service) submitNowPlaying(ctx context.Context, userID string, submission TrackSubmission, source string) (bool, error) {
-	client, ok := s.activeClient()
-	if !ok {
-		return false, ErrDisabled
-	}
-	session, err := loadSession(ctx, s.db, userID)
-	if err != nil {
-		return false, err
-	}
-	if err := client.UpdateNowPlaying(ctx, session.SessionKey, submission); err != nil {
-		if s.invalidateSessionOnAuthError(ctx, userID, err) {
-			return false, err
-		}
-		if enqueueSubmission(ctx, s.db, userID, queueKindNowPlaying, submission, source) == nil {
-			_ = recordSubmission(ctx, s.db, userID, queueKindNowPlaying, submission, submissionStatusQueued, source, err)
-			return true, nil
-		}
-		_ = recordSubmission(ctx, s.db, userID, queueKindNowPlaying, submission, submissionStatusFailed, source, err)
-		return false, err
-	}
-	_ = recordSubmission(ctx, s.db, userID, queueKindNowPlaying, submission, submissionStatusSubmitted, source, nil)
-	return false, nil
-}
-
-func (s *Service) submitScrobble(ctx context.Context, userID string, submission TrackSubmission, source string) (bool, error) {
-	client, ok := s.activeClient()
-	if !ok {
-		return false, ErrDisabled
-	}
-	session, err := loadSession(ctx, s.db, userID)
-	if err != nil {
-		return false, err
-	}
-	if err := client.Scrobble(ctx, session.SessionKey, submission); err != nil {
-		if s.invalidateSessionOnAuthError(ctx, userID, err) {
-			return false, err
-		}
-		if enqueueSubmission(ctx, s.db, userID, queueKindScrobble, submission, source) == nil {
-			_ = recordSubmission(ctx, s.db, userID, queueKindScrobble, submission, submissionStatusQueued, source, err)
-			return true, nil
-		}
-		_ = recordSubmission(ctx, s.db, userID, queueKindScrobble, submission, submissionStatusFailed, source, err)
-		return false, err
-	}
-	_ = recordSubmission(ctx, s.db, userID, queueKindScrobble, submission, submissionStatusSubmitted, source, nil)
-	return false, nil
-}
-
-func (s *Service) submitLove(ctx context.Context, userID string, submission TrackSubmission, loved bool) error {
-	client, ok := s.activeClient()
-	if !ok {
-		return ErrDisabled
-	}
-	session, err := loadSession(ctx, s.db, userID)
-	if err != nil {
-		return err
-	}
-	kind := queueKindLove
-	var submitErr error
-	if loved {
-		submitErr = client.LoveTrack(ctx, session.SessionKey, submission)
-	} else {
-		kind = queueKindUnlove
-		submitErr = client.UnloveTrack(ctx, session.SessionKey, submission)
-	}
-	if submitErr != nil {
-		if s.invalidateSessionOnAuthError(ctx, userID, submitErr) {
-			return submitErr
-		}
-		if enqueueSubmission(ctx, s.db, userID, kind, submission, "playback") == nil {
-			_ = recordSubmission(ctx, s.db, userID, kind, submission, submissionStatusQueued, "playback", submitErr)
-			return nil
-		}
-		_ = recordSubmission(ctx, s.db, userID, kind, submission, submissionStatusFailed, "playback", submitErr)
-		return submitErr
-	}
-	_ = recordSubmission(ctx, s.db, userID, kind, submission, submissionStatusSubmitted, "playback", nil)
-	return nil
-}
-
-func (s *Service) invalidateSessionOnAuthError(ctx context.Context, userID string, err error) bool {
-	if err == nil {
-		return false
-	}
-	if errors.Is(err, ErrInvalidToken) || errors.Is(err, ErrSessionExpired) {
-		if deleteErr := deleteSession(ctx, s.db, userID); deleteErr != nil {
-			s.logger("last.fm session delete failed: %v", deleteErr)
-		} else {
-			s.logger("last.fm session cleared after auth failure: %v", err)
-		}
-		return true
-	}
-	if strings.Contains(strings.ToLower(err.Error()), "session") && strings.Contains(strings.ToLower(err.Error()), "invalid") {
-		_ = deleteSession(ctx, s.db, userID)
-		return true
-	}
-	return false
+	s.logger("last.fm session cleared after auth failure: %v", cause)
 }
 
 func newPlayToken() string {

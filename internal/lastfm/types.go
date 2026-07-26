@@ -89,17 +89,18 @@ type ScrobbleEventResponse struct {
 }
 
 type QueueItem struct {
-	ID              int64     `json:"id"`
-	Kind            string    `json:"kind"`
-	TrackID         string    `json:"trackId,omitempty"`
-	Artist          string    `json:"artist"`
-	Track           string    `json:"track"`
-	Album           string    `json:"album,omitempty"`
-	DurationSeconds int       `json:"durationSeconds,omitempty"`
-	Timestamp       time.Time `json:"timestamp"`
-	Attempts        int       `json:"attempts"`
-	LastError       string    `json:"lastError,omitempty"`
-	CreatedAt       time.Time `json:"createdAt"`
+	ID              int64      `json:"id"`
+	Kind            string     `json:"kind"`
+	TrackID         string     `json:"trackId,omitempty"`
+	Artist          string     `json:"artist"`
+	Track           string     `json:"track"`
+	Album           string     `json:"album,omitempty"`
+	DurationSeconds int        `json:"durationSeconds,omitempty"`
+	Timestamp       time.Time  `json:"timestamp"`
+	Attempts        int        `json:"attempts"`
+	LastError       string     `json:"lastError,omitempty"`
+	NextAttemptAt   *time.Time `json:"nextAttemptAt,omitempty"`
+	CreatedAt       time.Time  `json:"createdAt"`
 }
 
 type QueuePage struct {
@@ -137,6 +138,10 @@ type TrackSubmission struct {
 	PlayedSeconds        int
 	Timestamp            time.Time
 	MusicBrainzRecording string
+	// DedupeKey identifies the listen this submission represents. It is the
+	// idempotency key the ledger is claimed with, so the same play can never be
+	// scrobbled twice regardless of which code path rediscovers it.
+	DedupeKey string
 }
 
 type PlaybackInput struct {
@@ -148,6 +153,14 @@ type PlaybackInput struct {
 	Source        string
 	ResumeSeconds int
 	Event         ScrobbleEvent
+	// ObservedAt is when the server received this report. Stamped by the HTTP
+	// handler, not by the worker that processes it, so notifications that
+	// overtake one another in flight can still be ordered.
+	ObservedAt time.Time
+	// DurationSeconds overrides the catalog duration when a client knows better.
+	DurationSeconds int
+	// StartedAt lets an explicit client event declare when the play began.
+	StartedAt *time.Time
 }
 
 type playbackResult struct {
