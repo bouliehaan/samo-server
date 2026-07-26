@@ -467,7 +467,10 @@ func main() {
 		StartedAt:     time.Now(),
 	})
 
-	if cfg.LastFMPoll && lastfmService.Enabled() {
+	// Started regardless of whether credentials exist right now: they can be
+	// saved through the UI at any time, and the poller is what eventually
+	// delivers every scrobble a network outage held back.
+	if cfg.LastFMPoll {
 		poller := lastfm.NewPoller(lastfm.PollerOptions{
 			Service: lastfmService,
 			Tick:    cfg.LastFMPollTick,

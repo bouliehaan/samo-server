@@ -32,8 +32,9 @@ const loginHTML = `<!doctype html>
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>SAMO SERVER · SIGN IN</title>
-  <link href="https://fonts.googleapis.com/css2?family=Young+Serif&display=swap" rel="stylesheet">
+  <title>samo server · sign in</title>
+  <link rel="preload" as="font" type="font/otf" href="/assets/fonts/officecodepro-regular.otf" crossorigin>
+  <link rel="preload" as="font" type="font/otf" href="/assets/fonts/officecodepro-bold.otf" crossorigin>
   <link rel="icon" type="image/png" href="/favicon-dark.png">
   <link rel="icon" type="image/png" href="/favicon-light.png" media="(prefers-color-scheme: light)">
   <link rel="icon" type="image/png" href="/favicon-dark.png" media="(prefers-color-scheme: dark)">
@@ -61,17 +62,17 @@ const loginHTML = `<!doctype html>
       gap: 6px;
     }
     .login-shell h1 {
-      margin: 0 0 4px;
-      font-family: var(--serif);
-      font-size: 2.2rem;
-      font-weight: 400;
-      letter-spacing: -0.01em;
+      margin: 0 0 6px;
+      font-family: var(--mono);
+      font-size: 1.5rem;
+      font-weight: 700;
+      letter-spacing: 0.02em;
     }
     .login-shell p.lede {
       margin: 0 0 24px;
       color: var(--muted);
-      font-family: var(--sans);
-      line-height: 1.5;
+      font-family: var(--mono);
+      line-height: 1.6;
     }
     .footer-note {
       margin-top: 22px;
@@ -88,7 +89,7 @@ const loginHTML = `<!doctype html>
   <div class="grid-bg"></div>
   <main class="login-main">
     <section class="login-hero">
-      <div class="samo-wm hero"><span class="word">SAMO</span><span class="word dim">SERVER</span></div>
+      <div class="samo-wm hero"><span class="word">samo</span><span class="word dim">server</span></div>
       <div class="samo-status pulse"><span class="dot"></span><span>ONLINE · AWAITING SIGN IN</span></div>
     </section>
     <section class="card login-shell">

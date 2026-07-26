@@ -6,18 +6,19 @@ import (
 )
 
 // contentSecurityPolicy matches what the three hand-rolled HTML pages
-// (login, setup, app) actually load: everything is same-origin except the
-// Young Serif stylesheet from Google Fonts (which in turn pulls its woff2
-// files from fonts.gstatic.com). All three pages rely on inline <script>/
-// <style> blocks rather than external files, so script-src/style-src keep
-// 'unsafe-inline' — tightening that to a nonce-based policy would require
-// threading a per-request nonce through every template and is a follow-up,
-// not a drive-by change. frame-ancestors/object-src/base-uri still block
-// clickjacking, plugin-based execution, and <base> injection regardless.
+// (login, setup, app) actually load: everything is same-origin. The UI font
+// (Office Code Pro) is embedded in the binary and served from /assets/fonts,
+// so there is no longer any Google Fonts / gstatic origin to allow. All three
+// pages rely on inline <script>/<style> blocks rather than external files, so
+// script-src/style-src keep 'unsafe-inline' — tightening that to a nonce-based
+// policy would require threading a per-request nonce through every template
+// and is a follow-up, not a drive-by change. frame-ancestors/object-src/
+// base-uri still block clickjacking, plugin-based execution, and <base>
+// injection regardless.
 const contentSecurityPolicy = "default-src 'self'; " +
 	"script-src 'self' 'unsafe-inline'; " +
-	"style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; " +
-	"font-src 'self' https://fonts.gstatic.com; " +
+	"style-src 'self' 'unsafe-inline'; " +
+	"font-src 'self'; " +
 	// Album/podcast/artist art can be a remote URL (podcast feed images are
 	// served as a redirect to the origin host, not proxied) - allow https image
 	// sources so covers actually render. Still no http: (mixed content) and
