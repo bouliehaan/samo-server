@@ -42,11 +42,41 @@ Disconnect with `DELETE /api/v1/lastfm/auth/session`.
 
 ## How listens are submitted
 
-Samo scrobbles using standard Last.fm thresholds:
+Samo scrobbles on **measured listening**, not on the position a client reports.
+Each playback report is compared with the previous one, and the listen credited
+is the smaller of two quantities: how far the track advanced, and how much real
+time passed. Resuming a track at 4:07 of 4:08, dragging the scrubber to the end,
+or leaving a track paused therefore credit nothing, while ordinary playback
+credits second for second.
 
-- minimum listen time: 30 seconds, or full track length when shorter than 30 seconds
-- scrobble threshold: half the track duration or 4 minutes, whichever is lower
-- `completed: true` on a playback update scrobbles once the minimum listen time is met
+A listen is submitted once, when it meets the Last.fm rules:
+
+- tracks shorter than 30 seconds are never scrobbled
+- at least 30 seconds must have been heard
+- and at least half the track duration, or 4 minutes, whichever is lower
+
+Each listen is timestamped when the track started, so it lands in the right
+place in your Last.fm history. Skipping a track only prevents a scrobble that
+had not yet been earned — as with any Last.fm client, once the threshold is met
+the listen counts.
+
+### Exactly once, and never lost
+
+Every scrobble is written to a durable queue and an idempotency ledger in one
+transaction *before* Last.fm is contacted. The ledger key identifies the listen
+itself, so a retried request, a race between concurrent updates, or a replay
+after a crash can all try to submit the same listen and only one goes out.
+
+If Last.fm cannot be reached, the listen stays queued and is retried with a
+geometric backoff (30s, 1m, 2m, ... capped at 2 hours) for as long as Last.fm
+will still accept its timestamp — roughly two weeks. Outages do not cost you
+listens. Responses are checked for the per-scrobble `ignored` status Last.fm
+returns alongside HTTP 200, so a rejected listen is reported rather than
+silently discarded.
+
+"Now playing" is deliberately never queued: it describes the present moment, and
+replaying a stale one would announce the wrong song. Gapless clients that open
+the next track's stream before the current one ends do not announce it early.
 
 ### Automatic triggers
 
@@ -72,10 +102,13 @@ POST /api/v1/scrobble/events
 
 Events:
 
-- `start` — begin a listen session and send now playing
-- `progress` — evaluate now playing / scrobble thresholds
-- `complete` — scrobble when minimum listen time is met
-- `skip` — abandon the current listen session without scrobbling
+- `start` — begin a new listen and send now playing
+- `progress` — report the current position; listening is credited from it
+- `complete` — the track finished. This is an explicit client assertion and is
+  trusted: a client that reports nothing but `start` and `complete` still gets
+  its listen recorded
+- `skip` — abandon the listen. Nothing further is credited, and a scrobble
+  already earned is not withdrawn
 
 Optional fields: `durationSeconds`, `startedAt` (RFC3339 timestamp used for the scrobble time).
 
@@ -85,24 +118,35 @@ When a music track becomes favorited or starred through playback updates, Samo c
 
 ## Queue, history, and recovery
 
-Failed upstream calls are stored in the database and retried by the background poller.
-
 | Route | Purpose |
 |-------|---------|
-| `GET /api/v1/lastfm/queue` | pending submissions |
-| `GET /api/v1/lastfm/history` | local audit log of submitted/queued/failed attempts |
-| `POST /api/v1/lastfm/queue/flush` | manual retry |
+| `GET /api/v1/lastfm/queue` | pending submissions, with attempt count and next retry time |
+| `GET /api/v1/lastfm/history` | local audit log of submitted/queued/dropped attempts |
+| `POST /api/v1/lastfm/queue/flush` | retry everything held for this user, ignoring the backoff schedule |
 
-If Last.fm rejects the stored session key, Samo clears the linked account and requires re-auth.
+The background poller drains the queue every `SAMO_LASTFM_POLL_TICK`, and once
+shortly after startup so a restart mid-outage recovers in seconds. It runs
+whether or not credentials existed at boot, so saving them through the UI is
+enough to start delivery.
+
+If Last.fm rejects the stored session key, Samo clears the linked account and
+requires re-auth; queued listens are held meanwhile and delivered as soon as the
+account is reconnected.
 
 ## Metadata
 
-Scrobbles include artist, track, album, duration, and MusicBrainz recording ID when present on the catalog track.
+Scrobbles include artist, track, album, duration, and MusicBrainz recording ID
+when present on the catalog track. If Last.fm rejects a scrobble because it
+cannot resolve the MusicBrainz ID, Samo resubmits it without one rather than
+lose the listen.
 
 ## Current limits
 
 - one linked Last.fm account per Samo user (not per device)
 - scrobbling is music-track only (not audiobooks, podcasts, or radio)
-- listen timing comes from client-reported progress or stream resume position, not byte-count inference mid-stream
+- listening is measured from client-reported progress and stream resume
+  position, not from byte-count inference mid-stream, so a client that stops
+  reporting its position stops accumulating credit until it resumes or reports
+  the track as finished
 
 See also [docs/api.md](api.md).

@@ -37,19 +37,25 @@ func (s *Server) notifyMusicTrackLastFM(
 		safePatch = &p
 	}
 
-	go func() {
-		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
-		defer cancel()
+	// Stamp the observation with the moment the request arrived, not the moment
+	// the worker gets to it. Each notification runs on its own goroutine, so
+	// without this a progress report that overtakes an earlier one would look
+	// like the listener had seeked backwards.
+	input := lastfm.PlaybackInput{
+		UserID:        userID,
+		Track:         track,
+		Before:        before,
+		After:         after,
+		Patch:         safePatch,
+		Source:        source,
+		ResumeSeconds: resumeSeconds,
+		ObservedAt:    time.Now().UTC(),
+	}
 
-		if resumeSeconds > 0 && source == "stream" {
-			s.lastfm.HandleStreamStart(ctx, userID, track, resumeSeconds)
-			return
-		}
-		if safePatch != nil {
-			s.lastfm.HandlePlaybackUpdate(ctx, userID, track, before, after, *safePatch)
-			return
-		}
-		s.lastfm.HandlePlaybackPut(ctx, userID, track, before, after)
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		s.lastfm.HandlePlayback(ctx, input)
 	}()
 }
 
