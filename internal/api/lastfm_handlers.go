@@ -140,7 +140,9 @@ func (s *Server) flushLastFMQueue(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusUnauthorized, "unauthorized")
 		return
 	}
-	flushed, err := service.FlushQueue(r.Context(), principal.User.ID, 50)
+	// An explicit retry ignores the backoff schedule — the caller is asserting
+	// that whatever was failing has been fixed.
+	flushed, err := service.RetryQueue(r.Context(), principal.User.ID, 100)
 	if err != nil {
 		writeLastFMError(w, err)
 		return
