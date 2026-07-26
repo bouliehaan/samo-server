@@ -25,4 +25,7 @@ data/*.db-*
 /samo-server-local
 /quarantine/
 
-migrations/
+# NOTE: migrations/ must NEVER be ignored. The SQL files are compiled into the
+# binary by //go:embed in migrations/migrations.go, so an untracked migration
+# is silently absent from every build made from a clean checkout — the schema
+# it creates just never exists. 0008_playlist_tombstones.sql was lost that way.
