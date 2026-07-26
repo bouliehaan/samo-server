@@ -2,6 +2,9 @@ package playlists
 
 import (
 	"context"
+	"errors"
+	"os"
+	"path/filepath"
 	"testing"
 
 	"github.com/bouliehaan/samo-server/internal/storage/storagetest"
@@ -179,6 +182,95 @@ func TestPlaylistImportM3UMatchesByPath(t *testing.T) {
 }
 
 // TestFirstAdminOwnerIDPrefersHumanAdmin is the regression for the invisible
+// Filesystem imports and rows migrated from older servers are owned by the
+// internal bootstrap account no human can authenticate as. Owner-only delete
+// made them permanently undeletable from every surface; an admin may remove
+// any non-system playlist, while non-admins stay locked out.
+func TestPlaylistAdminDeletesServerOwnedPlaylist(t *testing.T) {
+	ctx := context.Background()
+	db := storagetest.Open(t)
+	if _, err := db.ExecContext(ctx, `
+		INSERT INTO users (id, username, role, created_at) VALUES
+		  ('user-admin', 'jake', 'admin', '2026-05-23 21:26:34'),
+		  ('user-plain', 'norm', 'user', '2026-05-24 08:00:00')`); err != nil {
+		t.Fatal(err)
+	}
+
+	service := New(db)
+	imported, err := service.Create(ctx, users.BootstrapUserID, CreateInput{Name: "Migrated Mix"})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if err := service.Delete(ctx, "user-plain", imported.ID); !errors.Is(err, ErrForbidden) {
+		t.Fatalf("non-admin delete err = %v, want ErrForbidden", err)
+	}
+	if err := service.Delete(ctx, "user-admin", imported.ID); err != nil {
+		t.Fatalf("admin delete err = %v", err)
+	}
+	if _, err := service.loadByID(ctx, imported.ID); err != ErrNotFound {
+		t.Fatalf("after admin delete, load err = %v, want ErrNotFound", err)
+	}
+}
+
+// Deleting a playlist must stick: the scanner re-imports every on-disk .m3u
+// each full scan, which would silently resurrect deliberately deleted
+// playlists. A delete writes a name-keyed tombstone the scan path honors; a
+// manual API import is an explicit request, so it clears the tombstone and
+// scan passes may maintain the playlist again.
+func TestPlaylistDeleteTombstoneBlocksScanReimport(t *testing.T) {
+	ctx := context.Background()
+	db := storagetest.Open(t)
+	if _, err := db.ExecContext(ctx, `
+		INSERT INTO users (id, username, role, created_at)
+		VALUES ('user-admin', 'jake', 'admin', '2026-05-23 21:26:34')`); err != nil {
+		t.Fatal(err)
+	}
+
+	service := New(db)
+	path := filepath.Join(t.TempDir(), "Road Trip.m3u")
+	if err := os.WriteFile(path, []byte("#EXTM3U\n/music/gone.mp3\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	imported, err := service.ImportM3UFromPath(ctx, "user-admin", path)
+	if err != nil || !imported {
+		t.Fatalf("initial import = %v, %v", imported, err)
+	}
+	id := playlistID("user-admin", "Road Trip")
+	if _, err := service.loadByID(ctx, id); err != nil {
+		t.Fatalf("imported playlist missing: %v", err)
+	}
+	if err := service.Delete(ctx, "user-admin", id); err != nil {
+		t.Fatal(err)
+	}
+
+	imported, err = service.ImportM3UFromPath(ctx, "user-admin", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if imported {
+		t.Fatal("scan re-import resurrected a deleted playlist")
+	}
+	if _, err := service.loadByID(ctx, id); err != ErrNotFound {
+		t.Fatalf("after tombstoned re-import, load err = %v, want ErrNotFound", err)
+	}
+
+	if _, err := service.Import(ctx, "user-admin", ImportInput{
+		Name:       "Road Trip",
+		SourceType: "m3u",
+		Content:    "#EXTM3U\n/music/gone.mp3\n",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := service.loadByID(ctx, id); err != nil {
+		t.Fatalf("manual import after delete: load err = %v", err)
+	}
+	if _, err := service.ImportM3UFromPath(ctx, "user-admin", path); err != nil {
+		t.Fatalf("scan import after manual restore: %v", err)
+	}
+}
+
 // Explo playlist: the internal bootstrap account (users.BootstrapUserID) has a
 // zero created_at, so a plain ORDER BY created_at always elected it - and a
 // non-public playlist it owned rendered for nobody, since playlists are only
