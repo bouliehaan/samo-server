@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/bouliehaan/samo-server/internal/catalog"
+	"github.com/bouliehaan/samo-server/internal/users"
 )
 
 var (
@@ -163,7 +164,14 @@ func (s *Service) Delete(ctx context.Context, ownerID, id string) error {
 		return ErrSystemPlaylist
 	}
 	if err := assertOwner(ownerID, current.OwnerID); err != nil {
-		return err
+		// Admins may delete any NON-system playlist. Filesystem imports and
+		// migrated rows land under the internal bootstrap account, which no
+		// human can authenticate as — without this override those rows are
+		// undeletable by everyone (the web UI hides the button, the API 403s).
+		admin, adminErr := s.requesterIsAdmin(ctx, ownerID)
+		if adminErr != nil || !admin {
+			return err
+		}
 	}
 	result, err := s.db.ExecContext(ctx, `DELETE FROM music_playlists WHERE id = ?`, id)
 	if err != nil {
@@ -176,7 +184,79 @@ func (s *Service) Delete(ctx context.Context, ownerID, id string) error {
 	if rows == 0 {
 		return ErrNotFound
 	}
+	// Record the deletion so the scanner's .m3u auto-import cannot resurrect
+	// the playlist on the next pass. Names never present on disk just leave
+	// an inert row; a manual API import of the same name clears it.
+	if err := s.writeTombstone(ctx, current.Name); err != nil {
+		return err
+	}
 	return catalog.DeleteMetadataOverridesForTarget(ctx, s.db, catalog.OverrideKindMusicPlaylist, id)
+}
+
+// playlistNameKey is the tombstone identity: scan imports name playlists after
+// the .m3u basename, so a case-folded trimmed name is the stable key.
+func playlistNameKey(name string) string {
+	return strings.ToLower(strings.TrimSpace(name))
+}
+
+func (s *Service) writeTombstone(ctx context.Context, name string) error {
+	key := playlistNameKey(name)
+	if key == "" {
+		return nil
+	}
+	_, err := s.db.ExecContext(ctx, `
+		INSERT INTO playlist_tombstones (name_key, name, deleted_at)
+		VALUES (?, ?, NOW())
+		ON CONFLICT (name_key) DO UPDATE SET deleted_at = NOW()`,
+		key, strings.TrimSpace(name))
+	if err != nil {
+		return fmt.Errorf("write playlist tombstone: %w", err)
+	}
+	return nil
+}
+
+func (s *Service) clearTombstone(ctx context.Context, name string) error {
+	key := playlistNameKey(name)
+	if key == "" {
+		return nil
+	}
+	if _, err := s.db.ExecContext(ctx, `DELETE FROM playlist_tombstones WHERE name_key = ?`, key); err != nil {
+		return fmt.Errorf("clear playlist tombstone: %w", err)
+	}
+	return nil
+}
+
+func (s *Service) nameTombstoned(ctx context.Context, name string) (bool, error) {
+	key := playlistNameKey(name)
+	if key == "" {
+		return false, nil
+	}
+	var one int
+	err := s.db.QueryRowContext(ctx,
+		`SELECT 1 FROM playlist_tombstones WHERE name_key = ?`, key).Scan(&one)
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, nil
+	}
+	if err != nil {
+		return false, fmt.Errorf("read playlist tombstone: %w", err)
+	}
+	return true, nil
+}
+
+func (s *Service) requesterIsAdmin(ctx context.Context, requesterID string) (bool, error) {
+	requesterID = strings.TrimSpace(requesterID)
+	if requesterID == "" {
+		return false, nil
+	}
+	var role string
+	err := s.db.QueryRowContext(ctx, `SELECT role FROM users WHERE id = ?`, requesterID).Scan(&role)
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, nil
+	}
+	if err != nil {
+		return false, fmt.Errorf("resolve requester role: %w", err)
+	}
+	return strings.TrimSpace(role) == users.RoleAdmin, nil
 }
 
 // SetSystemTracks replaces the membership of a SYSTEM playlist. It is the
