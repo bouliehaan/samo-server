@@ -175,6 +175,12 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("GET /favicon-dark.png", serveFavicon(faviconDarkPNG))
 	s.mux.HandleFunc("GET /favicon.ico", serveFavicon(faviconDarkPNG))
 
+	// Office Code Pro, embedded and served same-origin so the UI is fully
+	// styled with no CDN round-trip (see fonts.go). Public — the login and
+	// setup pages need the face before any token exists.
+	s.mux.HandleFunc("GET /assets/fonts/officecodepro-regular.otf", serveFont(officeCodeProRegular))
+	s.mux.HandleFunc("GET /assets/fonts/officecodepro-bold.otf", serveFont(officeCodeProBold))
+
 	s.mux.HandleFunc("POST /api/v1/auth/login", s.loginUser)
 	s.handleAPI("POST /api/v1/auth/stream-token", s.issueStreamToken)
 

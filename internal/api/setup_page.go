@@ -32,8 +32,9 @@ const setupHTML = `<!doctype html>
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>SAMO SERVER · SETUP</title>
-  <link href="https://fonts.googleapis.com/css2?family=Young+Serif&display=swap" rel="stylesheet">
+  <title>samo server · setup</title>
+  <link rel="preload" as="font" type="font/otf" href="/assets/fonts/officecodepro-regular.otf" crossorigin>
+  <link rel="preload" as="font" type="font/otf" href="/assets/fonts/officecodepro-bold.otf" crossorigin>
   <link rel="icon" type="image/png" href="/favicon-dark.png">
   <link rel="icon" type="image/png" href="/favicon-light.png" media="(prefers-color-scheme: light)">
   <link rel="icon" type="image/png" href="/favicon-dark.png" media="(prefers-color-scheme: dark)">
@@ -56,20 +57,24 @@ const setupHTML = `<!doctype html>
     }
     .step-meta .step-pill {
       padding: 4px 10px;
-      border: 1px solid var(--line);
-      color: var(--text);
+      border: 1px solid var(--line-strong);
+      border-radius: var(--r-sm);
+      color: var(--text-dim);
     }
     .step-meta .step-pill.active {
       border-color: var(--accent);
       color: var(--accent);
+      background: var(--accent-soft);
     }
     .step-meta .step-pill.done {
-      color: var(--text-dim);
+      color: var(--muted);
     }
     .step-card h2 {
-      font-size: 1.5rem;
-      margin: 0 0 6px;
-      letter-spacing: -0.01em;
+      font-size: 1.4rem;
+      font-weight: 700;
+      margin: 0 0 8px;
+      letter-spacing: 0.03em;
+      text-transform: uppercase;
     }
     .step-card p.lede {
       color: var(--muted);
@@ -93,7 +98,9 @@ const setupHTML = `<!doctype html>
     }
     .libs-attached {
       border: 1px solid var(--line);
+      border-radius: var(--r-md);
       background: var(--surface);
+      overflow: hidden;
     }
     .libs-attached-head {
       display: flex;
@@ -137,11 +144,13 @@ const setupHTML = `<!doctype html>
     }
     .lib-row .kind-chip {
       font-family: var(--mono);
-      font-size: 0.65rem;
-      letter-spacing: 0.18em;
+      font-size: 0.62rem;
+      letter-spacing: 0.16em;
       padding: 2px 8px;
-      border: 1px solid var(--accent);
-      color: var(--accent);
+      border: 1px solid var(--line-strong);
+      border-radius: var(--r-sm);
+      background: var(--surface-2);
+      color: var(--text-dim);
       text-transform: uppercase;
     }
     .lib-row .lib-path {
@@ -156,7 +165,8 @@ const setupHTML = `<!doctype html>
     .lib-row .btn-remove {
       background: transparent;
       color: var(--muted);
-      border: 1px solid var(--line);
+      border: 1px solid var(--line-strong);
+      border-radius: var(--r-sm);
       width: 32px;
       height: 32px;
       padding: 0;
@@ -171,23 +181,27 @@ const setupHTML = `<!doctype html>
     /* Add-folder form */
     .libs-add {
       border: 1px solid var(--line);
+      border-radius: var(--r-md);
       background: var(--surface);
+      overflow: hidden;
     }
     .libs-add-head {
       padding: 14px 16px;
       border-bottom: 1px solid var(--line);
       font-family: var(--mono);
-      font-size: 0.7rem;
-      letter-spacing: 0.2em;
+      font-size: 0.68rem;
+      letter-spacing: 0.18em;
       text-transform: uppercase;
-      color: var(--accent);
+      color: var(--text-dim);
     }
     .libs-add-body { padding: 16px; }
 
     .browser-shell {
       border: 1px solid var(--line);
-      background: #000;
+      border-radius: var(--r-sm);
+      background: var(--bg);
       margin-bottom: 16px;
+      overflow: hidden;
     }
     .browser-head {
       padding: 10px 14px;
@@ -215,12 +229,12 @@ const setupHTML = `<!doctype html>
       border-bottom: 1px solid color-mix(in srgb, var(--line) 50%, transparent);
     }
     .browser-row:hover {
-      background: color-mix(in srgb, var(--accent) 6%, transparent);
-      color: var(--accent);
+      background: var(--surface-2);
+      color: var(--text);
     }
     .browser-row:last-child { border-bottom: 0; }
-    .browser-row .meta { color: var(--text-dim); font-size: 0.78rem; }
-    .browser-row.is-parent { color: var(--accent); }
+    .browser-row .meta { color: var(--muted); font-size: 0.72rem; letter-spacing: 0.06em; text-transform: uppercase; }
+    .browser-row.is-parent { color: var(--text-dim); }
 
     .kind-hint {
       font-family: var(--mono);
@@ -234,7 +248,8 @@ const setupHTML = `<!doctype html>
     /* Scan output */
     .scan-output {
       border: 1px solid var(--line);
-      background: var(--surface);
+      border-radius: var(--r-sm);
+      background: var(--bg);
       padding: 14px;
       font-family: var(--mono);
       font-size: 0.78rem;
@@ -244,7 +259,7 @@ const setupHTML = `<!doctype html>
       max-height: 240px;
       overflow: auto;
     }
-    .scan-output.success { border-color: var(--accent); color: var(--accent); }
+    .scan-output.success { border-color: var(--accent-line); color: var(--accent-strong); }
 
     .continue-row {
       display: flex;
@@ -268,7 +283,7 @@ const setupHTML = `<!doctype html>
   <main class="page-main">
     <header class="samo-head">
       <div>
-        <div class="samo-wm head"><span class="word">SAMO</span><span class="word dim">SERVER</span></div>
+        <div class="samo-wm head"><span class="word">samo</span><span class="word dim">server</span></div>
         <div class="samo-status pulse" id="hostStatus"><span class="dot"></span><span class="status-text">SETUP · STEP 1 OF 3</span></div>
       </div>
       <div class="samo-ledger">
