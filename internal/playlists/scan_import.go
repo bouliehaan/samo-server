@@ -46,6 +46,16 @@ func (s *Service) ImportM3UFromPath(ctx context.Context, ownerID, path string) (
 		return false, err
 	}
 	name := strings.TrimSuffix(filepath.Base(path), filepath.Ext(path))
+	// A tombstoned name means an owner or admin deleted this playlist on
+	// purpose; the scan pass must not resurrect it from the on-disk file.
+	// (A manual API import of the same name clears the tombstone.)
+	tombstoned, err := s.nameTombstoned(ctx, name)
+	if err != nil {
+		return false, err
+	}
+	if tombstoned {
+		return false, nil
+	}
 	replace := true
 	_, err = s.Import(ctx, ownerID, ImportInput{
 		Name:       name,

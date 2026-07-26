@@ -152,7 +152,7 @@ func (s *Service) Import(ctx context.Context, ownerID string, input ImportInput)
 			return ImportResult{}, err
 		}
 		result.Playlist = &playlist
-		return result, nil
+		return result, s.clearTombstone(ctx, name)
 	}
 
 	targetID := playlistID(ownerID, name)
@@ -172,7 +172,7 @@ func (s *Service) Import(ctx context.Context, ownerID string, input ImportInput)
 			return ImportResult{}, err
 		}
 		result.Playlist = &playlist
-		return result, nil
+		return result, s.clearTombstone(ctx, name)
 	} else if !errors.Is(err, ErrNotFound) {
 		return ImportResult{}, err
 	}
@@ -188,7 +188,9 @@ func (s *Service) Import(ctx context.Context, ownerID string, input ImportInput)
 		return ImportResult{}, err
 	}
 	result.Playlist = &playlist
-	return result, nil
+	// A manual import is an explicit request for this playlist to exist again —
+	// lift any deletion tombstone so scan passes may maintain it once more.
+	return result, s.clearTombstone(ctx, name)
 }
 
 func (s *Service) importContent(ctx context.Context, input ImportInput) (string, string, error) {
