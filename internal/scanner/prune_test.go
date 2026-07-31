@@ -88,6 +88,36 @@ func TestPruneRemovesStaleMediaFilesAndOrphanTracks(t *testing.T) {
 	}
 }
 
+// A playlist row holding an empty string in track_ids_json must not fail the
+// orphan prune. The column is NOT NULL DEFAULT '[]', so that takes a bad write
+// to produce — but casting an empty string to json raises, and the raise aborts
+// the whole statement rather than skipping the one playlist, taking every other
+// library's prune with it.
+func TestPruneOrphanMusicSurvivesEmptyPlaylistTrackIDs(t *testing.T) {
+	ctx := context.Background()
+	db := storagetest.Open(t)
+
+	scanner := New(db)
+	// The DELETE only evaluates its playlist subquery if there is something to
+	// delete, so the orphan track is what makes this test exercise the cast.
+	if err := scanner.upsertMusicTrack(ctx, catalog.MusicTrack{ID: "track-orphan", Title: "Unreferenced"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.ExecContext(ctx, `
+		INSERT INTO music_playlists (id, name, track_ids_json)
+		VALUES ('playlist-empty', 'Broken', '')`); err != nil {
+		t.Fatal(err)
+	}
+
+	pruned, err := scanner.pruneOrphanMusic(ctx)
+	if err != nil {
+		t.Fatalf("prune with empty track_ids_json: %v", err)
+	}
+	if pruned != 1 {
+		t.Fatalf("pruned = %d, want 1 (the orphan track)", pruned)
+	}
+}
+
 func TestScanWithStatsTracksSeenFiles(t *testing.T) {
 	ctx := context.Background()
 	db := storagetest.Open(t)

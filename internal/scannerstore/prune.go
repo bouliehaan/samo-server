@@ -96,12 +96,17 @@ func (s *Store) TouchLibraryScanned(ctx context.Context, libraryID string) error
 // A track is kept when a playlist still names it, even with no media file
 // behind it — a playlist entry pointing at a track that vanished mid-scan
 // would otherwise be silently dropped from the playlist.
+//
+// track_ids_json is NOT NULL DEFAULT '[]', so NULLIF only guards against a bad
+// write leaving an empty string there. Without it that one row would raise
+// "invalid input syntax for type json" and fail the whole prune, not just skip
+// the playlist — the same reasoning migration 0006 applied to json_extract.
 var orphanMusicStatements = []string{
 	`DELETE FROM music_tracks
 		 WHERE id NOT IN (SELECT track_id FROM media_files WHERE track_id IS NOT NULL)
 		   AND id NOT IN (
 		     SELECT DISTINCT j.value
-		     FROM music_playlists p, json_array_elements_text(p.track_ids_json::json) AS j(value)
+		     FROM music_playlists p, json_array_elements_text(NULLIF(p.track_ids_json, '')::json) AS j(value)
 		     WHERE j.value IS NOT NULL AND TRIM(j.value) != ''
 		   )`,
 	`DELETE FROM music_albums
