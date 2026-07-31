@@ -97,12 +97,18 @@ build directory is a broken `go build`, not a stale UI. `make ui-check` fails
 if it has drifted from `web/src`; the Docker image rebuilds it in its own Node
 stage rather than trusting the commit.
 
-### Still polling
+### ~~Still polling~~ — **done** (`d380664`)
 
-The UI runs `setInterval(tick, 1500/2000)`, so every open tab is constant load.
-SSE is the fix and is now much easier to do — the client code is real modules
-with a lint that catches mistakes — but it is a behaviour change with its own
-design (endpoint, reconnect, backpressure), not part of the extraction.
+Scan and artist-image progress push over `/api/v1/events` instead of being
+polled every 1.5–2s per tab. `internal/events` is the fan-out.
+
+The design rests on one decision: events are state **snapshots**, never deltas.
+That is what lets `Publish` drop instead of block when a subscriber is slow (a
+sleeping tab cannot wedge the scanner), and what lets a reconnect skip replay
+and `Last-Event-ID` entirely. If you add an event type, keep that property.
+
+The client reads with `fetch()`, not `EventSource`, so the bearer stays in a
+header rather than the query string.
 
 ---
 
@@ -130,13 +136,12 @@ design (endpoint, reconnect, backpressure), not part of the extraction.
 |---|---|---|
 | model/persistence split | catalog + scanner | everywhere |
 | SQL in service packages | 6 small packages, each isolating it in one file | none |
-| frontend | Vite build, 6 modules + a 3.7k-line core | React, built separately |
-| live updates | polling | SSE |
+| frontend | Vite build, 7 modules + a 3.7k-line core | React, built separately |
+| live updates | SSE | SSE |
 
-Polling is now the only row where samo is plainly behind. The frontend gap is
-narrower than the table suggests — the build, the lint and the module boundary
-exist; what remains is continuing to carve up `app.js`, which is ordinary work
-rather than a missing capability.
+No row is now a missing capability. What remains on the frontend is continuing
+to carve up `app.js` — ordinary work, and safe to do incrementally now that
+`no-undef` catches a missed import at build time.
 
 Deliberately *not* copying: repository interfaces. Navidrome needs
 `model.DataStore` for mock-based unit tests and historical multi-backend
