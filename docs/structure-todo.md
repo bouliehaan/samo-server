@@ -8,90 +8,46 @@ that pass did **not** finish, in priority order.
 
 ---
 
-## 1. Scanner: extract persistence (the big one)
+## 1. ~~Scanner: extract persistence~~ — **done**
 
-**State:** `internal/scanner` holds **104 SQL statements across 15 files**. Every
-other package is either clean or already isolates its SQL in one file. This is
-the last real structural mess.
+`internal/scanner` now contains **zero SQL**. It decides what an entity is,
+applies override policy, and accounts for what it saw; `internal/scannerstore`
+runs the statements and reports what the database did.
 
-**Target shape** (proven on `catalog` in `aa64011`):
+Landed across `ce52da9`, `ef248ec`, `640e057`, `75c4d63`, `c1a4645`, `3482d5a`.
+`write.go` went 895 → 328 lines, `prune.go` 508 → 379.
 
-```
-scanner  decides what an entity is, applies override policy, accounts for
-         what it saw
-store    runs the statement, returns what the database did
-```
+**What made it work this time.** A read-only checker, not a smarter
+transformation: extract every backtick SQL literal from a git rev and from the
+working tree, normalize whitespace, and diff the sets. Run it after every move.
+It caught a mangled `ON CONFLICT` clause within minutes of the first extraction,
+and at the end proved that all ~100 statements were byte-identical apart from
+three deliberate changes. The prior two attempts failed to bulk regex edits;
+the fix was not "regex more carefully" but "make it cheap to prove nothing
+changed."
 
-So an upsert becomes three readable steps instead of one fused blob:
+Three things the extraction turned up that were worth fixing on their own:
 
-```go
-func (s *Scanner) upsertMusicArtist(ctx context.Context, artist catalog.MusicArtist) error {
-    if s.overrideIndex != nil {                       // policy
-        artist, err = catalogstore.GuardMusicArtist(ctx, s.db, s.overrideIndex, artist)
-    }
-    created, err := s.store.UpsertMusicArtist(ctx, artist)   // persistence
-    if s.activeScan != nil && created {                      // accounting
-        s.activeScan.noteNewArtist(artist.ID)
-    }
-}
-```
+- `pruneOrphanMusic` picked its JSON syntax by reflecting on the driver's Go
+  type name, and the SQLite branch it could fall back to was unreachable *and*
+  the default. Removed.
+- The orphan-prune JSON cast had no empty-string guard, so one malformed
+  playlist row would fail every library's prune. Guarded, with a test that
+  fails without it.
+- Three statements were duplicated verbatim across two call sites each
+  (album-artist names, chapter source, episode delete). Now one each.
 
-The store returns *facts* (`created bool`) rather than doing scan bookkeeping,
-so it holds no scan state.
+`storage.IsUniqueViolation` (pgconn 23505) replaced matching `err.Error()` for
+the substring `"unique"` in the scanner. **`internal/libraries/db.go` still has
+three of those** — worth the same treatment.
 
-**Where the SQL is:**
-
-| file | stmts | |
-|---|---|---|
-| `write.go` | 44 | 10 pure, 10 open with a uniform override-guard block, 3 special |
-| `prune.go` | 18 | `pruneOrphanMusic` alone is 8 and fully pure |
-| `media_file_relink.go` | 7 | |
-| `media_file_reclaim.go` | 6 | mostly pure |
-| `phase_2_missing_tracks.go` | 5 | `moveMatchedTrack` calls `noteTrackIDMigration` — mixed |
-| `phase_2_cross_library.go` | 5 | the three `findRecentBy*` are pure |
-| `folder_store.go` | 4 | `saveFolderHash` needs `albumFolder.hash()` — keep in scanner |
-| `audiobook_audio_align.go` | 4 | reaches into ffprobe/analysis types — mostly stays |
-| rest | 11 | 1–3 each |
-
-**Genuinely mixed (extract only the query, leave orchestration):**
-`healAudioDerivedChapters`, `reconcileMediaFileTrackLinks`,
-`reconcileAudiobookMediaOwners`, `reconcilePodcastMediaOwners`,
-`refreshMusicAlbumsForLibrary`, `runPhaseCrossLibraryMoves`,
-`markUnseenMediaFilesMissing`, `moveMatchedTrack`,
-`reconcilePlaylistTrackReferences`, `scanLibraryWithStats`, `pruneMediaFiles`,
-`upsertAudioFile`.
-
-### How to do it — and how NOT to
-
-This was attempted twice and reverted twice. Both failures had the same cause:
-**bulk regex transformations.**
-
-**Do not:**
-- Bulk-rename struct fields. `path`→`Path` silently rewrote `excluded.path`
-  inside SQL string literals (20 of them), `os.FileInfo.ModTime()`, and an
-  unrelated `pendingDir.path`.
-- Move a whole file. Coupling is per-method, not per-file.
-- Move a type that has methods on it. Go forbids defining methods on another
-  package's type, and it always surfaces late. `albumFolder` (has `hash()`) and
-  `catalog.OverrideIndex` both hit this.
-- Trust a "purity" check that only inspects struct fields. It misses method
-  calls back into scanner state (`noteTrackIDMigration`, `fileInode`).
-
-**Do:**
-- One method at a time. Move it, `go build`, `go test ./internal/scanner/...`,
-  commit. Roughly 40 iterations. Boring is the point.
-- Keep types that carry behaviour in the scanner; pass primitives to the store
-  instead (`UpsertLibrary(ctx, id, name, kind, mediaType, path)` rather than
-  taking `scanner.Library`).
-- Row shapes with only data (`indexedMediaFile`, `mediaFileOwnerSnapshot`) can
-  move; give them exported fields *by editing the struct*, not by regex.
-
-**Verify with more than tests.** The scanner is the write path. After any
-change: scan a library, pin an album title and an artist name via
-`POST /api/v1/metadata/apply`, then run a **full rescan** and confirm both
-survive. That is the override-guard policy; breaking it silently wipes manual
-metadata edits on every scan and would not show up for weeks. The `/verify`
-skill boots a real server against the test Postgres.
+**Verified beyond tests**, as this doc previously insisted: a real server
+against the test Postgres, scan → pin an album title and artist name via
+`POST /api/v1/metadata/apply` → full rescan. Both survived. The control that
+makes that meaningful: deleting the album override and rescanning reverted the
+title to the tag-derived value, proving the scan really does rewrite that
+column and the guard is what held it. The `/verify` skill boots this in a
+couple of minutes.
 
 ---
 
@@ -134,10 +90,13 @@ every open tab is constant load. Worth fixing in the same pass.
 
 | | samo | Navidrome |
 |---|---|---|
-| model/persistence split | catalog only | everywhere |
-| SQL in service packages | scanner (104) + 6 small | none |
+| model/persistence split | catalog + scanner | everywhere |
+| SQL in service packages | 6 small packages, each isolating it in one file | none |
 | frontend | 6k-line Go string | React, built separately |
 | live updates | polling | SSE |
+
+The frontend is now the largest structural gap, and the only remaining one that
+a reader would notice immediately.
 
 Deliberately *not* copying: repository interfaces. Navidrome needs
 `model.DataStore` for mock-based unit tests and historical multi-backend
