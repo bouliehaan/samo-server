@@ -13,6 +13,7 @@ import (
 
 	"github.com/bouliehaan/samo-server/internal/catalog"
 	"github.com/bouliehaan/samo-server/internal/covers"
+	"github.com/bouliehaan/samo-server/internal/events"
 	"github.com/bouliehaan/samo-server/internal/lastfm"
 )
 
@@ -37,6 +38,8 @@ type Service struct {
 	mu       sync.Mutex
 	inflight map[string]*resolveCall
 	sem      chan struct{}
+
+	events *events.Hub
 
 	backfillMu     sync.Mutex
 	activeBackfill *backfillRunner

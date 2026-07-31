@@ -19,6 +19,7 @@ import (
 	"github.com/bouliehaan/samo-server/internal/catalog"
 	"github.com/bouliehaan/samo-server/internal/channels"
 	"github.com/bouliehaan/samo-server/internal/covers"
+	"github.com/bouliehaan/samo-server/internal/events"
 	"github.com/bouliehaan/samo-server/internal/explo"
 	"github.com/bouliehaan/samo-server/internal/files"
 	"github.com/bouliehaan/samo-server/internal/lastfm"
@@ -56,6 +57,7 @@ type ServerOptions struct {
 	LastFM        *lastfm.Service
 	Explo         *explo.Service
 	ArtistImages  *artistimages.Service
+	Events        *events.Hub
 	ArtistMeta    *artistmeta.Service
 	Users         *users.Service
 	Channels      *channels.Service
@@ -97,6 +99,7 @@ type Server struct {
 	artistMeta                       *artistmeta.Service
 	users                            *users.Service
 	channels                         *channels.Service
+	events                           *events.Hub
 	reloadCatalog                    func(context.Context) error
 	disableInitialInternetRadioProbe bool
 	baseCtx                          context.Context
@@ -161,6 +164,13 @@ func NewServer(options ServerOptions) http.Handler {
 		searchService = search.New()
 	}
 
+	// A hub always exists. Publishing into one with no subscribers is free,
+	// and it means no call site has to ask whether events are wired up.
+	eventHub := options.Events
+	if eventHub == nil {
+		eventHub = events.NewHub()
+	}
+
 	server := &Server{
 		db:                               options.DB,
 		apiToken:                         strings.TrimSpace(options.APIToken),
@@ -182,6 +192,7 @@ func NewServer(options ServerOptions) http.Handler {
 		lastfm:                           options.LastFM,
 		explo:                            options.Explo,
 		artistImages:                     options.ArtistImages,
+		events:                           eventHub,
 		artistMeta:                       options.ArtistMeta,
 		users:                            options.Users,
 		channels:                         options.Channels,
@@ -282,6 +293,7 @@ func (s *Server) routes() {
 	s.handleAPI("DELETE /api/v1/libraries/{id}", s.deleteLibrary)
 	s.handleAPI("POST /api/v1/libraries/{id}/scan", s.scanLibrary)
 	s.handleAPI("POST /api/v1/scan", s.scanAllLibraries)
+	s.handleAPI("GET /api/v1/events", s.eventStream)
 	s.handleAPI("GET /api/v1/scan/jobs", s.listScanJobs)
 	s.handleAPI("GET /api/v1/scan/jobs/{id}", s.getScanJob)
 	s.handleAPI("POST /api/v1/scan/jobs/{id}/cancel", s.cancelScanJob)

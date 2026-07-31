@@ -82,6 +82,9 @@ func (r *scanProgressReporter) persistSeen(total int) {
 	if err != nil {
 		log.Warnf("libraries: scan job %q progress update failed: %v", r.jobID, err)
 	}
+	// Publish after the write, so what subscribers see matches what a reload
+	// of the page would show.
+	r.service.publishScanJob(ctx, r.jobID)
 }
 
 func (r *scanProgressReporter) heartbeat() {
