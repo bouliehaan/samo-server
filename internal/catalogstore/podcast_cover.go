@@ -1,4 +1,4 @@
-package catalog
+package catalogstore
 
 import (
 	"context"
@@ -6,15 +6,17 @@ import (
 	"encoding/json"
 	"fmt"
 	"strings"
+
+	"github.com/bouliehaan/samo-server/internal/catalog"
 )
 
 // SetPodcastCover stores a user-uploaded cover for a podcast show. The image
 // is written to metadata_overrides (so rescans do not clobber it) and to
 // podcasts.cover_json (so scanner guard preserves the same artwork).
-func SetPodcastCover(ctx context.Context, db *sql.DB, podcastID string, cover Image) error {
+func SetPodcastCover(ctx context.Context, db *sql.DB, podcastID string, cover catalog.Image) error {
 	podcastID = strings.TrimSpace(podcastID)
 	if podcastID == "" {
-		return ErrNotFound
+		return catalog.ErrNotFound
 	}
 	if db == nil {
 		return fmt.Errorf("nil database")
@@ -28,14 +30,14 @@ func SetPodcastCover(ctx context.Context, db *sql.DB, podcastID string, cover Im
 		return fmt.Errorf("lookup podcast: %w", err)
 	}
 	if exists == 0 {
-		return ErrNotFound
+		return catalog.ErrNotFound
 	}
 
 	coverRaw, err := json.Marshal(cover)
 	if err != nil {
 		return fmt.Errorf("encode cover: %w", err)
 	}
-	if err := UpsertMetadataOverride(ctx, db, OverrideKindPodcast, podcastID, MetadataOverridePatch{
+	if err := UpsertMetadataOverride(ctx, db, catalog.OverrideKindPodcast, podcastID, catalog.MetadataOverridePatch{
 		"cover": coverRaw,
 	}); err != nil {
 		return err

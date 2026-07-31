@@ -52,4 +52,10 @@ USER samo
 WORKDIR /data
 EXPOSE 6969
 
+# The binary probes itself, so the slim runtime needs no curl/wget. /health
+# returns 503 when Postgres is unreachable, which is what makes this catch a
+# server that is running but unable to serve anything.
+HEALTHCHECK --interval=30s --timeout=5s --start-period=60s --retries=3 \
+    CMD ["/usr/local/bin/samo-server", "healthcheck"]
+
 ENTRYPOINT ["/usr/local/bin/samo-server"]

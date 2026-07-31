@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/bouliehaan/samo-server/internal/catalog"
+	"github.com/bouliehaan/samo-server/internal/safego"
 )
 
 const (
@@ -136,7 +137,7 @@ func (s *Service) StartBackfill(ctx context.Context, mode string) (BackfillResul
 	}
 	s.backfillMu.Unlock()
 
-	go s.executeBackfill(runCtx, targets)
+	safego.Go("artist image backfill", func() { s.executeBackfill(runCtx, targets) })
 
 	return BackfillResult{Job: job}, nil
 }

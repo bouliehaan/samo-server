@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	"github.com/bouliehaan/samo-server/internal/catalog"
+	"github.com/bouliehaan/samo-server/internal/catalogstore"
 	"github.com/bouliehaan/samo-server/internal/storage/storagetest"
 )
 
@@ -18,14 +19,14 @@ func TestScannerUpsertPreservesOverriddenMusicArtistName(t *testing.T) {
 		VALUES (?, 'Kept Name', 'Kept Sort')`, artistID); err != nil {
 		t.Fatal(err)
 	}
-	if err := catalog.UpsertMetadataOverride(ctx, db, catalog.OverrideKindMusicArtist, artistID, catalog.MetadataOverridePatch{
+	if err := catalogstore.UpsertMetadataOverride(ctx, db, catalog.OverrideKindMusicArtist, artistID, catalog.MetadataOverridePatch{
 		"name":     []byte(`"User Title"`),
 		"sortName": []byte(`"User Sort"`),
 	}); err != nil {
 		t.Fatal(err)
 	}
 
-	idx, err := catalog.LoadOverrideIndex(ctx, db)
+	idx, err := catalogstore.LoadOverrideIndex(ctx, db)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -48,7 +49,7 @@ func TestScannerUpsertPreservesOverriddenMusicArtistName(t *testing.T) {
 		t.Fatalf("stored artist = %q / %q, want kept source values", name, sortName)
 	}
 
-	seed, err := catalog.LoadSeedFromDB(ctx, db)
+	seed, err := catalogstore.LoadSeedFromDB(ctx, db)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -77,13 +78,13 @@ func TestScannerSkipsAlbumArtistSyncWhenOverridden(t *testing.T) {
 		VALUES (?, ?, 0)`, albumID, artistID); err != nil {
 		t.Fatal(err)
 	}
-	if err := catalog.UpsertMetadataOverride(ctx, db, catalog.OverrideKindMusicAlbum, albumID, catalog.MetadataOverridePatch{
+	if err := catalogstore.UpsertMetadataOverride(ctx, db, catalog.OverrideKindMusicAlbum, albumID, catalog.MetadataOverridePatch{
 		"artists": []byte(`[{"name":"Old Artist","role":"artist"}]`),
 	}); err != nil {
 		t.Fatal(err)
 	}
 
-	idx, err := catalog.LoadOverrideIndex(ctx, db)
+	idx, err := catalogstore.LoadOverrideIndex(ctx, db)
 	if err != nil {
 		t.Fatal(err)
 	}

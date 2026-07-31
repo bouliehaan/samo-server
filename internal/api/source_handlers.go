@@ -5,13 +5,14 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"log"
 	"net/http"
 	"net/url"
 	"strings"
 	"time"
 
 	"github.com/bouliehaan/samo-server/internal/covers"
+	"github.com/bouliehaan/samo-server/internal/log"
+	"github.com/bouliehaan/samo-server/internal/safego"
 	"github.com/bouliehaan/samo-server/internal/sources"
 )
 
@@ -204,13 +205,14 @@ func (s *Server) createInternetRadioStation(w http.ResponseWriter, r *http.Reque
 		// detach from the request context so the probe survives the response
 		// returning. The probe records its own success/failure into probe
 		// scheduling columns, so silent failure is acceptable here.
-		go func(id string) {
-			ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+		safego.Go("initial internet radio probe", func() {
+			id := station.ID
+			ctx, cancel := context.WithTimeout(s.baseCtx, 20*time.Second)
 			defer cancel()
 			if _, err := s.sourcesService().ProbeInternetRadioStation(ctx, id); err != nil {
-				log.Printf("initial probe for internet radio %s failed: %v", id, err)
+				log.Warnf("initial probe for internet radio %s failed: %v", id, err)
 			}
-		}(station.ID)
+		})
 	}
 	writeJSON(w, http.StatusCreated, s.internetRadioResponse(r, station))
 }
@@ -334,7 +336,7 @@ func (s *Server) internetRadioStream(w http.ResponseWriter, r *http.Request) {
 	if resolved, err := sources.ResolveInternetRadioStreamURL(r.Context(), &http.Client{Timeout: 15 * time.Second}, station.StreamURL); err == nil && resolved != "" {
 		streamURL = resolved
 	} else if err != nil {
-		log.Printf("internet radio stream resolver failed for %s: %v", station.ID, err)
+		log.Warnf("internet radio stream resolver failed for %s: %v", station.ID, err)
 	}
 	http.Redirect(w, r, streamURL, http.StatusTemporaryRedirect)
 }

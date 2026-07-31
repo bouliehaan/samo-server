@@ -4,12 +4,18 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
 	"net/http"
 	"time"
 
 	"github.com/bouliehaan/samo-server/internal/catalog"
 	"github.com/bouliehaan/samo-server/internal/podcastcache"
 )
+
+// maxJSONBodyBytes caps a JSON request body. These handlers take a single
+// integer field, so anything approaching this is a client bug or an attempt to
+// make the server buffer an unbounded body in memory.
+const maxJSONBodyBytes = 1 << 20
 
 type prewarmCountInput struct {
 	Count int `json:"count"`
@@ -46,7 +52,7 @@ func (s *Server) setPodcastPrewarm(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var input prewarmCountInput
-	if err := json.NewDecoder(r.Body).Decode(&input); err != nil {
+	if err := json.NewDecoder(io.LimitReader(r.Body, maxJSONBodyBytes)).Decode(&input); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid request body")
 		return
 	}
@@ -94,7 +100,7 @@ func (s *Server) setPodcastShowPrewarm(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var input prewarmCountInput
-	if err := json.NewDecoder(r.Body).Decode(&input); err != nil {
+	if err := json.NewDecoder(io.LimitReader(r.Body, maxJSONBodyBytes)).Decode(&input); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid request body")
 		return
 	}
@@ -142,7 +148,7 @@ func (s *Server) setPodcastCacheLimit(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var input cacheLimitInput
-	if err := json.NewDecoder(r.Body).Decode(&input); err != nil {
+	if err := json.NewDecoder(io.LimitReader(r.Body, maxJSONBodyBytes)).Decode(&input); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid request body")
 		return
 	}

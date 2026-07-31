@@ -6,6 +6,7 @@ import (
 	"strings"
 
 	"github.com/bouliehaan/samo-server/internal/catalog"
+	"github.com/bouliehaan/samo-server/internal/catalogstore"
 )
 
 func (s *MetadataApplyService) applyMusicArtist(
@@ -75,7 +76,7 @@ func (s *MetadataApplyService) applyMusicTrack(
 }
 
 func (s *MetadataApplyService) loadMusicArtistByID(ctx context.Context, id string) (catalog.MusicArtist, error) {
-	seed, err := catalog.LoadSeedFromDB(ctx, s.db)
+	seed, err := catalogstore.LoadSeedFromDB(ctx, s.db)
 	if err != nil {
 		return catalog.MusicArtist{}, err
 	}
@@ -88,7 +89,7 @@ func (s *MetadataApplyService) loadMusicArtistByID(ctx context.Context, id strin
 }
 
 func (s *MetadataApplyService) loadMusicAlbumByID(ctx context.Context, id string) (catalog.MusicAlbum, error) {
-	seed, err := catalog.LoadSeedFromDB(ctx, s.db)
+	seed, err := catalogstore.LoadSeedFromDB(ctx, s.db)
 	if err != nil {
 		return catalog.MusicAlbum{}, err
 	}
@@ -101,7 +102,7 @@ func (s *MetadataApplyService) loadMusicAlbumByID(ctx context.Context, id string
 }
 
 func (s *MetadataApplyService) loadMusicTrackByID(ctx context.Context, id string) (catalog.MusicTrack, error) {
-	seed, err := catalog.LoadSeedFromDB(ctx, s.db)
+	seed, err := catalogstore.LoadSeedFromDB(ctx, s.db)
 	if err != nil {
 		return catalog.MusicTrack{}, err
 	}

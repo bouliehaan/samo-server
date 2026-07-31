@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"github.com/bouliehaan/samo-server/internal/catalog"
+	"github.com/bouliehaan/samo-server/internal/catalogstore"
 	"github.com/bouliehaan/samo-server/internal/files"
 	"github.com/bouliehaan/samo-server/internal/podcastcache"
 	"github.com/bouliehaan/samo-server/internal/podcaststream"
@@ -66,7 +67,7 @@ func TestCachePodcastEpisodeDownloadsEnclosure(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	seed, err := catalog.LoadSeedFromDB(ctx, db)
+	seed, err := catalogstore.LoadSeedFromDB(ctx, db)
 	if err != nil {
 		t.Fatal(err)
 	}

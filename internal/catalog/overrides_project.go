@@ -1,41 +1,8 @@
 package catalog
 
 import (
-	"context"
-	"database/sql"
-	"encoding/json"
 	"strings"
 )
-
-// OverlayAudiobookOverride applies any stored metadata override for one audiobook
-// onto the given item, returning the SAME enriched view the catalog/API serves
-// (clean title, ASIN, authors). It reads the single metadata_overrides row, so it
-// works anywhere with a DB handle — the chapter analysis pass and the inspector
-// CLI both need it, because they read raw book_json and would otherwise identify
-// a book by its folder name ("Eragon - Inheritance Book 01") instead of "Eragon"
-// + its ASIN, and fail every Audible lookup. No override → item unchanged.
-func OverlayAudiobookOverride(ctx context.Context, db *sql.DB, item AudiobookItem) (AudiobookItem, error) {
-	var fieldsJSON string
-	err := db.QueryRowContext(ctx,
-		`SELECT COALESCE(fields_json,'{}') FROM metadata_overrides WHERE target_kind = 'audiobook' AND target_id = ?`,
-		item.ID).Scan(&fieldsJSON)
-	if err == sql.ErrNoRows {
-		return item, nil
-	}
-	if err != nil {
-		return item, err
-	}
-	patch := MetadataOverridePatch{}
-	if s := strings.TrimSpace(fieldsJSON); s != "" && s != "{}" {
-		if err := json.Unmarshal([]byte(fieldsJSON), &patch); err != nil {
-			return item, err
-		}
-	}
-	if len(patch) == 0 {
-		return item, nil
-	}
-	return overlayAudiobook(item, patch), nil
-}
 
 // ProjectMetadataOverrides overlays user override patches onto a hydrated
 // catalog seed. Each domain has its own target_kind:
@@ -84,7 +51,7 @@ func ProjectMetadataOverrides(seed *Seed, overrides map[MetadataOverrideKey]Meta
 	for index, item := range seed.Audiobooks {
 		key := MetadataOverrideKey{TargetKind: "audiobook", TargetID: item.ID}
 		if patch, ok := overrides[key]; ok {
-			item = overlayAudiobook(item, patch)
+			item = OverlayAudiobook(item, patch)
 		}
 		seed.Audiobooks[index] = item
 	}
@@ -107,19 +74,19 @@ func ProjectMetadataOverrides(seed *Seed, overrides map[MetadataOverrideKey]Meta
 }
 
 func overlayMusicArtist(artist MusicArtist, patch MetadataOverridePatch) MusicArtist {
-	if value, ok := decodePatchString(patch, "name"); ok {
+	if value, ok := DecodePatchString(patch, "name"); ok {
 		artist.Name = value
 	}
-	if value, ok := decodePatchString(patch, "sortName"); ok {
+	if value, ok := DecodePatchString(patch, "sortName"); ok {
 		artist.SortName = value
 	}
-	if value, ok := decodePatchString(patch, "description"); ok {
+	if value, ok := DecodePatchString(patch, "description"); ok {
 		artist.Disambiguation = value
 	}
-	if value, ok := decodePatchStringSlice(patch, "genres"); ok {
+	if value, ok := DecodePatchStringSlice(patch, "genres"); ok {
 		artist.Genres = value
 	}
-	if value, ok := decodePatchStringSlice(patch, "tags"); ok {
+	if value, ok := DecodePatchStringSlice(patch, "tags"); ok {
 		artist.Moods = value
 	}
 	if value, ok := decodePatchExternalIDs(patch, "externalIds"); ok {
@@ -129,49 +96,49 @@ func overlayMusicArtist(artist MusicArtist, patch MetadataOverridePatch) MusicAr
 }
 
 func overlayMusicAlbum(album MusicAlbum, patch MetadataOverridePatch) MusicAlbum {
-	if value, ok := decodePatchString(patch, "title"); ok {
+	if value, ok := DecodePatchString(patch, "title"); ok {
 		album.Title = value
 	}
-	if value, ok := decodePatchString(patch, "sortTitle"); ok {
+	if value, ok := DecodePatchString(patch, "sortTitle"); ok {
 		album.SortTitle = value
 	}
-	if value, ok := decodePatchString(patch, "version"); ok {
+	if value, ok := DecodePatchString(patch, "version"); ok {
 		album.Version = value
 	}
-	if value, ok := decodePatchString(patch, "displayArtist"); ok {
+	if value, ok := DecodePatchString(patch, "displayArtist"); ok {
 		album.DisplayArtist = value
 	}
-	if value, ok := decodePatchString(patch, "releaseDate"); ok {
+	if value, ok := DecodePatchString(patch, "releaseDate"); ok {
 		album.ReleaseDate = value
 	}
-	if value, ok := decodePatchString(patch, "originalReleaseDate"); ok {
+	if value, ok := DecodePatchString(patch, "originalReleaseDate"); ok {
 		album.OriginalReleaseDate = value
 	}
 	if value, ok := decodePatchInt(patch, "releaseYear"); ok {
 		album.ReleaseYear = value
 	}
-	if value, ok := decodePatchString(patch, "releaseType"); ok {
+	if value, ok := DecodePatchString(patch, "releaseType"); ok {
 		album.ReleaseType = value
 	}
-	if value, ok := decodePatchString(patch, "recordLabel"); ok {
+	if value, ok := DecodePatchString(patch, "recordLabel"); ok {
 		album.RecordLabel = value
 	}
-	if value, ok := decodePatchString(patch, "catalogNumber"); ok {
+	if value, ok := DecodePatchString(patch, "catalogNumber"); ok {
 		album.CatalogNumber = value
 	}
-	if value, ok := decodePatchString(patch, "barcode"); ok {
+	if value, ok := DecodePatchString(patch, "barcode"); ok {
 		album.Barcode = value
 	}
-	if value, ok := decodePatchStringSlice(patch, "genres"); ok {
+	if value, ok := DecodePatchStringSlice(patch, "genres"); ok {
 		album.Genres = value
 	}
-	if value, ok := decodePatchStringSlice(patch, "styles"); ok {
+	if value, ok := DecodePatchStringSlice(patch, "styles"); ok {
 		album.Styles = value
 	}
-	if value, ok := decodePatchStringSlice(patch, "moods"); ok {
+	if value, ok := DecodePatchStringSlice(patch, "moods"); ok {
 		album.Moods = value
 	}
-	if value, ok := decodePatchStringSlice(patch, "tags"); ok {
+	if value, ok := DecodePatchStringSlice(patch, "tags"); ok {
 		album.Tags = value
 	}
 	if value, ok := decodePatchImages(patch, "cover"); ok {
@@ -190,31 +157,31 @@ func overlayMusicAlbum(album MusicAlbum, patch MetadataOverridePatch) MusicAlbum
 }
 
 func overlayMusicTrack(track MusicTrack, patch MetadataOverridePatch) MusicTrack {
-	if value, ok := decodePatchString(patch, "title"); ok {
+	if value, ok := DecodePatchString(patch, "title"); ok {
 		track.Title = value
 	}
-	if value, ok := decodePatchString(patch, "sortTitle"); ok {
+	if value, ok := DecodePatchString(patch, "sortTitle"); ok {
 		track.SortTitle = value
 	}
-	if value, ok := decodePatchString(patch, "subtitle"); ok {
+	if value, ok := DecodePatchString(patch, "subtitle"); ok {
 		track.Subtitle = value
 	}
-	if value, ok := decodePatchString(patch, "displayArtist"); ok {
+	if value, ok := DecodePatchString(patch, "displayArtist"); ok {
 		track.DisplayArtist = value
 	}
-	if value, ok := decodePatchString(patch, "releaseDate"); ok {
+	if value, ok := DecodePatchString(patch, "releaseDate"); ok {
 		track.ReleaseDate = value
 	}
 	if value, ok := decodePatchInt(patch, "releaseYear"); ok {
 		track.ReleaseYear = value
 	}
-	if value, ok := decodePatchStringSlice(patch, "genres"); ok {
+	if value, ok := DecodePatchStringSlice(patch, "genres"); ok {
 		track.Genres = value
 	}
-	if value, ok := decodePatchStringSlice(patch, "moods"); ok {
+	if value, ok := DecodePatchStringSlice(patch, "moods"); ok {
 		track.Moods = value
 	}
-	if value, ok := decodePatchStringSlice(patch, "tags"); ok {
+	if value, ok := DecodePatchStringSlice(patch, "tags"); ok {
 		track.Tags = value
 	}
 	if value, ok := decodePatchBool(patch, "explicit"); ok {
@@ -249,40 +216,40 @@ func joinContributorRefNames(refs []ContributorRef) string {
 	return strings.Join(contributorRefNames(refs), ", ")
 }
 
-func overlayAudiobook(item AudiobookItem, patch MetadataOverridePatch) AudiobookItem {
+func OverlayAudiobook(item AudiobookItem, patch MetadataOverridePatch) AudiobookItem {
 	book := item.Book
 	if book == nil {
 		book = &BookMetadata{}
 	}
-	if value, ok := decodePatchString(patch, "title"); ok {
+	if value, ok := DecodePatchString(patch, "title"); ok {
 		book.Title = value
 	}
-	if value, ok := decodePatchString(patch, "subtitle"); ok {
+	if value, ok := DecodePatchString(patch, "subtitle"); ok {
 		book.Subtitle = value
 	}
-	if value, ok := decodePatchString(patch, "sortTitle"); ok {
+	if value, ok := DecodePatchString(patch, "sortTitle"); ok {
 		book.SortTitle = value
 	}
-	if value, ok := decodePatchString(patch, "description"); ok {
+	if value, ok := DecodePatchString(patch, "description"); ok {
 		book.Description = value
 	}
-	if value, ok := decodePatchString(patch, "publisher"); ok {
+	if value, ok := DecodePatchString(patch, "publisher"); ok {
 		book.Publisher = value
 	}
-	if value, ok := decodePatchString(patch, "publishedDate"); ok {
+	if value, ok := DecodePatchString(patch, "publishedDate"); ok {
 		book.PublishedDate = value
 	}
-	if value, ok := decodePatchString(patch, "publishedYear"); ok {
+	if value, ok := DecodePatchString(patch, "publishedYear"); ok {
 		book.PublishedYear = value
 	}
-	if value, ok := decodePatchString(patch, "language"); ok {
+	if value, ok := DecodePatchString(patch, "language"); ok {
 		book.Language = value
 	}
-	if value, ok := decodePatchStringSlice(patch, "genres"); ok {
+	if value, ok := DecodePatchStringSlice(patch, "genres"); ok {
 		book.Genres = value
 		item.Genres = value
 	}
-	if value, ok := decodePatchStringSlice(patch, "tags"); ok {
+	if value, ok := DecodePatchStringSlice(patch, "tags"); ok {
 		book.Tags = value
 		item.Tags = value
 	}
@@ -304,7 +271,7 @@ func overlayAudiobook(item AudiobookItem, patch MetadataOverridePatch) Audiobook
 	if value, ok := decodePatchExternalIDs(patch, "externalIds"); ok {
 		book.ExternalIDs = value
 	}
-	if cover, ok := decodePatchImage(patch, "cover"); ok {
+	if cover, ok := DecodePatchImage(patch, "cover"); ok {
 		item.Cover = cover
 	}
 	item.Book = book
@@ -316,25 +283,25 @@ func overlayPodcast(item PodcastItem, patch MetadataOverridePatch) PodcastItem {
 	if podcast == nil {
 		podcast = &PodcastMetadata{}
 	}
-	if value, ok := decodePatchString(patch, "title"); ok {
+	if value, ok := DecodePatchString(patch, "title"); ok {
 		podcast.Title = value
 	}
-	if value, ok := decodePatchString(patch, "description"); ok {
+	if value, ok := DecodePatchString(patch, "description"); ok {
 		podcast.Description = value
 	}
-	if value, ok := decodePatchString(patch, "author"); ok {
+	if value, ok := DecodePatchString(patch, "author"); ok {
 		podcast.Author = value
 	}
-	if value, ok := decodePatchString(patch, "siteUrl"); ok {
+	if value, ok := DecodePatchString(patch, "siteUrl"); ok {
 		podcast.SiteURL = value
 	}
-	if value, ok := decodePatchString(patch, "language"); ok {
+	if value, ok := DecodePatchString(patch, "language"); ok {
 		podcast.Language = value
 	}
-	if value, ok := decodePatchStringSlice(patch, "genres"); ok {
+	if value, ok := DecodePatchStringSlice(patch, "genres"); ok {
 		item.Genres = value
 	}
-	if value, ok := decodePatchStringSlice(patch, "categories"); ok {
+	if value, ok := DecodePatchStringSlice(patch, "categories"); ok {
 		podcast.Categories = value
 		item.Genres = value
 	}
@@ -344,7 +311,7 @@ func overlayPodcast(item PodcastItem, patch MetadataOverridePatch) PodcastItem {
 	if value, ok := decodePatchExternalIDs(patch, "externalIds"); ok {
 		podcast.ExternalIDs = value
 	}
-	if cover, ok := decodePatchImage(patch, "cover"); ok {
+	if cover, ok := DecodePatchImage(patch, "cover"); ok {
 		item.Cover = cover
 	}
 	item.Podcast = podcast
@@ -360,22 +327,22 @@ func overlayPodcastFeedOnPodcast(item PodcastItem, patch MetadataOverridePatch) 
 	if podcast == nil {
 		podcast = &PodcastMetadata{}
 	}
-	if value, ok := decodePatchString(patch, "title"); ok {
+	if value, ok := DecodePatchString(patch, "title"); ok {
 		podcast.Title = value
 	}
-	if value, ok := decodePatchString(patch, "description"); ok {
+	if value, ok := DecodePatchString(patch, "description"); ok {
 		podcast.Description = value
 	}
-	if value, ok := decodePatchString(patch, "author"); ok {
+	if value, ok := DecodePatchString(patch, "author"); ok {
 		podcast.Author = value
 	}
-	if value, ok := decodePatchString(patch, "siteUrl"); ok {
+	if value, ok := DecodePatchString(patch, "siteUrl"); ok {
 		podcast.SiteURL = value
 	}
-	if value, ok := decodePatchString(patch, "language"); ok {
+	if value, ok := DecodePatchString(patch, "language"); ok {
 		podcast.Language = value
 	}
-	if value, ok := decodePatchStringSlice(patch, "categories"); ok {
+	if value, ok := DecodePatchStringSlice(patch, "categories"); ok {
 		podcast.Categories = value
 		item.Genres = value
 	}
@@ -385,9 +352,9 @@ func overlayPodcastFeedOnPodcast(item PodcastItem, patch MetadataOverridePatch) 
 	if value, ok := decodePatchExternalIDs(patch, "externalIds"); ok {
 		podcast.ExternalIDs = value
 	}
-	if cover, ok := decodePatchImage(patch, "cover"); ok {
+	if cover, ok := DecodePatchImage(patch, "cover"); ok {
 		item.Cover = cover
-	} else if value, ok := decodePatchString(patch, "imageUrl"); ok && strings.TrimSpace(value) != "" {
+	} else if value, ok := DecodePatchString(patch, "imageUrl"); ok && strings.TrimSpace(value) != "" {
 		item.Cover = &Image{URL: value}
 	}
 	item.Podcast = podcast
@@ -395,13 +362,13 @@ func overlayPodcastFeedOnPodcast(item PodcastItem, patch MetadataOverridePatch) 
 }
 
 func overlayPodcastEpisode(episode PodcastEpisode, patch MetadataOverridePatch) PodcastEpisode {
-	if value, ok := decodePatchString(patch, "title"); ok {
+	if value, ok := DecodePatchString(patch, "title"); ok {
 		episode.Title = value
 	}
-	if value, ok := decodePatchString(patch, "subtitle"); ok {
+	if value, ok := DecodePatchString(patch, "subtitle"); ok {
 		episode.Subtitle = value
 	}
-	if value, ok := decodePatchString(patch, "description"); ok {
+	if value, ok := DecodePatchString(patch, "description"); ok {
 		episode.Description = value
 	}
 	if value, ok := decodePatchTime(patch, "publishedAt"); ok {
@@ -433,28 +400,28 @@ func ProjectPodcastFeedFields(fields PodcastFeedFields, patch MetadataOverridePa
 		return fields
 	}
 	out := fields
-	if value, ok := decodePatchString(patch, "title"); ok {
+	if value, ok := DecodePatchString(patch, "title"); ok {
 		out.Title = value
 	}
-	if value, ok := decodePatchString(patch, "description"); ok {
+	if value, ok := DecodePatchString(patch, "description"); ok {
 		out.Description = value
 	}
-	if value, ok := decodePatchString(patch, "author"); ok {
+	if value, ok := DecodePatchString(patch, "author"); ok {
 		out.Author = value
 	}
-	if value, ok := decodePatchString(patch, "siteUrl"); ok {
+	if value, ok := DecodePatchString(patch, "siteUrl"); ok {
 		out.SiteURL = value
 	}
-	if value, ok := decodePatchString(patch, "imageUrl"); ok {
+	if value, ok := DecodePatchString(patch, "imageUrl"); ok {
 		out.ImageURL = value
 	}
-	if value, ok := decodePatchString(patch, "language"); ok {
+	if value, ok := DecodePatchString(patch, "language"); ok {
 		out.Language = value
 	}
 	if value, ok := decodePatchBool(patch, "explicit"); ok {
 		out.Explicit = value
 	}
-	if value, ok := decodePatchStringSlice(patch, "categories"); ok {
+	if value, ok := DecodePatchStringSlice(patch, "categories"); ok {
 		out.Categories = value
 	}
 	return out

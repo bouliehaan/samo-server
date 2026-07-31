@@ -5,6 +5,7 @@ import (
 	"net/http"
 
 	"github.com/bouliehaan/samo-server/internal/catalog"
+	"github.com/bouliehaan/samo-server/internal/catalogstore"
 )
 
 type deleteCatalogItemRequest struct {
@@ -28,7 +29,7 @@ func (s *Server) deleteMusicAlbum(w http.ResponseWriter, r *http.Request) {
 	}
 	var input deleteCatalogItemRequest
 	_ = decodeJSONOptional(r, &input)
-	result, err := catalog.DeleteMusicAlbum(r.Context(), s.db, r.PathValue("id"), catalog.DeleteOptions{
+	result, err := catalogstore.DeleteMusicAlbum(r.Context(), s.db, r.PathValue("id"), catalogstore.DeleteOptions{
 		DeleteFiles: deleteFilesFromRequest(input),
 	})
 	if err != nil {
@@ -52,7 +53,7 @@ func (s *Server) deleteAudiobook(w http.ResponseWriter, r *http.Request) {
 	}
 	var input deleteCatalogItemRequest
 	_ = decodeJSONOptional(r, &input)
-	result, err := catalog.DeleteAudiobook(r.Context(), s.db, r.PathValue("id"), catalog.DeleteOptions{
+	result, err := catalogstore.DeleteAudiobook(r.Context(), s.db, r.PathValue("id"), catalogstore.DeleteOptions{
 		DeleteFiles: deleteFilesFromRequest(input),
 	})
 	if err != nil {
@@ -76,7 +77,7 @@ func (s *Server) deletePodcastShow(w http.ResponseWriter, r *http.Request) {
 	}
 	var input deleteCatalogItemRequest
 	_ = decodeJSONOptional(r, &input)
-	result, err := catalog.DeletePodcastShow(r.Context(), s.db, r.PathValue("id"), catalog.DeleteOptions{
+	result, err := catalogstore.DeletePodcastShow(r.Context(), s.db, r.PathValue("id"), catalogstore.DeleteOptions{
 		DeleteFiles: deleteFilesFromRequest(input),
 	})
 	if err != nil {
@@ -94,7 +95,7 @@ func writeCatalogDeleteError(w http.ResponseWriter, err error) {
 	switch {
 	case errors.Is(err, catalog.ErrNotFound):
 		writeError(w, http.StatusNotFound, err.Error())
-	case errors.Is(err, catalog.ErrRemoteItem):
+	case errors.Is(err, catalogstore.ErrRemoteItem):
 		writeError(w, http.StatusConflict, err.Error())
 	default:
 		writeError(w, http.StatusBadRequest, err.Error())

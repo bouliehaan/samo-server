@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	"github.com/bouliehaan/samo-server/internal/catalog"
+	"github.com/bouliehaan/samo-server/internal/catalogstore"
 	"github.com/bouliehaan/samo-server/internal/storage/storagetest"
 )
 
@@ -44,7 +45,7 @@ func TestReconcileMediaFileTrackLinksRestoresAudioFiles(t *testing.T) {
 		t.Fatalf("updated = %d, want 1", updated)
 	}
 
-	seed, err := catalog.LoadSeedFromDB(ctx, db)
+	seed, err := catalogstore.LoadSeedFromDB(ctx, db)
 	if err != nil {
 		t.Fatal(err)
 	}

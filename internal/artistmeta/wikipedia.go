@@ -34,7 +34,7 @@ type wikipediaSummary struct {
 // then the bare name, accepting a result only when it looks music-related.
 func wikipediaArtistBio(ctx context.Context, client *http.Client, name string) string {
 	if client == nil {
-		client = http.DefaultClient
+		client = fallbackHTTPClient
 	}
 	name = strings.TrimSpace(name)
 	if name == "" {

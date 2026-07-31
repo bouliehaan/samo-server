@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	"github.com/bouliehaan/samo-server/internal/catalog"
+	"github.com/bouliehaan/samo-server/internal/catalogstore"
 	"github.com/bouliehaan/samo-server/internal/playlists"
 	"github.com/bouliehaan/samo-server/internal/storage/storagetest"
 )
@@ -24,7 +25,7 @@ func TestPlaylistImportEndpointRebuildsFromLocalTracks(t *testing.T) {
 
 	catalogService := catalog.NewService(catalog.Seed{})
 	reload := func(ctx context.Context) error {
-		seed, err := catalog.LoadSeedFromDB(ctx, db)
+		seed, err := catalogstore.LoadSeedFromDB(ctx, db)
 		if err != nil {
 			return err
 		}
@@ -99,7 +100,7 @@ func TestPlaylistVisibilityAllowsPublicSharingOnly(t *testing.T) {
 
 	catalogService := catalog.NewService(catalog.Seed{})
 	reload := func(ctx context.Context) error {
-		seed, err := catalog.LoadSeedFromDB(ctx, db)
+		seed, err := catalogstore.LoadSeedFromDB(ctx, db)
 		if err != nil {
 			return err
 		}

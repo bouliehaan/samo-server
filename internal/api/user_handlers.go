@@ -68,7 +68,19 @@ func (s *Server) loginUser(w http.ResponseWriter, r *http.Request) {
 	}
 	s.loginLimiter.recordSuccess(usernameKey)
 	s.loginLimiter.recordSuccess(addrKey)
-	writeJSON(w, http.StatusOK, response)
+	writeJSON(w, http.StatusOK, loginResponse{
+		LoginResponse: response,
+		ServerID:      s.serverIdentity(r.Context()),
+	})
+}
+
+// loginResponse carries the server's stable identity alongside the credential
+// so a client can key its local state by the server rather than by the address
+// it happened to connect over. Embedded, so the wire shape stays a superset of
+// users.LoginResponse and older clients are unaffected.
+type loginResponse struct {
+	users.LoginResponse
+	ServerID string `json:"serverId,omitempty"`
 }
 
 func writeLoginRateLimited(w http.ResponseWriter, retryAfter time.Duration) {
@@ -196,4 +208,67 @@ func writeUserError(w http.ResponseWriter, err error) {
 	default:
 		writeError(w, http.StatusInternalServerError, err.Error())
 	}
+}
+
+// Subsonic credential management.
+//
+// The Subsonic protocol's default auth mode needs a password the server can
+// recover, which bcrypt deliberately prevents. Rather than weaken login
+// security, Subsonic gets its own generated app password: opt-in, revocable,
+// and useless for anything but browsing and streaming that user's library.
+
+type subsonicCredentialResponse struct {
+	Enabled  bool   `json:"enabled"`
+	Username string `json:"username"`
+	// Password is returned only at the moment it is generated, the same way an
+	// API token is. It is not recoverable through the API afterwards.
+	Password string `json:"password,omitempty"`
+}
+
+func (s *Server) getSubsonicCredential(w http.ResponseWriter, r *http.Request) {
+	principal, ok := s.currentUser(r)
+	if !ok {
+		writeError(w, http.StatusUnauthorized, "unauthorized")
+		return
+	}
+	enabled, err := s.usersService().SubsonicEnabled(r.Context(), principal.User.ID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, subsonicCredentialResponse{
+		Enabled:  enabled,
+		Username: principal.User.Username,
+	})
+}
+
+func (s *Server) createSubsonicCredential(w http.ResponseWriter, r *http.Request) {
+	principal, ok := s.currentUser(r)
+	if !ok {
+		writeError(w, http.StatusUnauthorized, "unauthorized")
+		return
+	}
+	password, err := s.usersService().GenerateSubsonicPassword(r.Context(), principal)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusCreated, subsonicCredentialResponse{
+		Enabled:  true,
+		Username: principal.User.Username,
+		Password: password,
+	})
+}
+
+func (s *Server) deleteSubsonicCredential(w http.ResponseWriter, r *http.Request) {
+	principal, ok := s.currentUser(r)
+	if !ok {
+		writeError(w, http.StatusUnauthorized, "unauthorized")
+		return
+	}
+	if err := s.usersService().ClearSubsonicPassword(r.Context(), principal); err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
 }

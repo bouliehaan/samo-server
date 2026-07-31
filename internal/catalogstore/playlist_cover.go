@@ -1,4 +1,4 @@
-package catalog
+package catalogstore
 
 import (
 	"context"
@@ -6,15 +6,17 @@ import (
 	"encoding/json"
 	"fmt"
 	"strings"
+
+	"github.com/bouliehaan/samo-server/internal/catalog"
 )
 
 // SetMusicPlaylistCover stores a user-uploaded cover for a playlist. The
 // image is written to metadata_overrides and images_json so clients and
 // rescans preserve the artwork.
-func SetMusicPlaylistCover(ctx context.Context, db *sql.DB, playlistID string, cover Image) error {
+func SetMusicPlaylistCover(ctx context.Context, db *sql.DB, playlistID string, cover catalog.Image) error {
 	playlistID = strings.TrimSpace(playlistID)
 	if playlistID == "" {
-		return ErrNotFound
+		return catalog.ErrNotFound
 	}
 	if db == nil {
 		return fmt.Errorf("nil database")
@@ -28,14 +30,14 @@ func SetMusicPlaylistCover(ctx context.Context, db *sql.DB, playlistID string, c
 		return fmt.Errorf("lookup playlist: %w", err)
 	}
 	if exists == 0 {
-		return ErrNotFound
+		return catalog.ErrNotFound
 	}
 
-	coverRaw, err := json.Marshal([]Image{cover})
+	coverRaw, err := json.Marshal([]catalog.Image{cover})
 	if err != nil {
 		return fmt.Errorf("encode cover: %w", err)
 	}
-	if err := UpsertMetadataOverride(ctx, db, OverrideKindMusicPlaylist, playlistID, MetadataOverridePatch{
+	if err := UpsertMetadataOverride(ctx, db, catalog.OverrideKindMusicPlaylist, playlistID, catalog.MetadataOverridePatch{
 		"images": coverRaw,
 	}); err != nil {
 		return err

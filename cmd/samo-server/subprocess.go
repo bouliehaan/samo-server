@@ -3,13 +3,13 @@ package main
 import (
 	"context"
 	"database/sql"
-	"log"
 	"os"
 	"path/filepath"
 	"strings"
 
 	"github.com/bouliehaan/samo-server/internal/config"
 	"github.com/bouliehaan/samo-server/internal/covers"
+	"github.com/bouliehaan/samo-server/internal/log"
 	"github.com/bouliehaan/samo-server/internal/metadata"
 	"github.com/bouliehaan/samo-server/internal/playlists"
 	"github.com/bouliehaan/samo-server/internal/scanner"

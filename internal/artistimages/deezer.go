@@ -8,7 +8,13 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+	"time"
 )
+
+// fallbackHTTPClient backs the nil-client path. http.DefaultClient must never
+// be used here: it has no timeout, so an upstream that accepts the connection
+// and then goes silent parks the calling goroutine forever.
+var fallbackHTTPClient = &http.Client{Timeout: 20 * time.Second}
 
 const deezerAPIBase = "https://api.deezer.com/search/artist"
 
@@ -22,7 +28,7 @@ type deezerSearchResponse struct {
 
 func deezerArtistPictureURL(ctx context.Context, client *http.Client, names ...string) (string, error) {
 	if client == nil {
-		client = http.DefaultClient
+		client = fallbackHTTPClient
 	}
 	seen := map[string]struct{}{}
 	for _, name := range names {

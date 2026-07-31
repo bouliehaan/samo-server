@@ -35,6 +35,7 @@ type Service struct {
 	maxFileBytes        int64
 	defaultPrewarmCount int
 	stream              *podcaststream.Service
+	baseCtx             context.Context
 	mu                  sync.Mutex
 	inflight            map[string]struct{}
 }
@@ -49,6 +50,12 @@ type Options struct {
 	// neither a per-show nor a global override is set (env SAMO_PODCAST_PREWARM_COUNT).
 	DefaultPrewarmCount int
 	Stream              *podcaststream.Service
+
+	// BaseContext roots the fire-and-forget downloads this service starts.
+	// context.Background() let them outlive the process's own shutdown, still
+	// writing to a database that was about to close; pass the process lifetime
+	// context so they unwind with everything else.
+	BaseContext context.Context
 }
 
 func New(db *sql.DB, options Options) (*Service, error) {
@@ -75,8 +82,13 @@ func New(db *sql.DB, options Options) (*Service, error) {
 	if defaultPrewarmCount < 0 {
 		defaultPrewarmCount = 0
 	}
+	baseCtx := options.BaseContext
+	if baseCtx == nil {
+		baseCtx = context.Background()
+	}
 	return &Service{
 		db:                  db,
+		baseCtx:             baseCtx,
 		cacheDir:            absolute,
 		enabled:             options.Enabled,
 		maxBytes:            options.MaxBytes,

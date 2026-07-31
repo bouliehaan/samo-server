@@ -35,7 +35,7 @@ func (s *Service) ImageByID(id string) (Image, error) {
 	return image, nil
 }
 
-func (s *Service) registerExtractedCoverCatalog() {
+func (s *catalogState) registerExtractedCoverCatalog() {
 	seen := map[string]struct{}{}
 	for _, image := range s.extractedCoversBySource {
 		id := strings.TrimSpace(image.ID)
@@ -50,7 +50,7 @@ func (s *Service) registerExtractedCoverCatalog() {
 	}
 }
 
-func (s *Service) backfillMusicImagesFromExtractedCovers() {
+func (s *catalogState) backfillMusicImagesFromExtractedCovers() {
 	if len(s.extractedCoversBySource) == 0 {
 		return
 	}
@@ -68,7 +68,7 @@ func (s *Service) backfillMusicImagesFromExtractedCovers() {
 	}
 }
 
-func (s *Service) lookupTrackExtractedCover(track MusicTrack) (Image, bool) {
+func (s *catalogState) lookupTrackExtractedCover(track MusicTrack) (Image, bool) {
 	for _, candidate := range trackAudioPathCandidates(track) {
 		if image, ok := lookupExtractedCover(s.extractedCoversBySource, candidate); ok {
 			return image, true
@@ -137,7 +137,7 @@ func lookupExtractedCover(covers map[string]Image, audioPath string) (Image, boo
 	return Image{}, false
 }
 
-func (s *Service) enrichAlbumImagesFromTracks() {
+func (s *catalogState) enrichAlbumImagesFromTracks() {
 	for index, album := range s.musicAlbums {
 		if len(nonEmptyImages(album.Images)) > 0 {
 			continue
@@ -158,7 +158,7 @@ func (s *Service) enrichAlbumImagesFromTracks() {
 	}
 }
 
-func (s *Service) enrichAlbumImagesFromExtractedCovers() {
+func (s *catalogState) enrichAlbumImagesFromExtractedCovers() {
 	if len(s.extractedCoversBySource) == 0 {
 		return
 	}
@@ -183,7 +183,7 @@ func (s *Service) enrichAlbumImagesFromExtractedCovers() {
 	}
 }
 
-func (s *Service) repairBrokenMusicImageReferences() {
+func (s *catalogState) repairBrokenMusicImageReferences() {
 	for index, album := range s.musicAlbums {
 		if repaired, ok := s.repairImageReferences(album.Images); ok {
 			s.musicAlbums[index].Images = repaired
@@ -198,7 +198,7 @@ func (s *Service) repairBrokenMusicImageReferences() {
 	}
 }
 
-func (s *Service) repairImageReferences(images []Image) ([]Image, bool) {
+func (s *catalogState) repairImageReferences(images []Image) ([]Image, bool) {
 	filtered := nonEmptyImages(images)
 	if len(filtered) == 0 {
 		return nil, false
@@ -259,7 +259,7 @@ func (s *Service) MusicAlbumCoverImages(albumID string) []Image {
 	return s.musicAlbumCoverImagesLocked(albumID)
 }
 
-func (s *Service) musicAlbumCoverImagesLocked(albumID string) []Image {
+func (s *catalogState) musicAlbumCoverImagesLocked(albumID string) []Image {
 	albumID = strings.TrimSpace(albumID)
 	if albumID == "" {
 		return nil
@@ -296,7 +296,7 @@ func NonEmptyImages(images []Image) []Image {
 
 // resolvedImagesLocked returns images that can still be served (repairing cover
 // ids and skipping local paths that no longer exist).
-func (s *Service) resolvedImagesLocked(images []Image) []Image {
+func (s *catalogState) resolvedImagesLocked(images []Image) []Image {
 	repaired, _ := s.repairImageReferences(images)
 	if len(repaired) == 0 {
 		return nil
@@ -342,7 +342,7 @@ func (s *Service) resolvedImagesLocked(images []Image) []Image {
 	return out
 }
 
-func (s *Service) musicPlaylistAutoCoverImagesLocked(playlist MusicPlaylist) []Image {
+func (s *catalogState) musicPlaylistAutoCoverImagesLocked(playlist MusicPlaylist) []Image {
 	var results []Image
 	seen := make(map[string]bool)
 
@@ -428,7 +428,7 @@ func (s *Service) MusicPlaylistCoverImages(playlistID string) []Image {
 	return s.musicPlaylistAutoCoverImagesLocked(playlist)
 }
 
-func (s *Service) enrichPlaylistImagesFromTracks() {
+func (s *catalogState) enrichPlaylistImagesFromTracks() {
 	for index, playlist := range s.musicPlaylists {
 		if len(s.resolvedImagesLocked(playlist.Images)) > 0 {
 			continue

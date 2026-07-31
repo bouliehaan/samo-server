@@ -3,7 +3,6 @@ package api
 import (
 	"context"
 	"errors"
-	"log"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -11,6 +10,8 @@ import (
 	"time"
 
 	"github.com/bouliehaan/samo-server/internal/explo"
+	"github.com/bouliehaan/samo-server/internal/log"
+	"github.com/bouliehaan/samo-server/internal/safego"
 )
 
 func (s *Server) exploService() *explo.Service {
@@ -65,24 +66,24 @@ func (s *Server) updateExploConfig(w http.ResponseWriter, r *http.Request) {
 		writeExploError(w, err)
 		return
 	}
-	go func() {
-		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Minute)
+	safego.Go("explo pass after config change", func() {
+		ctx, cancel := context.WithTimeout(s.baseCtx, 30*time.Minute)
 		defer cancel()
 		// First re-sync hidden flags / ledger / playlist to the new folder
 		// (fast, path-based) so a narrowed folder recovers Recently Added
 		// immediately. Then run the slow, rate-limited identification pass.
 		if err := service.ReconcileRecentlyAdded(ctx); err != nil {
-			log.Printf("explo: reconcile after config save failed: %v", err)
+			log.Warnf("explo: reconcile after config save failed: %v", err)
 		}
 		if service.Enabled() {
 			if _, err := service.ProcessNewTracks(ctx); err != nil {
-				log.Printf("explo: process after config save failed: %v", err)
+				log.Warnf("explo: process after config save failed: %v", err)
 			}
 		}
 		if err := service.BackfillCovers(ctx); err != nil {
-			log.Printf("explo: cover backfill after config save failed: %v", err)
+			log.Warnf("explo: cover backfill after config save failed: %v", err)
 		}
-	}()
+	})
 	writeJSON(w, http.StatusOK, config)
 }
 
@@ -104,18 +105,18 @@ func (s *Server) postExploReprocess(w http.ResponseWriter, r *http.Request) {
 		writeExploError(w, err)
 		return
 	}
-	go func() {
-		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Minute)
+	safego.Go("explo pass after reprocess", func() {
+		ctx, cancel := context.WithTimeout(s.baseCtx, 30*time.Minute)
 		defer cancel()
 		if service.Enabled() {
 			if _, err := service.ProcessNewTracks(ctx); err != nil {
-				log.Printf("explo: process after reprocess failed: %v", err)
+				log.Warnf("explo: process after reprocess failed: %v", err)
 			}
 		}
 		if err := service.BackfillCovers(ctx); err != nil {
-			log.Printf("explo: cover backfill after reprocess failed: %v", err)
+			log.Warnf("explo: cover backfill after reprocess failed: %v", err)
 		}
-	}()
+	})
 	writeJSON(w, http.StatusOK, map[string]any{
 		"identificationReset": result.IdentificationReset,
 		"coversReset":         result.CoversReset,
@@ -156,13 +157,13 @@ func (s *Server) clearExploConfig(w http.ResponseWriter, r *http.Request) {
 	}
 	// Disabling clears the effective folder set, so this un-hides every album,
 	// empties the ledger, and clears the Explo playlist - a full recovery/undo.
-	go func() {
-		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+	safego.Go("explo reconcile after config clear", func() {
+		ctx, cancel := context.WithTimeout(s.baseCtx, 5*time.Minute)
 		defer cancel()
 		if err := service.ReconcileRecentlyAdded(ctx); err != nil {
-			log.Printf("explo: reconcile after config clear failed: %v", err)
+			log.Warnf("explo: reconcile after config clear failed: %v", err)
 		}
-	}()
+	})
 	writeJSON(w, http.StatusOK, config)
 }
 

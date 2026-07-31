@@ -52,7 +52,7 @@ func SelectAudiobookFile(files []AudioFile, playback PlaybackState, query Stream
 	if len(files) == 0 {
 		return AudiobookStreamTarget{}, fmt.Errorf("no audio files available")
 	}
-	sorted := assignStreamOffsets(SortAudioFiles(files))
+	sorted := AssignStreamOffsets(SortAudioFiles(files))
 
 	if query.MediaFileID != "" {
 		for _, file := range sorted {
@@ -82,7 +82,7 @@ func SelectAudiobookFile(files []AudioFile, playback PlaybackState, query Stream
 func audiobookFileForBookSeconds(sorted []AudioFile, bookSeconds float64) (AudioFile, bool) {
 	for _, file := range sorted {
 		start := file.StartOffsetSeconds
-		end := start + audioFileDurationSeconds(file)
+		end := start + AudioFileDurationSeconds(file)
 		if bookSeconds < end {
 			return file, true
 		}

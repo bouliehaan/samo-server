@@ -6,7 +6,7 @@ import (
 	"net/http/httptest"
 	"testing"
 
-	"github.com/bouliehaan/samo-server/internal/catalog"
+	"github.com/bouliehaan/samo-server/internal/catalogstore"
 	"github.com/bouliehaan/samo-server/internal/storage/storagetest"
 )
 
@@ -46,7 +46,7 @@ func TestAddPodcastFeedCreatesPodcastAndEpisodes(t *testing.T) {
 		t.Fatalf("episode count = %d, want 1", feed.EpisodeCount)
 	}
 
-	seed, err := catalog.LoadSeedFromDB(ctx, db)
+	seed, err := catalogstore.LoadSeedFromDB(ctx, db)
 	if err != nil {
 		t.Fatal(err)
 	}

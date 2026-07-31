@@ -3,7 +3,6 @@ package main
 import (
 	"context"
 	"fmt"
-	"log"
 	"net"
 	"net/http"
 	"os"
@@ -18,6 +17,7 @@ import (
 	"github.com/bouliehaan/samo-server/internal/artistmeta"
 	"github.com/bouliehaan/samo-server/internal/bookmarks"
 	"github.com/bouliehaan/samo-server/internal/catalog"
+	"github.com/bouliehaan/samo-server/internal/catalogstore"
 	"github.com/bouliehaan/samo-server/internal/channels"
 	"github.com/bouliehaan/samo-server/internal/config"
 	"github.com/bouliehaan/samo-server/internal/covers"
@@ -26,19 +26,41 @@ import (
 	"github.com/bouliehaan/samo-server/internal/files"
 	"github.com/bouliehaan/samo-server/internal/lastfm"
 	"github.com/bouliehaan/samo-server/internal/libraries"
+	"github.com/bouliehaan/samo-server/internal/log"
 	"github.com/bouliehaan/samo-server/internal/metadata"
 	"github.com/bouliehaan/samo-server/internal/playback"
 	"github.com/bouliehaan/samo-server/internal/playlists"
 	"github.com/bouliehaan/samo-server/internal/podcastcache"
 	"github.com/bouliehaan/samo-server/internal/podcaststream"
 	"github.com/bouliehaan/samo-server/internal/radio"
+	"github.com/bouliehaan/samo-server/internal/safego"
 	"github.com/bouliehaan/samo-server/internal/scanner"
 	"github.com/bouliehaan/samo-server/internal/search"
+	"github.com/bouliehaan/samo-server/internal/serverid"
 	"github.com/bouliehaan/samo-server/internal/sources"
 	"github.com/bouliehaan/samo-server/internal/storage"
 	"github.com/bouliehaan/samo-server/internal/toolchain"
 	"github.com/bouliehaan/samo-server/internal/users"
 	"github.com/bouliehaan/samo-server/internal/watch"
+)
+
+const (
+	// shutdownTimeout bounds the whole graceful stop: draining HTTP requests
+	// plus waiting for background workers to unwind. systemd's default
+	// TimeoutStopSec is 90s, so this leaves plenty of headroom before SIGKILL.
+	shutdownTimeout = 20 * time.Second
+
+	// streamDrainGrace is how long ordinary in-flight requests get to finish
+	// normally before request contexts are cancelled outright. The endless
+	// streaming handlers (radio, channels) never finish on their own, so
+	// without that cancel a single listener would hold Shutdown open for the
+	// full timeout on every restart — and install.sh restarts on every deploy.
+	streamDrainGrace = 2 * time.Second
+
+	// backgroundDrainTimeout bounds the wait for background workers after HTTP
+	// has stopped. They watch the signal context and should exit promptly; this
+	// only stops a wedged worker from blocking the process forever.
+	backgroundDrainTimeout = 10 * time.Second
 )
 
 func main() {
@@ -54,17 +76,36 @@ func main() {
 		os.Exit(runChaptersInspect(ctx, os.Args[2:]))
 	}
 
+	// Probe-only mode for container/systemd health checks. Must stay ahead of
+	// config loading: the probe has to work even when the reason the server is
+	// unhealthy is its own configuration.
+	if len(os.Args) > 1 && os.Args[1] == "healthcheck" {
+		os.Exit(runHealthcheck(ctx, os.Args[2:]))
+	}
+
 	cfg, err := config.LoadEnv()
 	if err != nil {
 		log.Fatal(err)
 	}
+	// Apply the verbosity dial before anything else logs. The package reads
+	// SAMO_LOG_LEVEL itself at init so even earlier lines are covered; this
+	// re-applies it from validated config.
+	log.SetLevel(cfg.LogLevel)
+
+	// background tracks every long-lived worker so shutdown can wait for them
+	// to unwind before the deferred db.Close() pulls the pool out from under an
+	// in-flight write (a scan, an explo pass, a last.fm flush). Workers are also
+	// started by events — a finishing scan launches more — so it has to tolerate
+	// a start racing the shutdown wait; see safego.Group.
+	var background safego.Group
+	bg := background.Go
 
 	db, err := openAndMigrate(ctx, cfg)
 	if err != nil {
 		log.Fatal(err)
 	}
 	defer db.Close()
-	log.Printf("database: %s", redactDSN(cfg.DBDSN))
+	log.Infof("database: %s", redactDSN(cfg.DBDSN))
 
 	readDB, err := storage.OpenReadOnly(ctx, cfg.DBDSN)
 	if err != nil {
@@ -86,10 +127,10 @@ func main() {
 		// Always log — the folder can be configured from the web UI (DB), so
 		// gating this on SAMO_EXPLO_DIRS hid the one line that explained why
 		// a UI-configured explo pipeline never ran.
-		log.Printf("explo: fpcalc not available (folder feature needs it): %v", err)
+		log.Infof("explo: fpcalc not available (folder feature needs it): %v", err)
 	} else {
 		fpcalcPath = path
-		log.Printf("fpcalc: %s", path)
+		log.Infof("fpcalc: %s", path)
 	}
 
 	coverDir := filepath.Join(cfg.DataDir, "covers")
@@ -115,8 +156,11 @@ func main() {
 	})
 	libraryService := libraries.New(db, scan)
 	libraryService.SetBackgroundContext(ctx)
+	// Non-fatal: a configured folder that is missing or not yet mounted (a NAS
+	// that comes up after us, a typo in SAMO_MUSIC_DIRS) must not stop the
+	// server from booting — the web UI is how the operator would fix it.
 	if err := libraryService.SyncConfigured(ctx, cfg.Libraries); err != nil {
-		log.Fatal(err)
+		log.Warnf("library sync from environment failed (server continues): %v", err)
 	}
 
 	// install.sh restarts the service on every deploy, which kills any
@@ -125,9 +169,9 @@ func main() {
 	// operator can't cancel. Sweep those out before accepting any new
 	// scan requests.
 	if reconciled, err := libraryService.ReconcileOrphanScans(ctx); err != nil {
-		log.Printf("reconcile orphan scan jobs failed: %v", err)
+		log.Warnf("reconcile orphan scan jobs failed: %v", err)
 	} else if reconciled > 0 {
-		log.Printf("reconciled %d orphan scan job(s) from previous run", reconciled)
+		log.Infof("reconciled %d orphan scan job(s) from previous run", reconciled)
 	}
 
 	// Always refresh aggregate counts at startup. Scans normally do this at
@@ -137,22 +181,31 @@ func main() {
 	// values. Recomputing here means the catalog reload below sees current
 	// counts even before the next scan.
 	if err := scan.RefreshStats(ctx); err != nil {
-		log.Printf("startup stat refresh failed: %v", err)
+		log.Warnf("startup stat refresh failed: %v", err)
 	}
 
-	catalogSeed, err := catalog.LoadSeedFromDB(ctx, readDB)
+	catalogSeed, err := catalogstore.LoadSeedFromDB(ctx, readDB)
 	if err != nil {
 		log.Fatal(err)
 	}
 
+	// Radio config is a hand-editable JSON file and DB-backed station rows are
+	// hand-editable through the UI. Neither is allowed to brick the box: a
+	// malformed station degrades to "no radio stations" and everything else —
+	// including the UI that fixes it — still comes up.
 	radioConfig, err := radio.LoadConfigFile(cfg.RadioConfigPath)
 	if err != nil {
-		log.Fatal(err)
+		log.Warnf("radio config unusable, starting with no stations: %v", err)
+		radioConfig = radio.Config{}
 	}
 
 	radioService, err := radio.NewServiceFromDB(ctx, db, radioConfig)
 	if err != nil {
-		log.Fatal(err)
+		log.Warnf("radio stations failed to load, starting with no stations: %v", err)
+		radioService, err = radio.NewService(radio.Config{})
+		if err != nil {
+			log.Fatalf("radio service could not be initialised empty: %v", err)
+		}
 	}
 
 	catalogService := catalog.NewService(catalogSeed)
@@ -175,6 +228,7 @@ func main() {
 		MaxFileBytes:        cfg.PodcastCacheMaxFile,
 		DefaultPrewarmCount: cfg.PodcastPrewarmCount,
 		Stream:              podcastStreamService,
+		BaseContext:         ctx,
 	})
 	if err != nil {
 		log.Fatal(err)
@@ -184,6 +238,7 @@ func main() {
 		Covers:              coverService,
 		PodcastCache:        podcastCacheService,
 		DefaultAutoDownload: cfg.PodcastAutoDownload,
+		BaseContext:         ctx,
 	})
 	userService := users.New(users.ServiceOptions{
 		DB:             db,
@@ -201,17 +256,17 @@ func main() {
 		log.Fatal(err)
 	}
 	if bootstrapResult.CreatedAdmin {
-		log.Printf("created bootstrap admin user: %s", bootstrapResult.AdminUsername)
+		log.Infof("created bootstrap admin user: %s", bootstrapResult.AdminUsername)
 		if bootstrapResult.GeneratedPassword != "" {
-			log.Printf("generated bootstrap admin password for %s: %s", bootstrapResult.AdminUsername, bootstrapResult.GeneratedPassword)
-			log.Printf("set SAMO_BOOTSTRAP_PASSWORD to choose a password explicitly, then rotate this generated password after first login")
+			log.Infof("generated bootstrap admin password for %s: %s", bootstrapResult.AdminUsername, bootstrapResult.GeneratedPassword)
+			log.Infof("set SAMO_BOOTSTRAP_PASSWORD to choose a password explicitly, then rotate this generated password after first login")
 		}
 	}
 	if bootstrapResult.UpdatedPassword {
-		log.Printf("updated bootstrap password for user: %s", bootstrapResult.AdminUsername)
+		log.Infof("updated bootstrap password for user: %s", bootstrapResult.AdminUsername)
 	}
 	if bootstrapResult.EnsuredServerToken {
-		log.Printf("legacy SAMO_API_TOKEN mapped to bootstrap server user")
+		log.Infof("legacy SAMO_API_TOKEN mapped to bootstrap server user")
 	}
 	setupHintNeeded := false
 	if !bootstrapResult.CreatedAdmin && !bootstrapResult.UpdatedPassword {
@@ -237,7 +292,7 @@ func main() {
 		Logger:       log.Printf,
 	})
 	if err := lastfmService.LoadConfig(ctx); err != nil {
-		log.Printf("last.fm config load failed: %v", err)
+		log.Warnf("last.fm config load failed: %v", err)
 	}
 	artistImageService := artistimages.NewService(artistimages.ServiceOptions{
 		DB:      db,
@@ -261,7 +316,7 @@ func main() {
 		var seed catalog.Seed
 		if err := storage.Retry(ctx, 8, func() error {
 			var loadErr error
-			seed, loadErr = catalog.LoadSeedFromDB(ctx, readDB)
+			seed, loadErr = catalogstore.LoadSeedFromDB(ctx, readDB)
 			return loadErr
 		}); err != nil {
 			return err
@@ -293,33 +348,33 @@ func main() {
 	})
 	// Overlay any admin config persisted via the web UI onto the env defaults.
 	if err := exploService.LoadConfig(ctx); err != nil {
-		log.Printf("explo: config load failed: %v", err)
+		log.Warnf("explo: config load failed: %v", err)
 	}
 	switch {
 	case exploService.Enabled():
-		log.Printf("explo: folder feature enabled")
+		log.Infof("explo: folder feature enabled")
 	default:
 		// Covers env AND web-UI configured folders; silent only when explo
 		// was never configured at all.
 		if reason := exploService.DisabledReason(ctx); reason != "" {
-			log.Printf("explo: folder configured but the feature is disabled - %s", reason)
+			log.Infof("explo: folder configured but the feature is disabled - %s", reason)
 		}
 	}
 	// One-shot cleanup at boot: re-sync explo's hidden flags / ledger / playlist
 	// to the currently-configured folder. Unconditional (not gated on Enabled)
 	// so that narrowing or clearing the folder recovers Recently Added on the
 	// next boot even if the key/fpcalc are now absent.
-	go func() {
+	bg("explo startup pass", func() {
 		if err := exploService.ReconcileRecentlyAdded(ctx); err != nil {
-			log.Printf("explo: startup reconcile failed: %v", err)
+			log.Warnf("explo: startup reconcile failed: %v", err)
 		}
 		// Prune ghosts the exporter rotated out (deleted files whose rows linger)
 		// before the identify pass, so it doesn't fpcalc missing files. Unconditional
 		// like the reconcile above — a no-op when the folder is unconfigured.
 		if pruned, err := exploService.PruneRotatedOutFiles(ctx); err != nil {
-			log.Printf("explo: startup prune of rotated-out files failed: %v", err)
+			log.Warnf("explo: startup prune of rotated-out files failed: %v", err)
 		} else if pruned > 0 {
-			log.Printf("explo: startup pruned %d rotated-out file(s)", pruned)
+			log.Infof("explo: startup pruned %d rotated-out file(s)", pruned)
 		}
 		// Identification pass at boot too — this is what retries previously
 		// unmatched/errored drops (fresh releases AcoustID couldn't identify
@@ -327,16 +382,16 @@ func main() {
 		// No-op when nothing is due, so it's free on ordinary boots.
 		if exploService.Enabled() {
 			if _, err := exploService.ProcessNewTracks(ctx); err != nil {
-				log.Printf("explo: startup identify pass failed: %v", err)
+				log.Warnf("explo: startup identify pass failed: %v", err)
 			}
 		}
 		// Backfill album art for any identified explo albums still missing it
 		// (e.g. matched before cover support). Network-bound, so kept off the
 		// reconcile's critical path.
 		if err := exploService.BackfillCovers(ctx); err != nil {
-			log.Printf("explo: startup cover backfill failed: %v", err)
+			log.Warnf("explo: startup cover backfill failed: %v", err)
 		}
-	}()
+	})
 
 	// Periodic driver for the explo retry ladders. Identification and cover
 	// retries are scheduled in SQL (front-loaded backoff per row), but until
@@ -344,7 +399,7 @@ func main() {
 	// in 1 hour" silently meant "retry at the next scan or reboot" — the
 	// main reason a weekly drop took days to fill in. Every pass is a cheap
 	// no-op (two indexed SELECTs) when nothing is due.
-	go func() {
+	bg("explo periodic pass", func() {
 		ticker := time.NewTicker(30 * time.Minute)
 		defer ticker.Stop()
 		for {
@@ -354,24 +409,24 @@ func main() {
 			case <-ticker.C:
 			}
 			if pruned, err := exploService.PruneRotatedOutFiles(ctx); err != nil {
-				log.Printf("explo: periodic prune of rotated-out files failed: %v", err)
+				log.Warnf("explo: periodic prune of rotated-out files failed: %v", err)
 			} else if pruned > 0 {
-				log.Printf("explo: periodic pass pruned %d rotated-out file(s)", pruned)
+				log.Infof("explo: periodic pass pruned %d rotated-out file(s)", pruned)
 			}
 			if exploService.Enabled() {
 				if _, err := exploService.ProcessNewTracks(ctx); err != nil {
-					log.Printf("explo: periodic identify pass failed: %v", err)
+					log.Warnf("explo: periodic identify pass failed: %v", err)
 				}
 			}
 			if err := exploService.BackfillCovers(ctx); err != nil {
-				log.Printf("explo: periodic cover pass failed: %v", err)
+				log.Warnf("explo: periodic cover pass failed: %v", err)
 			}
 		}
-	}()
+	})
 
 	libraryService.OnScanComplete(func(ctx context.Context, job libraries.ScanJob, stats scanner.ScanStats) {
 		if err := reloadCatalog(ctx); err != nil {
-			log.Printf("catalog reload after scan %s failed: %v", job.ID, err)
+			log.Warnf("catalog reload after scan %s failed: %v", job.ID, err)
 		}
 		if job.Status != libraries.ScanStatusCompleted {
 			return
@@ -380,34 +435,36 @@ func main() {
 		// long tail on a full scan. Runs in the background so scans stay fast.
 		if artistMetaService.Enabled() {
 			if len(stats.NewArtistIDs) > 0 {
-				go artistMetaService.FetchArtistsByIDs(ctx, stats.NewArtistIDs)
+				bg("artist meta warm after scan", func() {
+					artistMetaService.FetchArtistsByIDs(ctx, stats.NewArtistIDs)
+				})
 			} else if job.ScanMode == libraries.ScanModeFull {
-				go func() {
+				bg("artist meta backfill after scan", func() {
 					if err := artistMetaService.BackfillMissing(ctx); err != nil {
-						log.Printf("artist meta backfill after full scan failed: %v", err)
+						log.Warnf("artist meta backfill after full scan failed: %v", err)
 					}
-				}()
+				})
 			}
 		}
 		// Explo folder enrichment: identify + playlist-route any newly
 		// scanned drops. Runs in the background so scans stay fast; safe to
 		// run every scan since it's a no-op once nothing new is pending.
 		if exploService.Enabled() {
-			go func() {
+			bg("explo pass after scan", func() {
 				// A scan just reconciled the folder; prune any files the exporter
 				// rotated out before identifying so we don't fpcalc missing files.
 				if pruned, err := exploService.PruneRotatedOutFiles(ctx); err != nil {
-					log.Printf("explo: prune of rotated-out files after scan %s failed: %v", job.ID, err)
+					log.Warnf("explo: prune of rotated-out files after scan %s failed: %v", job.ID, err)
 				} else if pruned > 0 {
-					log.Printf("explo: pruned %d rotated-out file(s) after scan %s", pruned, job.ID)
+					log.Infof("explo: pruned %d rotated-out file(s) after scan %s", pruned, job.ID)
 				}
 				if _, err := exploService.ProcessNewTracks(ctx); err != nil {
-					log.Printf("explo: process new tracks after scan %s failed: %v", job.ID, err)
+					log.Warnf("explo: process new tracks after scan %s failed: %v", job.ID, err)
 				}
 				if err := exploService.BackfillCovers(ctx); err != nil {
-					log.Printf("explo: cover backfill after scan %s failed: %v", job.ID, err)
+					log.Warnf("explo: cover backfill after scan %s failed: %v", job.ID, err)
 				}
-			}()
+			})
 		}
 		if !cfg.ArtistImagesOnScan || !artistImageService.Enabled() {
 			return
@@ -418,7 +475,7 @@ func main() {
 		}
 		if job.ScanMode == libraries.ScanModeFull {
 			if _, err := artistImageService.StartBackfill(ctx, artistimages.BackfillModeMissing); err != nil {
-				log.Printf("artist image backfill after full scan failed: %v", err)
+				log.Warnf("artist image backfill after full scan failed: %v", err)
 			}
 		}
 	})
@@ -426,9 +483,12 @@ func main() {
 	// Chapter tooling remains isolated for explicit/manual use, but library scans
 	// should be strict metadata/file scans and must not rewrite navigation data.
 	if cfg.ScanOnStart {
-		log.Printf("scanning configured libraries on startup")
+		log.Infof("scanning configured libraries on startup")
+		// Non-fatal: a scan that can't start (unreadable folder, a job already
+		// running) is a reason to log and serve the existing catalog, not a
+		// reason to refuse to boot.
 		if _, err := libraryService.ScanAll(ctx, libraries.TriggerStartup, ""); err != nil {
-			log.Fatal(err)
+			log.Infof("startup scan did not start (server continues): %v", err)
 		}
 	}
 	channelsService := channels.NewService(channels.ServiceOptions{
@@ -437,7 +497,9 @@ func main() {
 		Cache:            podcastCacheAdapter{service: podcastCacheService},
 		InternetStations: internetStationAdapter{service: sourceService},
 		FFmpegPath:       tools.FFmpeg,
-		Logger:           log.Default(),
+		// Channel ffmpeg stderr is per-item detail, not an event.
+		Logger:      log.StdLogger(log.LevelDebug),
+		BaseContext: ctx,
 	})
 
 	handler := api.NewServer(api.ServerOptions{
@@ -465,6 +527,7 @@ func main() {
 		Channels:      channelsService,
 		ReloadCatalog: reloadCatalog,
 		StartedAt:     time.Now(),
+		BaseContext:   ctx,
 	})
 
 	// Started regardless of whether credentials exist right now: they can be
@@ -476,11 +539,11 @@ func main() {
 			Tick:    cfg.LastFMPollTick,
 			Logger:  log.Printf,
 		})
-		go func() {
+		bg("last.fm queue poller", func() {
 			if err := poller.Run(ctx); err != nil && err != context.Canceled {
-				log.Printf("last.fm queue poller stopped: %v", err)
+				log.Warnf("last.fm queue poller stopped: %v", err)
 			}
-		}()
+		})
 	}
 
 	if cfg.PodcastPoll {
@@ -490,11 +553,11 @@ func main() {
 			Tick:          cfg.PodcastPollTick,
 			Logger:        log.Printf,
 		})
-		go func() {
+		bg("podcast feed poller", func() {
 			if err := poller.Run(ctx); err != nil && err != context.Canceled {
-				log.Printf("podcast feed poller stopped: %v", err)
+				log.Warnf("podcast feed poller stopped: %v", err)
 			}
-		}()
+		})
 	}
 
 	if cfg.InternetRadioProbe {
@@ -503,11 +566,11 @@ func main() {
 			Tick:    cfg.InternetRadioProbeTick,
 			Logger:  log.Printf,
 		})
-		go func() {
+		bg("internet radio probe poller", func() {
 			if err := probe.Run(ctx); err != nil && err != context.Canceled {
-				log.Printf("internet radio probe poller stopped: %v", err)
+				log.Warnf("internet radio probe poller stopped: %v", err)
 			}
-		}()
+		})
 	}
 
 	if cfg.WatchLibraries {
@@ -529,13 +592,13 @@ func main() {
 			},
 			ScanInProgress: libraryService.ScanInProgress,
 			Debounce:       cfg.WatchDebounce,
-			Logger:         log.Default(),
+			Logger:         log.StdLogger(log.LevelDebug),
 		})
-		go func() {
+		bg("library watcher", func() {
 			if err := watcher.Run(ctx); err != nil && err != context.Canceled {
-				log.Printf("library watcher stopped: %v", err)
+				log.Warnf("library watcher stopped: %v", err)
 			}
-		}()
+		})
 	}
 
 	listener, err := listenWithFallback(cfg.Addr, 20)
@@ -544,60 +607,105 @@ func main() {
 	}
 	actualAddr := listener.Addr().String()
 	if !sameListenPort(cfg.Addr, actualAddr) {
-		log.Printf("requested %s was in use; samo-server bound to %s instead", cfg.Addr, actualAddr)
+		log.Infof("requested %s was in use; samo-server bound to %s instead", cfg.Addr, actualAddr)
 	}
-	log.Printf("samo-server listening on %s", actualAddr)
+	log.Infof("samo-server listening on %s", actualAddr)
 	if setupHintNeeded {
-		log.Printf("no admin user configured; open http://localhost%s/setup in a browser to finish first-run setup", normalizedDisplayPort(actualAddr))
+		log.Infof("no admin user configured; open http://localhost%s/setup in a browser to finish first-run setup", normalizedDisplayPort(actualAddr))
 	}
-	log.Printf("ffmpeg: %s", tools.FFmpeg)
-	log.Printf("ffprobe: %s", tools.FFprobe)
+	log.Infof("ffmpeg: %s", tools.FFmpeg)
+	log.Infof("ffprobe: %s", tools.FFprobe)
 	if cfg.ScanFFprobe {
-		log.Printf("library scan metadata: ffprobe only (SAMO_SCAN_FFPROBE=1)")
+		log.Infof("library scan metadata: ffprobe only (SAMO_SCAN_FFPROBE=1)")
 	} else {
-		log.Printf("library scan metadata: native tags + ffprobe fallback for duration/technical fields")
+		log.Infof("library scan metadata: native tags + ffprobe fallback for duration/technical fields")
 	}
-	log.Printf("cover cache: %s", coverDir)
-	log.Printf("radio config: %s (%d station(s))", cfg.RadioConfigPath, radioService.StationCount())
+	log.Infof("log level: %s (set SAMO_LOG_LEVEL=debug|info|warn|error)", log.Level())
+	log.Infof("cover cache: %s", coverDir)
+	log.Infof("radio config: %s (%d station(s))", cfg.RadioConfigPath, radioService.StationCount())
 	if lastfmService.Enabled() {
-		log.Printf("last.fm scrobbling: enabled")
+		log.Infof("last.fm scrobbling: enabled")
 	} else {
-		log.Printf("last.fm scrobbling: disabled (set SAMO_LASTFM_API_KEY and SAMO_LASTFM_SHARED_SECRET)")
+		log.Infof("last.fm scrobbling: disabled (set SAMO_LASTFM_API_KEY and SAMO_LASTFM_SHARED_SECRET)")
 	}
 
 	_, portStr, err := net.SplitHostPort(actualAddr)
 	var serverPort int
 	if err == nil {
 		fmt.Sscanf(portStr, "%d", &serverPort)
-		broadcaster := discovery.NewBroadcaster(serverPort)
-		go func() {
+		discoveryServerID, err := serverid.Ensure(ctx, db)
+		if err != nil {
+			log.Warnf("discovery: server identity unavailable: %v", err)
+		}
+		broadcaster := discovery.NewBroadcaster(serverPort, discoveryServerID)
+		bg("discovery broadcaster", func() {
 			if err := broadcaster.Run(ctx); err != nil && err != context.Canceled {
-				log.Printf("discovery broadcaster stopped: %v", err)
+				log.Warnf("discovery broadcaster stopped: %v", err)
 			}
-		}()
+		})
 	}
+
+	// Every request context descends from serveCtx, which lets shutdown be
+	// two-phase (see below). It is deliberately NOT the signal context: that
+	// would kill in-flight requests the instant SIGTERM lands.
+	serveCtx, stopServing := context.WithCancel(context.Background())
+	defer stopServing()
 
 	srv := &http.Server{
-		Handler: handler,
+		Handler:     handler,
+		BaseContext: func(net.Listener) context.Context { return serveCtx },
+		// Slowloris defence. Without it, an unauthenticated client can hold
+		// connections (and their goroutines and fds) open indefinitely by
+		// dribbling headers — /health, /login and /setup are all reachable
+		// before any credential check.
+		ReadHeaderTimeout: 10 * time.Second,
+		// Reap half-open keep-alive connections from sleeping phones and
+		// laptops instead of accumulating them until the fd limit.
+		IdleTimeout:    120 * time.Second,
+		MaxHeaderBytes: 1 << 20,
+		// ReadTimeout and WriteTimeout stay zero on purpose. WriteTimeout would
+		// cut every stream off mid-playback, and ReadTimeout applies to the
+		// whole request — including the body — which interacts badly with
+		// long-lived streaming handlers. Upload bodies are bounded by
+		// MaxBytesReader on the three routes that accept them.
+		// net/http's own connection errors are noisy and rarely actionable.
+		ErrorLog: log.StdLogger(log.LevelDebug),
 	}
 
-	go func() {
+	safego.Go("http server", func() {
 		if err := srv.Serve(listener); err != nil && err != http.ErrServerClosed {
 			log.Fatalf("http server error: %v", err)
 		}
-	}()
+	})
 
 	<-ctx.Done()
-	log.Println("shutting down gracefully...")
+	log.Infof("shutting down gracefully...")
 
-	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 10*time.Second)
+	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), shutdownTimeout)
 	defer shutdownCancel()
 
+	// Phase two of the drain. Ordinary requests finish within the grace window
+	// on their own; the endless streaming handlers (radio, channels) never do,
+	// so cancelling serveCtx is what actually lets Shutdown return. Otherwise a
+	// single listener stalls every restart for the full shutdown timeout.
+	stopServingTimer := time.AfterFunc(streamDrainGrace, stopServing)
+	defer stopServingTimer.Stop()
+
 	if err := srv.Shutdown(shutdownCtx); err != nil {
-		log.Printf("http server shutdown error: %v", err)
+		log.Warnf("http server shutdown error: %v", err)
 	}
 
-	log.Println("samo-server stopped")
+	// Reap the per-channel transcoders. Their contexts are already cancelled
+	// with the signal context; this waits for the processes to actually die so
+	// a restart can't leave orphans behind.
+	channelsService.Close(shutdownCtx)
+
+	// Background workers watch the signal context and are already unwinding.
+	// Waiting for them here is what keeps the deferred db.Close() from yanking
+	// the pool out from under an in-flight scan or explo write.
+	background.Wait(backgroundDrainTimeout)
+
+	log.Infof("samo-server stopped")
 }
 
 // podcastCacheAdapter satisfies channels.EpisodeCacheLookup by forwarding

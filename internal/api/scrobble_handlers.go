@@ -2,13 +2,14 @@ package api
 
 import (
 	"context"
-	"log"
 	"net/http"
 	"time"
 
 	"github.com/bouliehaan/samo-server/internal/catalog"
 	"github.com/bouliehaan/samo-server/internal/lastfm"
+	"github.com/bouliehaan/samo-server/internal/log"
 	"github.com/bouliehaan/samo-server/internal/playback"
+	"github.com/bouliehaan/samo-server/internal/safego"
 )
 
 func (s *Server) notifyMusicTrackLastFM(
@@ -28,7 +29,7 @@ func (s *Server) notifyMusicTrackLastFM(
 		return
 	}
 
-	log.Printf("last.fm notify: track=%q artist=%q source=%s before.progress=%d after.progress=%d resume=%d",
+	log.Infof("last.fm notify: track=%q artist=%q source=%s before.progress=%d after.progress=%d resume=%d",
 		track.Title, track.DisplayArtist, source, before.ProgressSeconds, after.ProgressSeconds, resumeSeconds)
 
 	var safePatch *playback.PatchInput
@@ -52,11 +53,11 @@ func (s *Server) notifyMusicTrackLastFM(
 		ObservedAt:    time.Now().UTC(),
 	}
 
-	go func() {
-		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	safego.Go("last.fm playback handoff", func() {
+		ctx, cancel := context.WithTimeout(s.baseCtx, 30*time.Second)
 		defer cancel()
 		s.lastfm.HandlePlayback(ctx, input)
-	}()
+	})
 }
 
 func (s *Server) postScrobbleEvent(w http.ResponseWriter, r *http.Request) {

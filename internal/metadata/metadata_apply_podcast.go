@@ -6,10 +6,11 @@ import (
 	"time"
 
 	"github.com/bouliehaan/samo-server/internal/catalog"
+	"github.com/bouliehaan/samo-server/internal/catalogstore"
 )
 
 func (s *MetadataApplyService) loadPodcastByID(ctx context.Context, id string) (catalog.PodcastItem, error) {
-	seed, err := catalog.LoadSeedFromDB(ctx, s.db)
+	seed, err := catalogstore.LoadSeedFromDB(ctx, s.db)
 	if err != nil {
 		return catalog.PodcastItem{}, err
 	}
@@ -115,7 +116,7 @@ func (s *MetadataApplyService) applyPodcastEpisode(
 }
 
 func (s *MetadataApplyService) loadPodcastEpisodeByID(ctx context.Context, id string) (catalog.PodcastEpisode, error) {
-	seed, err := catalog.LoadSeedFromDB(ctx, s.db)
+	seed, err := catalogstore.LoadSeedFromDB(ctx, s.db)
 	if err != nil {
 		return catalog.PodcastEpisode{}, err
 	}

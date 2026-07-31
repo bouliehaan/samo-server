@@ -52,7 +52,17 @@ func (s *Server) createLibrary(w http.ResponseWriter, r *http.Request) {
 		writeLibraryError(w, err)
 		return
 	}
+	s.invalidateMediaRoots()
 	writeJSON(w, http.StatusCreated, item)
+}
+
+// invalidateMediaRoots drops the files service's cached allowed-root set. The
+// root set gates every media read, so it has to follow library changes
+// immediately rather than waiting for its TTL to lapse.
+func (s *Server) invalidateMediaRoots() {
+	if s.files != nil {
+		s.files.InvalidateRoots()
+	}
 }
 
 func (s *Server) updateLibrary(w http.ResponseWriter, r *http.Request) {
@@ -68,6 +78,7 @@ func (s *Server) updateLibrary(w http.ResponseWriter, r *http.Request) {
 		writeLibraryError(w, err)
 		return
 	}
+	s.invalidateMediaRoots()
 	writeJSON(w, http.StatusOK, item)
 }
 
@@ -79,6 +90,7 @@ func (s *Server) deleteLibrary(w http.ResponseWriter, r *http.Request) {
 		writeLibraryError(w, err)
 		return
 	}
+	s.invalidateMediaRoots()
 	if err := s.reloadCatalogProjection(r); err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return

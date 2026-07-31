@@ -3,6 +3,17 @@ Description=Samo Server — self-hosted music, audiobooks, podcasts, radio
 Documentation=https://github.com/bouliehaan/samo-server
 After=network-online.target
 Wants=network-online.target
+# Ordering only — no dependency. Local-Postgres installs get the right boot
+# order; installs pointing SAMO_DB_DSN at Docker or another host are unaffected
+# (systemd ignores ordering against a unit that isn't present).
+After=postgresql.service
+
+# Rate-limit restarts here, not in [Service]: systemd moved StartLimit* to the
+# unit section in v229 and ignores it under [Service]. After 5 failures in 5
+# minutes the unit stops and the failure stays visible in `systemctl status`
+# instead of being buried in a hot restart loop.
+StartLimitIntervalSec=300
+StartLimitBurst=5
 
 [Service]
 Type=simple
@@ -10,8 +21,16 @@ User=samo
 Group=samo
 WorkingDirectory=/var/lib/samo
 ExecStart=/opt/samo/samo-server
-Restart=on-failure
+
+# Restart=always, not on-failure: an appliance should come back from a clean
+# exit too (an unhandled SIGPIPE, an operator's `kill`, a bug that returns
+# rather than crashes). The [Unit] StartLimit* settings bound the retries.
+Restart=always
 RestartSec=5s
+
+# Give in-flight streams and background workers time to unwind. The server's
+# own drain is bounded well under this, so hitting it means something wedged.
+TimeoutStopSec=45s
 
 # Defaults. Override these by dropping a file in /etc/systemd/system/samo-server.service.d/
 Environment=SAMO_DATA_DIR=/var/lib/samo

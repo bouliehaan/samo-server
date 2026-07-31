@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	"github.com/bouliehaan/samo-server/internal/catalog"
+	"github.com/bouliehaan/samo-server/internal/catalogstore"
 	"github.com/bouliehaan/samo-server/internal/storage/storagetest"
 )
 
@@ -19,7 +20,7 @@ func TestSavePodcastFeedPreservesOverriddenTitleInDatabase(t *testing.T) {
 	}
 	feedID := podcastFeedID(feedURL)
 
-	if err := catalog.UpsertMetadataOverride(ctx, db, catalog.OverrideKindPodcastFeed, feedID, catalog.MetadataOverridePatch{
+	if err := catalogstore.UpsertMetadataOverride(ctx, db, catalog.OverrideKindPodcastFeed, feedID, catalog.MetadataOverridePatch{
 		"title": []byte(`"User Show Title"`),
 	}); err != nil {
 		t.Fatal(err)

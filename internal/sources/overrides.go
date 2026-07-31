@@ -5,10 +5,11 @@ import (
 	"strings"
 
 	"github.com/bouliehaan/samo-server/internal/catalog"
+	"github.com/bouliehaan/samo-server/internal/catalogstore"
 )
 
 func (s *Service) projectPodcastFeed(ctx context.Context, feed PodcastFeed) (PodcastFeed, error) {
-	idx, err := catalog.LoadOverrideIndex(ctx, s.db)
+	idx, err := catalogstore.LoadOverrideIndex(ctx, s.db)
 	if err != nil {
 		return PodcastFeed{}, err
 	}
@@ -46,7 +47,7 @@ func (s *Service) guardPodcastFeedSave(
 	if idx == nil || idx.IsEmpty() {
 		return parsed, nil
 	}
-	row, err := idx.GuardPodcastFeedRow(ctx, s.db, catalog.PodcastFeedWriteRow{
+	row, err := catalogstore.GuardPodcastFeedRow(ctx, s.db, idx, catalogstore.PodcastFeedWriteRow{
 		FeedID:      feedID,
 		PodcastID:   podcastID,
 		Title:       parsed.Title,
@@ -81,7 +82,7 @@ func (s *Service) guardPodcastEpisodeSave(
 	if idx == nil || idx.IsEmpty() {
 		return episode, nil
 	}
-	return idx.GuardPodcastEpisode(ctx, s.db, episode)
+	return catalogstore.GuardPodcastEpisode(ctx, s.db, idx, episode)
 }
 
 func (s *Service) guardPodcastEpisodesSave(

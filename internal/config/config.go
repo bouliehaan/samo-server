@@ -55,6 +55,9 @@ type Config struct {
 	ExploDirs              []string
 	AcoustIDAPIKey         string
 	ExploPlaylistName      string
+	// LogLevel is the verbosity dial: debug|info|warn|error. Applied before
+	// anything else logs, so a quiet appliance stays quiet from the first line.
+	LogLevel string
 }
 
 type Library struct {
@@ -112,6 +115,7 @@ func LoadEnv() (Config, error) {
 		ExploDirs:              envPathList("SAMO_EXPLO_DIRS"),
 		AcoustIDAPIKey:         strings.TrimSpace(os.Getenv("SAMO_ACOUSTID_API_KEY")),
 		ExploPlaylistName:      envOrDefault("SAMO_EXPLO_PLAYLIST_NAME", "Explore"),
+		LogLevel:               envOrDefault("SAMO_LOG_LEVEL", "info"),
 	}
 
 	return cfg.Validate()

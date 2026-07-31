@@ -14,6 +14,7 @@ import (
 	"testing"
 
 	"github.com/bouliehaan/samo-server/internal/catalog"
+	"github.com/bouliehaan/samo-server/internal/catalogstore"
 	"github.com/bouliehaan/samo-server/internal/metadata"
 	"github.com/bouliehaan/samo-server/internal/playlists"
 )
@@ -313,7 +314,7 @@ func TestBackfillAppliesDistinctPerTrackCovers(t *testing.T) {
 		t.Fatalf("applied=%d, want 2 (one cover resolved per track)", applied)
 	}
 
-	seed, err := catalog.LoadSeedFromDB(ctx, db)
+	seed, err := catalogstore.LoadSeedFromDB(ctx, db)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -365,7 +366,7 @@ func TestBackfillPlaceholdersUnmatchedTracks(t *testing.T) {
 		t.Fatalf("placeholders=%d, want 2 (one per unmatched track)", placeholders)
 	}
 
-	seed, err := catalog.LoadSeedFromDB(ctx, db)
+	seed, err := catalogstore.LoadSeedFromDB(ctx, db)
 	if err != nil {
 		t.Fatal(err)
 	}

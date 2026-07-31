@@ -12,6 +12,7 @@ import (
 	"testing"
 
 	"github.com/bouliehaan/samo-server/internal/catalog"
+	"github.com/bouliehaan/samo-server/internal/catalogstore"
 	"github.com/bouliehaan/samo-server/internal/chapteraudio"
 	"github.com/bouliehaan/samo-server/internal/storage/storagetest"
 )
@@ -128,7 +129,7 @@ func TestApplyWritesAudnexusEditionWhenAudioCannotConverge(t *testing.T) {
 		{Index: 2, Title: "A Twin Disaster", StartSeconds: 30, EndSeconds: 700},
 		{Index: 3, Title: "The Council of Elders", StartSeconds: 700, EndSeconds: 1180},
 	}
-	dbFiles, err := catalog.AudiobookAudioFiles(context.Background(), db, bookID)
+	dbFiles, err := catalogstore.AudiobookAudioFiles(context.Background(), db, bookID)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -192,7 +193,7 @@ func TestApplyHealsStaleAudioGuessChapters(t *testing.T) {
 	s, db, bookID := alignTestDB(t, "ffmpeg", root, files, chapterSourceAudioDetected, junkChapters(150))
 
 	rep := &chapteraudio.Report{Recommendation: chapteraudio.RecommendReview, HardTarget: true, Confidence: 0.3}
-	dbFiles, err := catalog.AudiobookAudioFiles(context.Background(), db, bookID)
+	dbFiles, err := catalogstore.AudiobookAudioFiles(context.Background(), db, bookID)
 	if err != nil {
 		t.Fatal(err)
 	}

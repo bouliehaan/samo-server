@@ -19,6 +19,7 @@ import (
 	"time"
 
 	"github.com/bouliehaan/samo-server/internal/catalog"
+	"github.com/bouliehaan/samo-server/internal/catalogstore"
 	"github.com/bouliehaan/samo-server/internal/covers"
 	"github.com/bouliehaan/samo-server/internal/podcastcache"
 )
@@ -42,6 +43,7 @@ type Service struct {
 	covers              *covers.Service
 	podcastCache        *podcastcache.Service
 	defaultAutoDownload bool
+	baseCtx             context.Context
 }
 
 type Options struct {
@@ -49,6 +51,12 @@ type Options struct {
 	Covers              *covers.Service
 	PodcastCache        *podcastcache.Service
 	DefaultAutoDownload bool
+
+	// BaseContext roots the fire-and-forget downloads this service starts.
+	// context.Background() let them outlive the process's own shutdown, still
+	// writing to a database that was about to close; pass the process lifetime
+	// context so they unwind with everything else.
+	BaseContext context.Context
 }
 
 func New(db *sql.DB, opts ...Options) *Service {
@@ -60,12 +68,17 @@ func New(db *sql.DB, opts ...Options) *Service {
 	if client == nil {
 		client = &http.Client{Timeout: 30 * time.Second}
 	}
+	baseCtx := options.BaseContext
+	if baseCtx == nil {
+		baseCtx = context.Background()
+	}
 	return &Service{
 		db:                  db,
 		client:              client,
 		covers:              options.Covers,
 		podcastCache:        options.PodcastCache,
 		defaultAutoDownload: options.DefaultAutoDownload,
+		baseCtx:             baseCtx,
 	}
 }
 
@@ -513,7 +526,7 @@ type feedSaveOptions struct {
 }
 
 func (s *Service) savePodcastFeed(ctx context.Context, feedURL string, parsed parsedPodcastFeed, opts ...feedSaveOptions) error {
-	idx, err := catalog.LoadOverrideIndex(ctx, s.db)
+	idx, err := catalogstore.LoadOverrideIndex(ctx, s.db)
 	if err != nil {
 		return err
 	}

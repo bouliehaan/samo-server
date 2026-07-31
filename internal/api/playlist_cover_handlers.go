@@ -1,12 +1,13 @@
 package api
 
 import (
-	"log"
 	"net/http"
 	"net/url"
 	"strings"
 
 	"github.com/bouliehaan/samo-server/internal/catalog"
+	"github.com/bouliehaan/samo-server/internal/catalogstore"
+	"github.com/bouliehaan/samo-server/internal/log"
 )
 
 func (s *Server) serveMusicPlaylistCover(w http.ResponseWriter, r *http.Request) {
@@ -36,13 +37,13 @@ func (s *Server) serveMusicPlaylistCover(w http.ResponseWriter, r *http.Request)
 				// the first cover rather than error the request — but log it, so
 				// the degrade from grid to single tile is diagnosable instead of
 				// silent.
-				log.Printf("playlist cover %s: 2x2 composite failed, serving single cover: %v", id, err)
+				log.Warnf("playlist cover %s: 2x2 composite failed, serving single cover: %v", id, err)
 			}
 		} else {
 			// Fewer than 4 servable sources (e.g. covers not yet backfilled)
 			// means no grid is possible; serving one cover is expected here, but
 			// log it so "the Explore tile isn't a grid" is explainable.
-			log.Printf("playlist cover %s: %d/4 servable sources, serving single cover", id, len(sourcePaths))
+			log.Infof("playlist cover %s: %d/4 servable sources, serving single cover", id, len(sourcePaths))
 		}
 	}
 
@@ -131,7 +132,7 @@ func (s *Server) uploadMusicPlaylistCover(w http.ResponseWriter, r *http.Request
 		writeCoverUploadError(w, err)
 		return
 	}
-	if err := catalog.SetMusicPlaylistCover(r.Context(), s.db, id, *image); err != nil {
+	if err := catalogstore.SetMusicPlaylistCover(r.Context(), s.db, id, *image); err != nil {
 		writeCatalogDeleteError(w, err)
 		return
 	}

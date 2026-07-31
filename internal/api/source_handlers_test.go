@@ -10,6 +10,7 @@ import (
 	"testing"
 
 	"github.com/bouliehaan/samo-server/internal/catalog"
+	"github.com/bouliehaan/samo-server/internal/catalogstore"
 	"github.com/bouliehaan/samo-server/internal/radio"
 	"github.com/bouliehaan/samo-server/internal/sources"
 	"github.com/bouliehaan/samo-server/internal/storage/storagetest"
@@ -141,7 +142,7 @@ func sourcesTestServer(t *testing.T, db *sql.DB, catalogService *catalog.Service
 		t.Fatal(err)
 	}
 	reload := func(ctx context.Context) error {
-		seed, err := catalog.LoadSeedFromDB(ctx, db)
+		seed, err := catalogstore.LoadSeedFromDB(ctx, db)
 		if err != nil {
 			return err
 		}

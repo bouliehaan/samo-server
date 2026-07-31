@@ -1,8 +1,6 @@
 package catalog
 
 import (
-	"context"
-	"database/sql"
 	"encoding/json"
 )
 
@@ -25,27 +23,6 @@ const (
 type OverrideIndex struct {
 	patches                map[MetadataOverrideKey]MetadataOverridePatch
 	podcastFeedByPodcastID map[string]MetadataOverridePatch
-}
-
-func LoadOverrideIndex(ctx context.Context, db *sql.DB) (*OverrideIndex, error) {
-	patches, err := LoadMetadataOverrides(ctx, db)
-	if err != nil {
-		return nil, err
-	}
-	feedPodcastIDs, err := LoadPodcastFeedPodcastIDs(ctx, db)
-	if err != nil {
-		return nil, err
-	}
-	idx := &OverrideIndex{
-		patches:                patches,
-		podcastFeedByPodcastID: map[string]MetadataOverridePatch{},
-	}
-	for feedID, podcastID := range feedPodcastIDs {
-		if patch, ok := patches[MetadataOverrideKey{TargetKind: OverrideKindPodcastFeed, TargetID: feedID}]; ok && len(patch) > 0 {
-			idx.podcastFeedByPodcastID[podcastID] = patch
-		}
-	}
-	return idx, nil
 }
 
 func (idx *OverrideIndex) IsEmpty() bool {
@@ -91,7 +68,7 @@ func (idx *OverrideIndex) CombinedPodcastPatch(podcastID string) MetadataOverrid
 	}
 	for field, value := range feedPatch {
 		if field == "externalIds" {
-			merged[field] = mergeOverrideExternalIDs(merged[field], value)
+			merged[field] = MergeOverrideExternalIDs(merged[field], value)
 			continue
 		}
 		merged[field] = append(json.RawMessage(nil), value...)

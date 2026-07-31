@@ -5,7 +5,7 @@ import (
 	"encoding/json"
 	"strings"
 
-	"github.com/bouliehaan/samo-server/internal/catalog"
+	"github.com/bouliehaan/samo-server/internal/catalogstore"
 )
 
 type MetadataOverrideView struct {
@@ -32,7 +32,7 @@ func (s *MetadataApplyService) GetOverride(ctx context.Context, targetKind, targ
 	if targetID == "" {
 		return MetadataOverrideView{}, ErrApplyNotFound
 	}
-	record, err := catalog.GetMetadataOverride(ctx, s.db, string(kind), targetID)
+	record, err := catalogstore.GetMetadataOverride(ctx, s.db, string(kind), targetID)
 	if err != nil {
 		return MetadataOverrideView{}, err
 	}
@@ -65,7 +65,7 @@ func (s *MetadataApplyService) DeleteOverride(ctx context.Context, targetKind, t
 	if targetID == "" {
 		return ErrApplyNotFound
 	}
-	return catalog.DeleteMetadataOverride(ctx, s.db, string(kind), targetID)
+	return catalogstore.DeleteMetadataOverride(ctx, s.db, string(kind), targetID)
 }
 
 func (s *MetadataApplyService) ClearOverrideFields(ctx context.Context, targetKind, targetID string, fields []string) error {
@@ -84,7 +84,7 @@ func (s *MetadataApplyService) ClearOverrideFields(ctx context.Context, targetKi
 	if err != nil {
 		return err
 	}
-	return catalog.ClearMetadataOverrideFields(ctx, s.db, string(kind), targetID, fields)
+	return catalogstore.ClearMetadataOverrideFields(ctx, s.db, string(kind), targetID, fields)
 }
 
 // AllowedFieldsForTarget is the exported field-list accessor for the API

@@ -7,7 +7,13 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+	"time"
 )
+
+// fallbackHTTPClient backs the nil-client path. http.DefaultClient must never
+// be used here: it has no timeout, so an upstream that accepts the connection
+// and then goes silent parks the calling goroutine forever.
+var fallbackHTTPClient = &http.Client{Timeout: 20 * time.Second}
 
 const (
 	deezerSearchArtistURL = "https://api.deezer.com/search/artist"
@@ -21,7 +27,7 @@ const (
 // any failure — callers treat an empty result as "no similar from this provider".
 func deezerSimilarArtists(ctx context.Context, client *http.Client, name string) []similarCandidate {
 	if client == nil {
-		client = http.DefaultClient
+		client = fallbackHTTPClient
 	}
 	deezerID, err := deezerArtistID(ctx, client, name)
 	if err != nil || deezerID == "" {

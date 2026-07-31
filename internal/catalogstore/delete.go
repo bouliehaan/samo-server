@@ -1,4 +1,4 @@
-package catalog
+package catalogstore
 
 import (
 	"context"
@@ -7,10 +7,12 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"path/filepath"
 	"strings"
 
+	"github.com/bouliehaan/samo-server/internal/libraryroots"
 	"github.com/bouliehaan/samo-server/internal/storage"
+
+	"github.com/bouliehaan/samo-server/internal/catalog"
 )
 
 var ErrRemoteItem = errors.New("remote items must be removed via feed delete")
@@ -35,7 +37,7 @@ type DeleteResult struct {
 func DeleteMusicAlbum(ctx context.Context, db *sql.DB, albumID string, opts DeleteOptions) (DeleteResult, error) {
 	albumID = strings.TrimSpace(albumID)
 	if albumID == "" {
-		return DeleteResult{}, ErrNotFound
+		return DeleteResult{}, catalog.ErrNotFound
 	}
 	if db == nil {
 		return DeleteResult{}, errors.New("nil database")
@@ -46,7 +48,7 @@ func DeleteMusicAlbum(ctx context.Context, db *sql.DB, albumID string, opts Dele
 		return DeleteResult{}, fmt.Errorf("lookup album: %w", err)
 	}
 	if exists == 0 {
-		return DeleteResult{}, ErrNotFound
+		return DeleteResult{}, catalog.ErrNotFound
 	}
 
 	trackIDs, err := queryStringColumn(ctx, db, `SELECT id FROM music_tracks WHERE album_id = ?`, albumID)
@@ -59,16 +61,16 @@ func DeleteMusicAlbum(ctx context.Context, db *sql.DB, albumID string, opts Dele
 	}
 
 	if err := storage.WithRetryTx(ctx, db, deleteAttempts, func(tx *sql.Tx) error {
-		if err := deleteUserPlaybackTargets(ctx, tx, OverrideKindMusicAlbum, albumID); err != nil {
+		if err := deleteUserPlaybackTargets(ctx, tx, catalog.OverrideKindMusicAlbum, albumID); err != nil {
 			return err
 		}
-		if err := deleteUserPlaybackTargets(ctx, tx, OverrideKindMusicTrack, trackIDs...); err != nil {
+		if err := deleteUserPlaybackTargets(ctx, tx, catalog.OverrideKindMusicTrack, trackIDs...); err != nil {
 			return err
 		}
-		if err := deleteMetadataOverrides(ctx, tx, OverrideKindMusicAlbum, albumID); err != nil {
+		if err := deleteMetadataOverrides(ctx, tx, catalog.OverrideKindMusicAlbum, albumID); err != nil {
 			return err
 		}
-		if err := deleteMetadataOverrides(ctx, tx, OverrideKindMusicTrack, trackIDs...); err != nil {
+		if err := deleteMetadataOverrides(ctx, tx, catalog.OverrideKindMusicTrack, trackIDs...); err != nil {
 			return err
 		}
 		if err := removeTracksFromPlaylists(ctx, tx, trackIDs); err != nil {
@@ -107,7 +109,7 @@ func DeleteMusicAlbum(ctx context.Context, db *sql.DB, albumID string, opts Dele
 func DeleteAudiobook(ctx context.Context, db *sql.DB, audiobookID string, opts DeleteOptions) (DeleteResult, error) {
 	audiobookID = strings.TrimSpace(audiobookID)
 	if audiobookID == "" {
-		return DeleteResult{}, ErrNotFound
+		return DeleteResult{}, catalog.ErrNotFound
 	}
 	if db == nil {
 		return DeleteResult{}, errors.New("nil database")
@@ -127,10 +129,10 @@ func DeleteAudiobook(ctx context.Context, db *sql.DB, audiobookID string, opts D
 	}
 
 	if err := storage.WithRetryTx(ctx, db, deleteAttempts, func(tx *sql.Tx) error {
-		if err := deleteUserPlaybackTargets(ctx, tx, OverrideKindAudiobook, audiobookID); err != nil {
+		if err := deleteUserPlaybackTargets(ctx, tx, catalog.OverrideKindAudiobook, audiobookID); err != nil {
 			return err
 		}
-		if err := deleteMetadataOverrides(ctx, tx, OverrideKindAudiobook, audiobookID); err != nil {
+		if err := deleteMetadataOverrides(ctx, tx, catalog.OverrideKindAudiobook, audiobookID); err != nil {
 			return err
 		}
 		if err := deleteRadioItemsForSources(ctx, tx, "audiobook", audiobookID); err != nil {
@@ -142,7 +144,7 @@ func DeleteAudiobook(ctx context.Context, db *sql.DB, audiobookID string, opts D
 		}
 		rows, _ := res.RowsAffected()
 		if rows == 0 {
-			return ErrNotFound
+			return catalog.ErrNotFound
 		}
 		return refreshAggregateStats(ctx, tx)
 	}); err != nil {
@@ -159,7 +161,7 @@ func DeleteAudiobook(ctx context.Context, db *sql.DB, audiobookID string, opts D
 func DeletePodcastShow(ctx context.Context, db *sql.DB, podcastID string, opts DeleteOptions) (DeleteResult, error) {
 	podcastID = strings.TrimSpace(podcastID)
 	if podcastID == "" {
-		return DeleteResult{}, ErrNotFound
+		return DeleteResult{}, catalog.ErrNotFound
 	}
 	if db == nil {
 		return DeleteResult{}, errors.New("nil database")
@@ -187,16 +189,16 @@ func DeletePodcastShow(ctx context.Context, db *sql.DB, podcastID string, opts D
 	}
 
 	if err := storage.WithRetryTx(ctx, db, deleteAttempts, func(tx *sql.Tx) error {
-		if err := deleteUserPlaybackTargets(ctx, tx, OverrideKindPodcast, podcastID); err != nil {
+		if err := deleteUserPlaybackTargets(ctx, tx, catalog.OverrideKindPodcast, podcastID); err != nil {
 			return err
 		}
-		if err := deleteUserPlaybackTargets(ctx, tx, OverrideKindPodcastEpisode, episodeIDs...); err != nil {
+		if err := deleteUserPlaybackTargets(ctx, tx, catalog.OverrideKindPodcastEpisode, episodeIDs...); err != nil {
 			return err
 		}
-		if err := deleteMetadataOverrides(ctx, tx, OverrideKindPodcast, podcastID); err != nil {
+		if err := deleteMetadataOverrides(ctx, tx, catalog.OverrideKindPodcast, podcastID); err != nil {
 			return err
 		}
-		if err := deleteMetadataOverrides(ctx, tx, OverrideKindPodcastEpisode, episodeIDs...); err != nil {
+		if err := deleteMetadataOverrides(ctx, tx, catalog.OverrideKindPodcastEpisode, episodeIDs...); err != nil {
 			return err
 		}
 		if err := deleteRadioItemsForSources(ctx, tx, "podcast-episode", episodeIDs...); err != nil {
@@ -208,7 +210,7 @@ func DeletePodcastShow(ctx context.Context, db *sql.DB, podcastID string, opts D
 		}
 		rows, _ := res.RowsAffected()
 		if rows == 0 {
-			return ErrNotFound
+			return catalog.ErrNotFound
 		}
 		return refreshAggregateStats(ctx, tx)
 	}); err != nil {
@@ -230,7 +232,7 @@ func ensureFilesystemPodcast(ctx context.Context, db *sql.DB, podcastID string) 
 		JOIN libraries l ON l.id = p.library_id
 		WHERE p.id = ?`, podcastID).Scan(&libraryPath)
 	if errors.Is(err, sql.ErrNoRows) {
-		return ErrNotFound
+		return catalog.ErrNotFound
 	}
 	if err != nil {
 		return fmt.Errorf("lookup podcast library: %w", err)
@@ -256,7 +258,7 @@ func libraryPathForAudiobook(ctx context.Context, db *sql.DB, audiobookID string
 		JOIN libraries l ON l.id = a.library_id
 		WHERE a.id = ?`, audiobookID).Scan(&libraryPath)
 	if errors.Is(err, sql.ErrNoRows) {
-		return "", ErrNotFound
+		return "", catalog.ErrNotFound
 	}
 	if err != nil {
 		return "", fmt.Errorf("lookup audiobook library: %w", err)
@@ -445,6 +447,14 @@ func refreshAggregateStats(ctx context.Context, tx *sql.Tx) error {
 	return nil
 }
 
+// deletePathsIfRequested removes on-disk media for a catalog delete.
+//
+// The sandbox check goes through internal/libraryroots rather than a local
+// helper. This path used to carry its own weaker copy — an Abs + string-prefix
+// match with no symlink resolution, against roots that were also unresolved —
+// which meant the *most destructive* operation in the codebase had the *least*
+// careful containment check, and silently skipped every file when a library
+// root was itself a symlink. One implementation, used everywhere.
 func deletePathsIfRequested(ctx context.Context, db *sql.DB, paths []string, deleteFiles bool) (int, []string, error) {
 	if !deleteFiles {
 		return 0, nil, nil
@@ -453,17 +463,30 @@ func deletePathsIfRequested(ctx context.Context, db *sql.DB, paths []string, del
 	if len(paths) == 0 {
 		return 0, nil, nil
 	}
-	roots, err := loadLibraryRoots(ctx, db)
-	if err != nil {
-		return 0, nil, err
-	}
+	resolver := libraryroots.New(db)
 	removed := 0
 	var fileErrors []string
 	for _, path := range paths {
-		if !pathUnderRoots(path, roots) {
+		// Validate resolves symlinks and re-checks containment, so what we
+		// remove is the file we proved is inside a library — not a path that
+		// merely looked like one.
+		resolved, _, err := resolver.Validate(ctx, path)
+		switch {
+		case errors.Is(err, libraryroots.ErrMissing):
+			// Already gone; nothing to do and not an error worth surfacing.
+			continue
+		case errors.Is(err, libraryroots.ErrForbidden), errors.Is(err, libraryroots.ErrInvalidPath):
+			// Outside every library root. Report it rather than skipping
+			// silently: the caller asked for these files to be deleted, and
+			// quietly not doing it is how "delete removed nothing" goes
+			// unnoticed.
+			fileErrors = append(fileErrors, fmt.Sprintf("refused to delete %q: %v", path, err))
+			continue
+		case err != nil:
+			fileErrors = append(fileErrors, fmt.Sprintf("resolve %q: %v", path, err))
 			continue
 		}
-		if err := os.Remove(path); err != nil {
+		if err := os.Remove(resolved); err != nil {
 			if os.IsNotExist(err) {
 				continue
 			}
@@ -473,42 +496,6 @@ func deletePathsIfRequested(ctx context.Context, db *sql.DB, paths []string, del
 		removed++
 	}
 	return removed, fileErrors, nil
-}
-
-func loadLibraryRoots(ctx context.Context, db *sql.DB) ([]string, error) {
-	rows, err := db.QueryContext(ctx, `SELECT path FROM libraries WHERE path NOT LIKE 'samo://%'`)
-	if err != nil {
-		return nil, fmt.Errorf("load library roots: %w", err)
-	}
-	defer rows.Close()
-
-	var roots []string
-	for rows.Next() {
-		var path string
-		if err := rows.Scan(&path); err != nil {
-			return nil, fmt.Errorf("scan library root: %w", err)
-		}
-		absolute, err := filepath.Abs(strings.TrimSpace(path))
-		if err != nil {
-			return nil, err
-		}
-		roots = append(roots, filepath.Clean(absolute))
-	}
-	return roots, rows.Err()
-}
-
-func pathUnderRoots(path string, roots []string) bool {
-	absolute, err := filepath.Abs(strings.TrimSpace(path))
-	if err != nil {
-		return false
-	}
-	clean := filepath.Clean(absolute)
-	for _, root := range roots {
-		if clean == root || strings.HasPrefix(clean, root+string(os.PathSeparator)) {
-			return true
-		}
-	}
-	return false
 }
 
 func queryStringColumn(ctx context.Context, db queryExecer, query string, args ...any) ([]string, error) {
