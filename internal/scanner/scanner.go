@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/bouliehaan/samo-server/internal/catalog"
+	"github.com/bouliehaan/samo-server/internal/scannerstore"
 )
 
 // probeFileTimeout caps ffprobe per file so a corrupt file or slow network
@@ -110,6 +111,7 @@ type ChapterLookup struct {
 
 type Scanner struct {
 	db                   *sql.DB
+	store                *scannerstore.Store
 	ffprobePath          string
 	ffmpegPath           string
 	covers               CoverResolver
@@ -141,6 +143,7 @@ func NewWithOptions(db *sql.DB, options Options) *Scanner {
 	}
 	return &Scanner{
 		db:                   db,
+		store:                scannerstore.New(db),
 		ffprobePath:          ffprobePath,
 		ffmpegPath:           strings.TrimSpace(options.FFmpegPath),
 		covers:               options.Covers,
@@ -446,36 +449,5 @@ func jsonText(value any) string {
 }
 
 func (s *Scanner) upsertLibrary(ctx context.Context, library Library) error {
-	// ON CONFLICT(id) handles same-row reupsert; ON CONFLICT(path) handles the
-	// case where the row exists with a different id (e.g. created via API
-	// then re-synced via env vars, or migrated by 016 from a shelf-prefixed
-	// hash). The path-conflict branch preserves the existing id so data
-	// linked to it stays connected.
-	_, err := s.db.ExecContext(ctx, `
-		INSERT INTO libraries (id, name, kind, media_type, path, updated_at)
-		VALUES (?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
-		ON CONFLICT(id) DO UPDATE SET
-		  name = excluded.name,
-		  kind = excluded.kind,
-		  media_type = excluded.media_type,
-		  path = excluded.path,
-		  updated_at = CURRENT_TIMESTAMP`,
-		library.ID, library.Name, library.Kind, library.MediaType, library.Path)
-	if err == nil {
-		return nil
-	}
-	if !strings.Contains(strings.ToLower(err.Error()), "unique") {
-		return fmt.Errorf("upsert library %q: %w", library.Path, err)
-	}
-	// Path UNIQUE collision — preserve the existing row's id but update
-	// kind/name to whatever the caller intends.
-	_, err = s.db.ExecContext(ctx, `
-		UPDATE libraries
-		SET name = ?, kind = ?, media_type = ?, updated_at = CURRENT_TIMESTAMP
-		WHERE path = ?`,
-		library.Name, library.Kind, library.MediaType, library.Path)
-	if err != nil {
-		return fmt.Errorf("update library by path %q: %w", library.Path, err)
-	}
-	return nil
+	return s.store.UpsertLibrary(ctx, library.ID, library.Name, library.Kind, library.MediaType, library.Path)
 }

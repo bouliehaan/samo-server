@@ -22,6 +22,23 @@ func IsRetryable(err error) bool {
 	return false
 }
 
+// IsUniqueViolation reports whether err is a Postgres unique-constraint
+// violation (23505). Several write paths race a UNIQUE index deliberately —
+// insert by id, and on collision fall back to updating the row that already
+// holds the path — so they need to tell "this row exists" apart from a real
+// failure.
+//
+// This replaces matching on err.Error() containing "unique", which both
+// over-matched (any error whose text happens to mention a constraint named
+// *_unique) and under-matched (a violation reported without that word).
+func IsUniqueViolation(err error) bool {
+	var pgErr *pgconn.PgError
+	if errors.As(err, &pgErr) {
+		return pgErr.Code == "23505"
+	}
+	return false
+}
+
 // Retry runs fn until it succeeds, ctx is done, or attempts is exhausted.
 // Retryable errors (see IsRetryable) back off linearly; anything else returns
 // immediately.
