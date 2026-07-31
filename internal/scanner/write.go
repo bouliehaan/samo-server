@@ -37,29 +37,11 @@ func (s *Scanner) upsertMusicArtist(ctx context.Context, artist catalog.MusicArt
 			return err
 		}
 	}
-	existed := false
-	if err := s.db.QueryRowContext(ctx, `SELECT 1 FROM music_artists WHERE id = ? LIMIT 1`, artist.ID).Scan(new(int)); err == nil {
-		existed = true
-	}
-	_, err := s.execWrite(ctx, `
-		INSERT INTO music_artists (id, name, sort_name, genres_json, images_json, external_ids_json, updated_at)
-		VALUES (?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
-		ON CONFLICT(id) DO UPDATE SET
-		  name = excluded.name,
-		  sort_name = excluded.sort_name,
-		  genres_json = excluded.genres_json,
-		  images_json = CASE
-		    WHEN excluded.images_json IS NULL OR excluded.images_json IN ('[]', 'null', '')
-		    THEN music_artists.images_json
-		    ELSE excluded.images_json
-		  END,
-		  external_ids_json = excluded.external_ids_json,
-		  updated_at = CURRENT_TIMESTAMP`,
-		artist.ID, artist.Name, artist.SortName, jsonText(artist.Genres), jsonText(artist.Images), jsonText(artist.ExternalIDs))
+	created, err := s.store.UpsertMusicArtist(ctx, artist)
 	if err != nil {
-		return fmt.Errorf("upsert music artist %q: %w", artist.Name, err)
+		return err
 	}
-	if s.activeScan != nil && !existed {
+	if s.activeScan != nil && created {
 		s.activeScan.noteNewArtist(artist.ID)
 	}
 	return nil
@@ -73,50 +55,7 @@ func (s *Scanner) upsertMusicAlbum(ctx context.Context, album catalog.MusicAlbum
 			return err
 		}
 	}
-	_, err := s.execWrite(ctx, `
-		INSERT INTO music_albums (
-		  id, title, sort_title, version, display_artist, release_date, original_release_date, release_year, release_type,
-		  release_status, compilation, record_label, catalog_number, barcode, genres_json, styles_json, moods_json,
-		  tags_json, images_json, external_ids_json, updated_at
-		)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
-		ON CONFLICT(id) DO UPDATE SET
-		  title = excluded.title,
-		  sort_title = excluded.sort_title,
-		  version = excluded.version,
-		  display_artist = CASE
-		    WHEN excluded.display_artist IS NULL OR TRIM(excluded.display_artist) = ''
-		    THEN music_albums.display_artist
-		    ELSE excluded.display_artist
-		  END,
-		  release_date = excluded.release_date,
-		  original_release_date = excluded.original_release_date,
-		  release_year = excluded.release_year,
-		  release_type = excluded.release_type,
-		  release_status = excluded.release_status,
-		  compilation = excluded.compilation,
-		  record_label = excluded.record_label,
-		  catalog_number = excluded.catalog_number,
-		  barcode = excluded.barcode,
-		  genres_json = excluded.genres_json,
-		  styles_json = excluded.styles_json,
-		  moods_json = excluded.moods_json,
-		  tags_json = excluded.tags_json,
-		  images_json = CASE
-		    WHEN excluded.images_json IS NULL OR excluded.images_json IN ('[]', 'null', '')
-		    THEN music_albums.images_json
-		    ELSE excluded.images_json
-		  END,
-		  external_ids_json = excluded.external_ids_json,
-		  updated_at = CURRENT_TIMESTAMP`,
-		album.ID, album.Title, album.SortTitle, album.Version, album.DisplayArtist, album.ReleaseDate, album.OriginalReleaseDate, album.ReleaseYear,
-		album.ReleaseType, album.ReleaseStatus, boolInt(album.Compilation), album.RecordLabel, album.CatalogNumber, album.Barcode,
-		jsonText(album.Genres), jsonText(album.Styles), jsonText(album.Moods), jsonText(album.Tags),
-		jsonText(album.Images), jsonText(album.ExternalIDs))
-	if err != nil {
-		return fmt.Errorf("upsert music album %q: %w", album.Title, err)
-	}
-	return nil
+	return s.store.UpsertMusicAlbum(ctx, album)
 }
 
 func (s *Scanner) loadAlbumArtistNamesForAlbum(ctx context.Context, albumID string) []string {
@@ -124,27 +63,12 @@ func (s *Scanner) loadAlbumArtistNamesForAlbum(ctx context.Context, albumID stri
 	if albumID == "" || s.db == nil {
 		return nil
 	}
-	rows, err := s.db.QueryContext(ctx, `
-		SELECT a.name
-		FROM music_album_artists aa
-		JOIN music_artists a ON a.id = aa.artist_id
-		WHERE aa.album_id = ?
-		ORDER BY aa.position`, albumID)
+	// Best effort: these names only improve the album-artist inference for the
+	// track being read. A read failure means we fall back to the tags, which is
+	// what an album with no credits yet would do anyway.
+	names, err := s.store.AlbumArtistNames(ctx, albumID)
 	if err != nil {
 		return nil
-	}
-	defer rows.Close()
-
-	names := make([]string, 0, 2)
-	for rows.Next() {
-		var name string
-		if err := rows.Scan(&name); err != nil {
-			return names
-		}
-		name = strings.TrimSpace(name)
-		if name != "" {
-			names = append(names, name)
-		}
 	}
 	return names
 }
@@ -156,27 +80,20 @@ func (s *Scanner) setAlbumArtists(ctx context.Context, albumID string, artists [
 	if len(artists) == 0 {
 		return nil
 	}
+	// replace is false when the artists were inferred rather than read from an
+	// explicit album-artist tag. Existing credits then win: a compilation whose
+	// first track happens to name one performer must not have the whole album
+	// recredited to them.
 	if !replace {
-		var count int
-		if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM music_album_artists WHERE album_id = ?`, albumID).Scan(&count); err != nil {
-			return fmt.Errorf("count album artists: %w", err)
+		count, err := s.store.CountAlbumArtists(ctx, albumID)
+		if err != nil {
+			return err
 		}
 		if count > 0 {
 			return nil
 		}
 	}
-	if _, err := s.execWrite(ctx, `DELETE FROM music_album_artists WHERE album_id = ?`, albumID); err != nil {
-		return fmt.Errorf("clear album artists: %w", err)
-	}
-	for index, artist := range artists {
-		if _, err := s.execWrite(ctx, `
-			INSERT INTO music_album_artists (album_id, artist_id, position)
-			VALUES (?, ?, ?)`,
-			albumID, artist.ID, index); err != nil {
-			return fmt.Errorf("insert album artist: %w", err)
-		}
-	}
-	return nil
+	return s.store.ReplaceAlbumArtists(ctx, albumID, artistIDs(artists))
 }
 
 func (s *Scanner) upsertMusicTrack(ctx context.Context, track catalog.MusicTrack) error {
@@ -187,68 +104,14 @@ func (s *Scanner) upsertMusicTrack(ctx context.Context, track catalog.MusicTrack
 			return err
 		}
 	}
-	_, err := s.execWrite(ctx, `
-		INSERT INTO music_tracks (
-		  id, title, sort_title, subtitle, display_artist, album_id, album_title, disc_number, track_number, total_discs,
-		  total_tracks, release_date, release_year, genres_json, moods_json, tags_json, duration_seconds,
-		  explicit, bpm, musical_key, comment, lyrics_json, images_json, external_ids_json, updated_at
-		)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
-		ON CONFLICT(id) DO UPDATE SET
-		  title = excluded.title,
-		  sort_title = excluded.sort_title,
-		  subtitle = excluded.subtitle,
-		  display_artist = excluded.display_artist,
-		  album_id = excluded.album_id,
-		  album_title = excluded.album_title,
-		  disc_number = excluded.disc_number,
-		  track_number = excluded.track_number,
-		  total_discs = excluded.total_discs,
-		  total_tracks = excluded.total_tracks,
-		  release_date = excluded.release_date,
-		  release_year = excluded.release_year,
-		  genres_json = excluded.genres_json,
-		  moods_json = excluded.moods_json,
-		  tags_json = excluded.tags_json,
-		  duration_seconds = excluded.duration_seconds,
-		  explicit = excluded.explicit,
-		  bpm = excluded.bpm,
-		  musical_key = excluded.musical_key,
-		  comment = excluded.comment,
-		  lyrics_json = excluded.lyrics_json,
-		  images_json = CASE
-		    WHEN excluded.images_json IS NULL OR excluded.images_json IN ('[]', 'null', '')
-		    THEN music_tracks.images_json
-		    ELSE excluded.images_json
-		  END,
-		  external_ids_json = excluded.external_ids_json,
-		  updated_at = CURRENT_TIMESTAMP`,
-		track.ID, track.Title, track.SortTitle, track.Subtitle, track.DisplayArtist, nullableString(track.AlbumID), track.AlbumTitle,
-		track.DiscNumber, track.TrackNumber, track.TotalDiscs, track.TotalTracks, track.ReleaseDate, track.ReleaseYear,
-		jsonText(track.Genres), jsonText(track.Moods), jsonText(track.Tags), track.DurationSeconds, boolInt(track.Explicit),
-		track.BPM, track.Key, track.Comment, jsonText(track.Lyrics), jsonText(track.Images), jsonText(track.ExternalIDs))
-	if err != nil {
-		return fmt.Errorf("upsert music track %q: %w", track.Title, err)
-	}
-	return nil
+	return s.store.UpsertMusicTrack(ctx, track)
 }
 
 func (s *Scanner) setTrackArtists(ctx context.Context, trackID string, artists []catalog.MusicArtist) error {
 	if s.overrideIndex != nil && s.overrideIndex.HasField(catalog.OverrideKindMusicTrack, trackID, "artists") {
 		return nil
 	}
-	if _, err := s.execWrite(ctx, `DELETE FROM music_track_artists WHERE track_id = ?`, trackID); err != nil {
-		return fmt.Errorf("clear track artists: %w", err)
-	}
-	for index, artist := range artists {
-		if _, err := s.execWrite(ctx, `
-			INSERT INTO music_track_artists (track_id, artist_id, role, position)
-			VALUES (?, ?, 'artist', ?)`,
-			trackID, artist.ID, index); err != nil {
-			return fmt.Errorf("insert track artist: %w", err)
-		}
-	}
-	return nil
+	return s.store.ReplaceTrackArtists(ctx, trackID, artistIDs(artists))
 }
 
 func (s *Scanner) upsertAudiobook(ctx context.Context, item catalog.AudiobookItem) (string, error) {
@@ -769,12 +632,7 @@ func (s *Scanner) upsertGenre(ctx context.Context, kind string, name string) err
 	if name == "" {
 		return nil
 	}
-	_, err := s.execWrite(ctx, `
-		INSERT INTO genres (name, kind)
-		VALUES (?, ?)
-		ON CONFLICT(name, kind) DO NOTHING`,
-		name, kind)
-	return err
+	return s.store.UpsertGenre(ctx, kind, name)
 }
 
 // RefreshStats recomputes the aggregate count and duration columns that
