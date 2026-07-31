@@ -5,7 +5,7 @@ import (
 	"net/url"
 	"strings"
 
-	"github.com/bouliehaan/samo-server/internal/catalog"
+	"github.com/bouliehaan/samo-server/internal/catalogstore"
 )
 
 func (s *Server) uploadPodcastCover(w http.ResponseWriter, r *http.Request) {
@@ -43,7 +43,7 @@ func (s *Server) uploadPodcastCover(w http.ResponseWriter, r *http.Request) {
 		writeCoverUploadError(w, err)
 		return
 	}
-	if err := catalog.SetPodcastCover(r.Context(), s.db, id, *image); err != nil {
+	if err := catalogstore.SetPodcastCover(r.Context(), s.db, id, *image); err != nil {
 		writeCatalogDeleteError(w, err)
 		return
 	}

@@ -674,28 +674,87 @@ GET /internet-radio/{id}/stream
 GET /internet-radio/{id}/playlist.m3u
 ```
 
+### `GET /health`
+
+The reachability probe. It is also a real health check: the server pings
+PostgreSQL before answering and returns **503** when that fails, because a
+samo-server without its database can serve nothing else. Treat any non-200 as
+"do not route traffic here".
+
+```json
+{
+  "ok": true,
+  "service": "samo-server",
+  "timestamp": "2026-07-31T06:04:33Z",
+  "serverId": "srv-9a785fd7bf9f599c9b09eef51a6d56f3",
+  "uptimeSeconds": 17,
+  "checks": {
+    "database": {
+      "ok": true, "configured": true, "latencyMs": 1,
+      "inUse": 0, "idle": 5, "maxOpen": 16, "waitCount": 0
+    }
+  }
+}
+```
+
+`serverId` is reported even in the 503 body (it is cached after the first
+success), so a client probing a degraded server can still tell *which* server
+it reached rather than treating it as unknown. `checks.database` is diagnostic
+only — clients should branch on the status code, not on the pool numbers.
+
+The same probe is available as a subcommand for container and systemd health
+checks, so an image needs no curl: `samo-server healthcheck` exits 0 on 200 and
+non-zero otherwise. It reads `SAMO_ADDR`, or takes an explicit `host:port`.
+
 ## Subsonic compatibility surface
 
 Samo speaks enough Subsonic/OpenSubsonic for existing clients (DSub,
-Substreamer, Symfonium, etc.) to browse and stream music. JSON only
-(`f=json`); XML is not implemented. Auth uses standard Subsonic
-parameters or a Bearer header.
+Substreamer, Symfonium, play:Sub, Sonixd) to browse and stream music.
+JSON only (`f=json`); the XML envelope is not implemented.
 
-Implemented actions under `/rest/`:
+Implemented actions under `/rest/` (each also available with a `.view`
+suffix, and over both GET and POST):
 
-- `ping`, `getLicense`, `getMusicFolders`
-- `getIndexes`, `getMusicDirectory`, `getArtist`, `getAlbum`, `getSong`
-- `getArtists`, `getAlbumList`, `getAlbumList2`
-- `getRandomSongs`, `getStarred`, `getStarred2`, `star`, `unstar`
-- `getPlaylists`, `getPlaylist`
+- `ping`, `getLicense`, `getMusicFolders`, `getUser`, `getScanStatus`
+- `getIndexes`, `getMusicDirectory`, `getArtists`, `getArtist`, `getAlbum`, `getSong`
+- `getAlbumList`, `getAlbumList2`, `getRandomSongs`, `getGenres`
 - `search2`, `search3`
+- `getPlaylists`, `getPlaylist`
 - `stream`, `download`, `getCoverArt`
-- `scrobble`, `updateNowPlaying`
+- `scrobble`, `getNowPlaying`, `getStarred`, `getStarred2`
 
-These all reuse the native catalog and files services, so Subsonic
-clients see the same data your samo-client does. The Subsonic adapter
-is for *other people's* clients; build samo-clients against the native
-API.
+Starring is a native Samo concept that is not yet projected here, so
+`getStarred`/`getStarred2` return empty collections rather than an error
+(several clients abort their whole sync on an error).
+
+### Authentication
+
+The Subsonic protocol's default mode is `t=md5(password+salt)&s=<salt>`,
+which only a server that can recover the plaintext password can verify.
+Samo stores login passwords as bcrypt hashes and will not stop doing
+that, so **Subsonic uses a separate app password**:
+
+```
+POST   /api/v1/users/me/subsonic     -> { "password": "..." }   (shown once)
+GET    /api/v1/users/me/subsonic     -> { "enabled": true }
+DELETE /api/v1/users/me/subsonic                                 (revoke)
+```
+
+Configure the client with the Samo username and that generated password.
+Both `t`+`s` and `p=` (plaintext or `enc:<hex>`) work with it. The
+account's real login password is also accepted in `p=` for clients that
+only offer plaintext, but never via `t`+`s`.
+
+Revoking the Subsonic password takes effect immediately and does not
+affect the account login. A user with no Subsonic password has Subsonic
+access disabled, which is the default.
+
+Streaming and cover art delegate to the same native handlers as
+`/api/v1`, so range requests, the library-root sandbox and scrobbling
+behave identically regardless of which API a client speaks.
+
+The Subsonic adapter is for *other people's* clients; build samo-clients
+against the native API.
 
 ## Versioning
 
@@ -707,9 +766,10 @@ changes will move to `/api/v2`. Within `v1`:
 - Removing routes or fields: breaking — won't happen without a `v2`.
 
 The server doesn't currently expose a version endpoint other than
-`/health` (which returns the service name). The `User-Agent` in
-outbound requests is `SamoServer/<semver>`; client devs can rely on
-the `/api/v1` prefix as the version contract.
+`/health` (which returns the service name, server identity, and uptime —
+see above). The `User-Agent` in outbound requests is
+`SamoServer/<semver>`; client devs can rely on the `/api/v1` prefix as
+the version contract.
 
 ## Worked example: minimal client boot
 

@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/bouliehaan/samo-server/internal/catalog"
+	"github.com/bouliehaan/samo-server/internal/catalogstore"
 	"github.com/bouliehaan/samo-server/internal/users"
 )
 
@@ -190,7 +191,7 @@ func (s *Service) Delete(ctx context.Context, ownerID, id string) error {
 	if err := s.writeTombstone(ctx, current.Name); err != nil {
 		return err
 	}
-	return catalog.DeleteMetadataOverridesForTarget(ctx, s.db, catalog.OverrideKindMusicPlaylist, id)
+	return catalogstore.DeleteMetadataOverridesForTarget(ctx, s.db, catalog.OverrideKindMusicPlaylist, id)
 }
 
 // playlistNameKey is the tombstone identity: scan imports name playlists after

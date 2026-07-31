@@ -1,14 +1,26 @@
-package catalog
+package catalogstore
+
+// Write-time override guarding.
+//
+// Each Guard* reads the patch from the in-memory index, loads the row as it
+// currently stands, and keeps the user's value for any field they overrode —
+// so a rescan cannot silently undo a manual metadata edit.
+//
+// These are free functions rather than methods on catalog.OverrideIndex
+// because they need a database, and a model type carrying db-bound methods is
+// what stops the model from being testable without one.
 
 import (
 	"context"
 	"database/sql"
 	"encoding/json"
 	"fmt"
+
+	"github.com/bouliehaan/samo-server/internal/catalog"
 )
 
-func (idx *OverrideIndex) GuardMusicArtist(ctx context.Context, db *sql.DB, incoming MusicArtist) (MusicArtist, error) {
-	patch := idx.Patch(OverrideKindMusicArtist, incoming.ID)
+func GuardMusicArtist(ctx context.Context, db *sql.DB, idx *catalog.OverrideIndex, incoming catalog.MusicArtist) (catalog.MusicArtist, error) {
+	patch := idx.Patch(catalog.OverrideKindMusicArtist, incoming.ID)
 	if len(patch) == 0 {
 		return incoming, nil
 	}
@@ -41,8 +53,8 @@ func (idx *OverrideIndex) GuardMusicArtist(ctx context.Context, db *sql.DB, inco
 	return out, nil
 }
 
-func (idx *OverrideIndex) GuardMusicAlbum(ctx context.Context, db *sql.DB, incoming MusicAlbum) (MusicAlbum, error) {
-	patch := idx.Patch(OverrideKindMusicAlbum, incoming.ID)
+func GuardMusicAlbum(ctx context.Context, db *sql.DB, idx *catalog.OverrideIndex, incoming catalog.MusicAlbum) (catalog.MusicAlbum, error) {
+	patch := idx.Patch(catalog.OverrideKindMusicAlbum, incoming.ID)
 	if len(patch) == 0 {
 		return incoming, nil
 	}
@@ -100,7 +112,7 @@ func (idx *OverrideIndex) GuardMusicAlbum(ctx context.Context, db *sql.DB, incom
 		out.Tags = append([]string(nil), existing.Tags...)
 	}
 	if patchHasField(patch, "cover") {
-		out.Images = append([]Image(nil), existing.Images...)
+		out.Images = append([]catalog.Image(nil), existing.Images...)
 	}
 	if patchHasField(patch, "externalIds") {
 		out.ExternalIDs = existing.ExternalIDs
@@ -108,8 +120,8 @@ func (idx *OverrideIndex) GuardMusicAlbum(ctx context.Context, db *sql.DB, incom
 	return out, nil
 }
 
-func (idx *OverrideIndex) GuardMusicTrack(ctx context.Context, db *sql.DB, incoming MusicTrack) (MusicTrack, error) {
-	patch := idx.Patch(OverrideKindMusicTrack, incoming.ID)
+func GuardMusicTrack(ctx context.Context, db *sql.DB, idx *catalog.OverrideIndex, incoming catalog.MusicTrack) (catalog.MusicTrack, error) {
+	patch := idx.Patch(catalog.OverrideKindMusicTrack, incoming.ID)
 	if len(patch) == 0 {
 		return incoming, nil
 	}
@@ -152,7 +164,7 @@ func (idx *OverrideIndex) GuardMusicTrack(ctx context.Context, db *sql.DB, incom
 		out.Explicit = existing.Explicit
 	}
 	if patchHasField(patch, "cover") {
-		out.Images = append([]Image(nil), existing.Images...)
+		out.Images = append([]catalog.Image(nil), existing.Images...)
 	}
 	if patchHasField(patch, "externalIds") {
 		out.ExternalIDs = existing.ExternalIDs
@@ -163,8 +175,8 @@ func (idx *OverrideIndex) GuardMusicTrack(ctx context.Context, db *sql.DB, incom
 // GuardAudiobook stops a scanner write from clobbering user-applied
 // audiobook metadata. For any field the user explicitly overrode, we read
 // the current DB value and force that field on the outgoing row.
-func (idx *OverrideIndex) GuardAudiobook(ctx context.Context, db *sql.DB, incoming AudiobookItem) (AudiobookItem, error) {
-	patch := idx.Patch(OverrideKindAudiobook, incoming.ID)
+func GuardAudiobook(ctx context.Context, db *sql.DB, idx *catalog.OverrideIndex, incoming catalog.AudiobookItem) (catalog.AudiobookItem, error) {
+	patch := idx.Patch(catalog.OverrideKindAudiobook, incoming.ID)
 	if len(patch) == 0 {
 		return incoming, nil
 	}
@@ -196,7 +208,7 @@ func (idx *OverrideIndex) GuardAudiobook(ctx context.Context, db *sql.DB, incomi
 // GuardPodcast is the podcast-show equivalent of GuardAudiobook. It also
 // merges in any podcast-feed override (CombinedPodcastPatch) so the RSS
 // ingester's overrides survive scanner overwrites.
-func (idx *OverrideIndex) GuardPodcast(ctx context.Context, db *sql.DB, incoming PodcastItem) (PodcastItem, error) {
+func GuardPodcast(ctx context.Context, db *sql.DB, idx *catalog.OverrideIndex, incoming catalog.PodcastItem) (catalog.PodcastItem, error) {
 	patch := idx.CombinedPodcastPatch(incoming.ID)
 	if len(patch) == 0 {
 		return incoming, nil
@@ -226,12 +238,12 @@ func (idx *OverrideIndex) GuardPodcast(ctx context.Context, db *sql.DB, incoming
 	return out, nil
 }
 
-func guardBookMetadata(existing, incoming *BookMetadata, patch MetadataOverridePatch) *BookMetadata {
+func guardBookMetadata(existing, incoming *catalog.BookMetadata, patch catalog.MetadataOverridePatch) *catalog.BookMetadata {
 	if incoming == nil {
-		incoming = &BookMetadata{}
+		incoming = &catalog.BookMetadata{}
 	}
 	if existing == nil {
-		existing = &BookMetadata{}
+		existing = &catalog.BookMetadata{}
 	}
 	out := *incoming
 	if patchHasField(patch, "title") {
@@ -271,13 +283,13 @@ func guardBookMetadata(existing, incoming *BookMetadata, patch MetadataOverrideP
 		out.Abridged = existing.Abridged
 	}
 	if patchHasField(patch, "authors") {
-		out.Authors = append([]ContributorRef(nil), existing.Authors...)
+		out.Authors = append([]catalog.ContributorRef(nil), existing.Authors...)
 	}
 	if patchHasField(patch, "narrators") {
-		out.Narrators = append([]ContributorRef(nil), existing.Narrators...)
+		out.Narrators = append([]catalog.ContributorRef(nil), existing.Narrators...)
 	}
 	if patchHasField(patch, "series") {
-		out.Series = append([]SeriesRef(nil), existing.Series...)
+		out.Series = append([]catalog.SeriesRef(nil), existing.Series...)
 	}
 	if patchHasField(patch, "externalIds") {
 		out.ExternalIDs = existing.ExternalIDs
@@ -285,12 +297,12 @@ func guardBookMetadata(existing, incoming *BookMetadata, patch MetadataOverrideP
 	return &out
 }
 
-func guardPodcastMetadata(existing, incoming *PodcastMetadata, patch MetadataOverridePatch) *PodcastMetadata {
+func guardPodcastMetadata(existing, incoming *catalog.PodcastMetadata, patch catalog.MetadataOverridePatch) *catalog.PodcastMetadata {
 	if incoming == nil {
-		incoming = &PodcastMetadata{}
+		incoming = &catalog.PodcastMetadata{}
 	}
 	if existing == nil {
-		existing = &PodcastMetadata{}
+		existing = &catalog.PodcastMetadata{}
 	}
 	out := *incoming
 	if patchHasField(patch, "title") {
@@ -320,8 +332,8 @@ func guardPodcastMetadata(existing, incoming *PodcastMetadata, patch MetadataOve
 	return &out
 }
 
-func (idx *OverrideIndex) GuardPodcastEpisode(ctx context.Context, db *sql.DB, incoming PodcastEpisode) (PodcastEpisode, error) {
-	patch := idx.Patch(OverrideKindPodcastEpisode, incoming.ID)
+func GuardPodcastEpisode(ctx context.Context, db *sql.DB, idx *catalog.OverrideIndex, incoming catalog.PodcastEpisode) (catalog.PodcastEpisode, error) {
+	patch := idx.Patch(catalog.OverrideKindPodcastEpisode, incoming.ID)
 	if len(patch) == 0 {
 		return incoming, nil
 	}
@@ -366,12 +378,12 @@ type PodcastFeedWriteRow struct {
 	Language    string
 	Explicit    bool
 	Categories  []string
-	Cover       *Image
-	ExternalIDs ExternalIDs
+	Cover       *catalog.Image
+	ExternalIDs catalog.ExternalIDs
 }
 
-func (idx *OverrideIndex) GuardPodcastFeedRow(ctx context.Context, db *sql.DB, incoming PodcastFeedWriteRow) (PodcastFeedWriteRow, error) {
-	patch := idx.Patch(OverrideKindPodcastFeed, incoming.FeedID)
+func GuardPodcastFeedRow(ctx context.Context, db *sql.DB, idx *catalog.OverrideIndex, incoming PodcastFeedWriteRow) (PodcastFeedWriteRow, error) {
+	patch := idx.Patch(catalog.OverrideKindPodcastFeed, incoming.FeedID)
 	if len(patch) == 0 {
 		return incoming, nil
 	}
@@ -418,7 +430,7 @@ func (idx *OverrideIndex) GuardPodcastFeedRow(ctx context.Context, db *sql.DB, i
 	return out, nil
 }
 
-func patchHasField(patch MetadataOverridePatch, field string) bool {
+func patchHasField(patch catalog.MetadataOverridePatch, field string) bool {
 	if len(patch) == 0 {
 		return false
 	}
@@ -426,18 +438,18 @@ func patchHasField(patch MetadataOverridePatch, field string) bool {
 	return ok
 }
 
-func loadExistingMusicArtist(ctx context.Context, db *sql.DB, id string) (MusicArtist, bool, error) {
-	var artist MusicArtist
+func loadExistingMusicArtist(ctx context.Context, db *sql.DB, id string) (catalog.MusicArtist, bool, error) {
+	var artist catalog.MusicArtist
 	var genresJSON, moodsJSON, externalJSON string
 	err := db.QueryRowContext(ctx, `
 		SELECT name, sort_name, disambiguation, genres_json, moods_json, external_ids_json
 		FROM music_artists WHERE id = ?`, id).
 		Scan(&artist.Name, &artist.SortName, &artist.Disambiguation, &genresJSON, &moodsJSON, &externalJSON)
 	if err == sql.ErrNoRows {
-		return MusicArtist{}, false, nil
+		return catalog.MusicArtist{}, false, nil
 	}
 	if err != nil {
-		return MusicArtist{}, false, fmt.Errorf("load existing music artist: %w", err)
+		return catalog.MusicArtist{}, false, fmt.Errorf("load existing music artist: %w", err)
 	}
 	decodeJSONString(genresJSON, &artist.Genres)
 	decodeJSONString(moodsJSON, &artist.Moods)
@@ -446,8 +458,8 @@ func loadExistingMusicArtist(ctx context.Context, db *sql.DB, id string) (MusicA
 	return artist, true, nil
 }
 
-func loadExistingMusicAlbum(ctx context.Context, db *sql.DB, id string) (MusicAlbum, bool, error) {
-	var album MusicAlbum
+func loadExistingMusicAlbum(ctx context.Context, db *sql.DB, id string) (catalog.MusicAlbum, bool, error) {
+	var album catalog.MusicAlbum
 	var genresJSON, stylesJSON, moodsJSON, tagsJSON, imagesJSON, externalJSON string
 	err := db.QueryRowContext(ctx, `
 		SELECT title, sort_title, version, display_artist, release_date, original_release_date, release_year,
@@ -458,10 +470,10 @@ func loadExistingMusicAlbum(ctx context.Context, db *sql.DB, id string) (MusicAl
 			&album.OriginalReleaseDate, &album.ReleaseYear, &album.ReleaseType, &album.RecordLabel,
 			&album.CatalogNumber, &album.Barcode, &genresJSON, &stylesJSON, &moodsJSON, &tagsJSON, &imagesJSON, &externalJSON)
 	if err == sql.ErrNoRows {
-		return MusicAlbum{}, false, nil
+		return catalog.MusicAlbum{}, false, nil
 	}
 	if err != nil {
-		return MusicAlbum{}, false, fmt.Errorf("load existing music album: %w", err)
+		return catalog.MusicAlbum{}, false, fmt.Errorf("load existing music album: %w", err)
 	}
 	decodeJSONString(genresJSON, &album.Genres)
 	decodeJSONString(stylesJSON, &album.Styles)
@@ -473,8 +485,8 @@ func loadExistingMusicAlbum(ctx context.Context, db *sql.DB, id string) (MusicAl
 	return album, true, nil
 }
 
-func loadExistingMusicTrack(ctx context.Context, db *sql.DB, id string) (MusicTrack, bool, error) {
-	var track MusicTrack
+func loadExistingMusicTrack(ctx context.Context, db *sql.DB, id string) (catalog.MusicTrack, bool, error) {
+	var track catalog.MusicTrack
 	var genresJSON, moodsJSON, tagsJSON, imagesJSON, externalJSON string
 	var explicit int
 	err := db.QueryRowContext(ctx, `
@@ -484,10 +496,10 @@ func loadExistingMusicTrack(ctx context.Context, db *sql.DB, id string) (MusicTr
 		Scan(&track.Title, &track.SortTitle, &track.Subtitle, &track.DisplayArtist, &track.ReleaseDate,
 			&track.ReleaseYear, &genresJSON, &moodsJSON, &tagsJSON, &explicit, &imagesJSON, &externalJSON)
 	if err == sql.ErrNoRows {
-		return MusicTrack{}, false, nil
+		return catalog.MusicTrack{}, false, nil
 	}
 	if err != nil {
-		return MusicTrack{}, false, fmt.Errorf("load existing music track: %w", err)
+		return catalog.MusicTrack{}, false, fmt.Errorf("load existing music track: %w", err)
 	}
 	track.Explicit = explicit != 0
 	decodeJSONString(genresJSON, &track.Genres)
@@ -499,8 +511,8 @@ func loadExistingMusicTrack(ctx context.Context, db *sql.DB, id string) (MusicTr
 	return track, true, nil
 }
 
-func loadExistingAudiobook(ctx context.Context, db *sql.DB, id string) (AudiobookItem, bool, error) {
-	var item AudiobookItem
+func loadExistingAudiobook(ctx context.Context, db *sql.DB, id string) (catalog.AudiobookItem, bool, error) {
+	var item catalog.AudiobookItem
 	var coverJSON, tagsJSON, genresJSON string
 	var bookJSON sql.NullString
 	err := db.QueryRowContext(ctx, `
@@ -508,12 +520,12 @@ func loadExistingAudiobook(ctx context.Context, db *sql.DB, id string) (Audioboo
 		FROM audiobooks WHERE id = ?`, id).
 		Scan(&coverJSON, &tagsJSON, &genresJSON, &bookJSON)
 	if err == sql.ErrNoRows {
-		return AudiobookItem{}, false, nil
+		return catalog.AudiobookItem{}, false, nil
 	}
 	if err != nil {
-		return AudiobookItem{}, false, fmt.Errorf("load existing audiobook: %w", err)
+		return catalog.AudiobookItem{}, false, fmt.Errorf("load existing audiobook: %w", err)
 	}
-	var cover Image
+	var cover catalog.Image
 	decodeJSONString(coverJSON, &cover)
 	if cover.ID != "" || cover.URL != "" || cover.Path != "" {
 		item.Cover = &cover
@@ -521,7 +533,7 @@ func loadExistingAudiobook(ctx context.Context, db *sql.DB, id string) (Audioboo
 	decodeJSONString(tagsJSON, &item.Tags)
 	decodeJSONString(genresJSON, &item.Genres)
 	if bookJSON.Valid && bookJSON.String != "" {
-		var book BookMetadata
+		var book catalog.BookMetadata
 		decodeJSONString(bookJSON.String, &book)
 		item.Book = &book
 	}
@@ -529,8 +541,8 @@ func loadExistingAudiobook(ctx context.Context, db *sql.DB, id string) (Audioboo
 	return item, true, nil
 }
 
-func loadExistingPodcast(ctx context.Context, db *sql.DB, id string) (PodcastItem, bool, error) {
-	var item PodcastItem
+func loadExistingPodcast(ctx context.Context, db *sql.DB, id string) (catalog.PodcastItem, bool, error) {
+	var item catalog.PodcastItem
 	var coverJSON, tagsJSON, genresJSON string
 	var podcastJSON sql.NullString
 	err := db.QueryRowContext(ctx, `
@@ -538,12 +550,12 @@ func loadExistingPodcast(ctx context.Context, db *sql.DB, id string) (PodcastIte
 		FROM podcasts WHERE id = ?`, id).
 		Scan(&coverJSON, &tagsJSON, &genresJSON, &podcastJSON)
 	if err == sql.ErrNoRows {
-		return PodcastItem{}, false, nil
+		return catalog.PodcastItem{}, false, nil
 	}
 	if err != nil {
-		return PodcastItem{}, false, fmt.Errorf("load existing podcast: %w", err)
+		return catalog.PodcastItem{}, false, fmt.Errorf("load existing podcast: %w", err)
 	}
-	var cover Image
+	var cover catalog.Image
 	decodeJSONString(coverJSON, &cover)
 	if cover.ID != "" || cover.URL != "" || cover.Path != "" {
 		item.Cover = &cover
@@ -551,7 +563,7 @@ func loadExistingPodcast(ctx context.Context, db *sql.DB, id string) (PodcastIte
 	decodeJSONString(tagsJSON, &item.Tags)
 	decodeJSONString(genresJSON, &item.Genres)
 	if podcastJSON.Valid && podcastJSON.String != "" {
-		var podcast PodcastMetadata
+		var podcast catalog.PodcastMetadata
 		decodeJSONString(podcastJSON.String, &podcast)
 		item.Podcast = &podcast
 	}
@@ -559,8 +571,8 @@ func loadExistingPodcast(ctx context.Context, db *sql.DB, id string) (PodcastIte
 	return item, true, nil
 }
 
-func loadExistingPodcastEpisode(ctx context.Context, db *sql.DB, id string) (PodcastEpisode, bool, error) {
-	var episode PodcastEpisode
+func loadExistingPodcastEpisode(ctx context.Context, db *sql.DB, id string) (catalog.PodcastEpisode, bool, error) {
+	var episode catalog.PodcastEpisode
 	var explicit int
 	var externalJSON string
 	var publishedAt sql.NullString
@@ -569,10 +581,10 @@ func loadExistingPodcastEpisode(ctx context.Context, db *sql.DB, id string) (Pod
 		FROM podcast_episodes WHERE id = ?`, id).
 		Scan(&episode.Title, &episode.Subtitle, &episode.Description, &publishedAt, &explicit, &externalJSON)
 	if err == sql.ErrNoRows {
-		return PodcastEpisode{}, false, nil
+		return catalog.PodcastEpisode{}, false, nil
 	}
 	if err != nil {
-		return PodcastEpisode{}, false, fmt.Errorf("load existing podcast episode: %w", err)
+		return catalog.PodcastEpisode{}, false, fmt.Errorf("load existing podcast episode: %w", err)
 	}
 	episode.Explicit = explicit != 0
 	episode.PublishedAt = parseTimePtr(publishedAt)
@@ -605,7 +617,7 @@ func loadExistingPodcastFeedRow(ctx context.Context, db *sql.DB, feedID, podcast
 	row.Explicit = explicit != 0
 	decodeJSONString(categoriesJSON, &row.Categories)
 	if coverJSON.Valid && coverJSON.String != "" {
-		var cover Image
+		var cover catalog.Image
 		decodeJSONString(coverJSON.String, &cover)
 		if cover.URL != "" || cover.Path != "" || cover.ID != "" {
 			row.Cover = &cover
@@ -615,7 +627,7 @@ func loadExistingPodcastFeedRow(ctx context.Context, db *sql.DB, feedID, podcast
 		}
 	}
 	if podcastJSON.Valid && podcastJSON.String != "" {
-		var podcast PodcastMetadata
+		var podcast catalog.PodcastMetadata
 		decodeJSONString(podcastJSON.String, &podcast)
 		row.ExternalIDs = podcast.ExternalIDs
 	}

@@ -1,8 +1,9 @@
-package catalog
+package catalogstore
 
 import (
 	"context"
 	"encoding/json"
+	"github.com/bouliehaan/samo-server/internal/catalog"
 	"os"
 	"path/filepath"
 	"testing"
@@ -31,7 +32,7 @@ func TestSetPodcastCoverPersistsOverrideAndRow(t *testing.T) {
 	if err := os.WriteFile(coverPath, []byte("jpeg"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	cover := Image{ID: "cover_test", Path: coverPath, MimeType: "image/jpeg"}
+	cover := catalog.Image{ID: "cover_test", Path: coverPath, MimeType: "image/jpeg"}
 	if err := SetPodcastCover(ctx, db, podcastID, cover); err != nil {
 		t.Fatal(err)
 	}
@@ -40,7 +41,7 @@ func TestSetPodcastCoverPersistsOverrideAndRow(t *testing.T) {
 	if err := db.QueryRowContext(ctx, `SELECT cover_json FROM podcasts WHERE id = ?`, podcastID).Scan(&coverJSON); err != nil {
 		t.Fatal(err)
 	}
-	var stored Image
+	var stored catalog.Image
 	if err := json.Unmarshal([]byte(coverJSON), &stored); err != nil {
 		t.Fatal(err)
 	}
@@ -48,11 +49,11 @@ func TestSetPodcastCoverPersistsOverrideAndRow(t *testing.T) {
 		t.Fatalf("stored cover = %#v, want %#v", stored, cover)
 	}
 
-	record, err := GetMetadataOverride(ctx, db, OverrideKindPodcast, podcastID)
+	record, err := GetMetadataOverride(ctx, db, catalog.OverrideKindPodcast, podcastID)
 	if err != nil {
 		t.Fatal(err)
 	}
-	decoded, ok := decodePatchImage(record.Fields, "cover")
+	decoded, ok := catalog.DecodePatchImage(record.Fields, "cover")
 	if !ok || decoded == nil || decoded.ID != cover.ID {
 		t.Fatalf("override cover = %#v, ok=%v", decoded, ok)
 	}

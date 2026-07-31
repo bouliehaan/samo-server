@@ -11,6 +11,7 @@ import (
 	"github.com/bouliehaan/samo-server/internal/catalog"
 	"github.com/bouliehaan/samo-server/internal/files"
 	"github.com/bouliehaan/samo-server/internal/podcaststream"
+	"github.com/bouliehaan/samo-server/internal/safego"
 )
 
 func (s *Server) getMediaFile(w http.ResponseWriter, r *http.Request) {
@@ -266,11 +267,11 @@ func (s *Server) streamPodcastEnclosure(w http.ResponseWriter, r *http.Request, 
 	}
 	if s.podcastCache != nil && s.podcastCache.Enabled() {
 		episodeCopy := episode
-		go func() {
-			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Minute)
+		safego.Go("podcast cache warm", func() {
+			ctx, cancel := context.WithTimeout(s.baseCtx, 30*time.Minute)
 			defer cancel()
 			_ = s.podcastCache.EnsureCached(ctx, episodeCopy)
-		}()
+		})
 	}
 }
 

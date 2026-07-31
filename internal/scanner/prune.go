@@ -8,7 +8,7 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/bouliehaan/samo-server/internal/catalog"
+	"github.com/bouliehaan/samo-server/internal/catalogstore"
 )
 
 type ScanStats struct {
@@ -122,7 +122,7 @@ func (s *Scanner) ScanWithProgress(ctx context.Context, libraries []Library, opt
 	if opts.OnActivity != nil {
 		opts.OnActivity("loading metadata overrides")
 	}
-	idx, err := catalog.LoadOverrideIndex(ctx, s.db)
+	idx, err := catalogstore.LoadOverrideIndex(ctx, s.db)
 	if err != nil {
 		return ScanStats{}, err
 	}
@@ -186,7 +186,7 @@ func (s *Scanner) ScanWithProgress(ctx context.Context, libraries []Library, opt
 	} else {
 		stats.ItemsPruned += orphanPruned
 	}
-	if err := catalog.PruneStaleMetadataOverrides(ctx, s.db); err != nil && firstErr == nil {
+	if err := catalogstore.PruneStaleMetadataOverrides(ctx, s.db); err != nil && firstErr == nil {
 		firstErr = err
 	}
 	return stats, firstErr

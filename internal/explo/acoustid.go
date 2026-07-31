@@ -9,7 +9,13 @@ import (
 	"net/url"
 	"strconv"
 	"strings"
+	"time"
 )
+
+// fallbackHTTPClient backs the nil-client path. http.DefaultClient must never
+// be used here: it has no timeout, so an upstream that accepts the connection
+// and then goes silent parks the calling goroutine forever.
+var fallbackHTTPClient = &http.Client{Timeout: 30 * time.Second}
 
 // acoustidLookupURL is a var (not const) so tests can point it at an
 // httptest server instead of the real AcoustID API.
@@ -75,7 +81,7 @@ type acoustidReleaseGrp struct {
 // nothing usable - callers should record that as "unmatched", not retry.
 func lookupAcoustID(ctx context.Context, httpClient *http.Client, apiKey string, fp Fingerprint) (identifiedTrack, bool, error) {
 	if httpClient == nil {
-		httpClient = http.DefaultClient
+		httpClient = fallbackHTTPClient
 	}
 	values := url.Values{
 		"client":      {apiKey},

@@ -15,6 +15,7 @@ import (
 
 	"github.com/bouliehaan/samo-server/internal/catalog"
 	"github.com/bouliehaan/samo-server/internal/lastfm"
+	"github.com/bouliehaan/samo-server/internal/safego"
 )
 
 const (
@@ -125,11 +126,11 @@ func (s *Service) Hydrate(ctx context.Context, artist *catalog.MusicArtist) {
 		}
 	}
 	target := *artist
-	go func() {
+	safego.Go("artist meta resolve", func() {
 		if _, _, _, err := s.resolve(s.bgCtx, target); err != nil {
 			s.logger("artist meta resolve failed for %q: %v", target.Name, err)
 		}
-	}()
+	})
 }
 
 // FetchArtistsByIDs resolves a specific set of artists (e.g. ones newly added by
@@ -180,23 +181,38 @@ func (s *Service) BackfillMissing(ctx context.Context) error {
 		return err
 	}
 
+	// A fixed worker pool, not one goroutine per artist. The semaphore inside
+	// resolve already caps concurrent network calls at externalFetchLimit, so
+	// the old fan-out bought nothing: on a large library it parked tens of
+	// thousands of goroutine stacks that did nothing but queue for that same
+	// semaphore. Same throughput, constant footprint.
+	work := make(chan string)
 	var wg sync.WaitGroup
-	for _, id := range ids {
-		if ctx.Err() != nil {
-			break
-		}
-		artist, err := s.catalog.MusicArtist(id)
-		if err != nil {
-			continue
-		}
+	for i := 0; i < externalFetchLimit; i++ {
 		wg.Add(1)
-		go func(artist catalog.MusicArtist) {
+		safego.Go("artist meta backfill worker", func() {
 			defer wg.Done()
-			if _, _, _, err := s.resolve(ctx, artist); err != nil {
-				s.logger("artist meta backfill failed for %q: %v", artist.Name, err)
+			for id := range work {
+				artist, err := s.catalog.MusicArtist(id)
+				if err != nil {
+					continue
+				}
+				if _, _, _, err := s.resolve(ctx, artist); err != nil {
+					s.logger("artist meta backfill failed for %q: %v", artist.Name, err)
+				}
 			}
-		}(artist)
+		})
 	}
+
+feed:
+	for _, id := range ids {
+		select {
+		case work <- id:
+		case <-ctx.Done():
+			break feed
+		}
+	}
+	close(work)
 	wg.Wait()
 	return nil
 }

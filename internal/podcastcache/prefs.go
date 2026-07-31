@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/bouliehaan/samo-server/internal/catalog"
+	"github.com/bouliehaan/samo-server/internal/safego"
 )
 
 // globalPrewarmScope is the podcast_prefs.show_id used for the library-wide
@@ -127,8 +128,8 @@ func (s *Service) PrewarmNewest(showID string, episodes []catalog.PodcastEpisode
 	if len(targets) == 0 {
 		return
 	}
-	go func() {
-		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Hour)
+	safego.Go("podcast prewarm", func() {
+		ctx, cancel := context.WithTimeout(s.baseCtx, 2*time.Hour)
 		defer cancel()
 		for _, episode := range targets {
 			if ctx.Err() != nil {
@@ -136,7 +137,7 @@ func (s *Service) PrewarmNewest(showID string, episodes []catalog.PodcastEpisode
 			}
 			_ = s.EnsureCached(ctx, episode)
 		}
-	}()
+	})
 }
 
 // selectNewestEpisodes returns the newest `count` episodes (by PublishedAt,

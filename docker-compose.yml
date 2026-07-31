@@ -51,6 +51,16 @@ services:
       # Host networking means "the database" is on loopback, not a `db` DNS name.
       SAMO_DB_DSN: postgres://samo:${POSTGRES_PASSWORD:-changeme}@127.0.0.1:5432/samo?sslmode=disable
       SAMO_DATA_DIR: /data
+    # /health returns 503 when the database is unreachable, so this catches a
+    # server that is still running but can serve nothing — the failure mode
+    # `restart: unless-stopped` alone never notices, because the process is
+    # alive. start_period covers migrations on a cold first boot.
+    healthcheck:
+      test: ["CMD", "/usr/local/bin/samo-server", "healthcheck"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 60s
     volumes:
       # Samo's own state: radio.json, extracted covers, podcast cache. A plain
       # host folder so you can see and back up your files.

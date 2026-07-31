@@ -11,14 +11,14 @@ package catalog
 // manifest, so the Explo tab, the Explore playlist, and client-built explo
 // shelves keep working.
 
-// deriveExploArtists computes MusicArtist.IsExplo for a freshly loaded seed:
+// DeriveExploArtists computes MusicArtist.IsExplo for a freshly loaded seed:
 // an artist is explo iff they have at least one attributable track and every
 // attributable track is explo. Attribution covers both track credits
 // (track.ArtistIDs) and album-artist credits (the album's AlbumArtistIDs),
 // so an artist credited only at the album level is still counted. Derived
 // here, not stored: the track flags are the single source of truth and this
 // stays consistent with them by construction.
-func deriveExploArtists(seed *Seed) {
+func DeriveExploArtists(seed *Seed) {
 	if seed == nil || len(seed.MusicArtists) == 0 {
 		return
 	}

@@ -49,7 +49,7 @@ Each station contains a rotation of local audio files. `durationSeconds` is requ
 ## Endpoints
 
 - `GET /` basic station status page
-- `GET /health` process health
+- `GET /health` process health (503 when the database is unreachable)
 - `GET /api/v1/radio/stations` station list
 - `GET /api/v1/radio/stations/{id}` station detail with upcoming slots
 - `GET /api/v1/radio/stations/{id}/now` current slot

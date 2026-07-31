@@ -6,6 +6,7 @@ import (
 	"strings"
 
 	"github.com/bouliehaan/samo-server/internal/catalog"
+	"github.com/bouliehaan/samo-server/internal/catalogstore"
 )
 
 func (s *MetadataApplyService) persistMetadataOverride(
@@ -20,7 +21,7 @@ func (s *MetadataApplyService) persistMetadataOverride(
 	if err != nil {
 		return err
 	}
-	return catalog.UpsertMetadataOverride(ctx, s.db, string(kind), targetID, patch)
+	return catalogstore.UpsertMetadataOverride(ctx, s.db, string(kind), targetID, patch)
 }
 
 func buildOverridePatch(

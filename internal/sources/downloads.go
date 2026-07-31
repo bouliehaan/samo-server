@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/bouliehaan/samo-server/internal/catalog"
+	"github.com/bouliehaan/samo-server/internal/safego"
 )
 
 func (s *Service) loadPodcastEpisodeIDs(ctx context.Context, podcastID string) (map[string]struct{}, error) {
@@ -30,8 +31,8 @@ func (s *Service) prefetchPodcastEpisodes(episodes []catalog.PodcastEpisode) {
 	if s == nil || s.podcastCache == nil || !s.podcastCache.Enabled() {
 		return
 	}
-	go func() {
-		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Hour)
+	safego.Go("podcast episode prefetch", func() {
+		ctx, cancel := context.WithTimeout(s.baseCtx, 2*time.Hour)
 		defer cancel()
 		for _, episode := range episodes {
 			if len(episode.AudioFiles) > 0 || episode.EnclosureURL == "" {
@@ -39,5 +40,5 @@ func (s *Service) prefetchPodcastEpisodes(episodes []catalog.PodcastEpisode) {
 			}
 			_ = s.podcastCache.EnsureCached(ctx, episode)
 		}
-	}()
+	})
 }

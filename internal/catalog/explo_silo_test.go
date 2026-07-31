@@ -21,7 +21,7 @@ func siloTestSeed() Seed {
 			{ID: "track-explo", Title: "Explo Song", AlbumID: "album-explo", ArtistIDs: []string{"artist-explo", "artist-both"}, IsExplo: true},
 		},
 	}
-	deriveExploArtists(&seed)
+	DeriveExploArtists(&seed)
 	return seed
 }
 

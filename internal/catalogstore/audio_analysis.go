@@ -1,8 +1,10 @@
-package catalog
+package catalogstore
 
 import (
 	"context"
 	"database/sql"
+
+	"github.com/bouliehaan/samo-server/internal/catalog"
 )
 
 // AudiobookAudioFiles returns one audiobook's audio files in playback order with
@@ -10,7 +12,7 @@ import (
 // the API and player use. Audio chapter analysis needs the exact per-file
 // timeline to map detected silences onto book-global positions, so it reuses
 // this rather than re-deriving the sort/offset logic and risking divergence.
-func AudiobookAudioFiles(ctx context.Context, db *sql.DB, audiobookID string) ([]AudioFile, error) {
+func AudiobookAudioFiles(ctx context.Context, db *sql.DB, audiobookID string) ([]catalog.AudioFile, error) {
 	all, err := loadAudioFiles(ctx, db, "audiobook_id")
 	if err != nil {
 		return nil, err
@@ -21,7 +23,7 @@ func AudiobookAudioFiles(ctx context.Context, db *sql.DB, audiobookID string) ([
 // AudiobookStoredChapters returns one audiobook's persisted chapters (titles +
 // times). Audio analysis uses these purely as the NAME source once the audio has
 // decided where — and how many — chapters there are.
-func AudiobookStoredChapters(ctx context.Context, db *sql.DB, audiobookID string) ([]AudioChapter, error) {
+func AudiobookStoredChapters(ctx context.Context, db *sql.DB, audiobookID string) ([]catalog.AudioChapter, error) {
 	all, err := loadAudiobookChapters(ctx, db)
 	if err != nil {
 		return nil, err

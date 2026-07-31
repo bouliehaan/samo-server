@@ -4,10 +4,11 @@ import (
 	"context"
 
 	"github.com/bouliehaan/samo-server/internal/catalog"
+	"github.com/bouliehaan/samo-server/internal/catalogstore"
 )
 
 func (s *MetadataApplyService) loadAudiobookByID(ctx context.Context, id string) (catalog.AudiobookItem, error) {
-	seed, err := catalog.LoadSeedFromDB(ctx, s.db)
+	seed, err := catalogstore.LoadSeedFromDB(ctx, s.db)
 	if err != nil {
 		return catalog.AudiobookItem{}, err
 	}

@@ -25,7 +25,7 @@ func EnrichAlbumAudioQuality(albums []MusicAlbum, tracks []MusicTrack) {
 
 // enrichAlbumAudioQuality aggregates track technical metadata onto each album so
 // clients can render hi-res badges from album list/search/home responses.
-func (s *Service) enrichAlbumAudioQuality() {
+func (s *catalogState) enrichAlbumAudioQuality() {
 	EnrichAlbumAudioQuality(s.musicAlbums, s.musicTracks)
 	for _, album := range s.musicAlbums {
 		s.musicAlbumByID[album.ID] = album

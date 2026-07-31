@@ -27,7 +27,15 @@ func probeNative(ctx context.Context, path string, includeChapters bool) (probeI
 	}
 	done := make(chan result, 1)
 	go func() {
-		info, err := probeNativeFile(path, includeChapters)
+		// Guarded: the tag parser runs over untrusted file bytes on its own
+		// goroutine, where a panic would kill the process rather than fail the
+		// file. See recoverToError.
+		var info probeInfo
+		err := recoverToError("native probe of "+path, func() error {
+			var probeErr error
+			info, probeErr = probeNativeFile(path, includeChapters)
+			return probeErr
+		})
 		done <- result{info: info, err: err}
 	}()
 	select {

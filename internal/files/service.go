@@ -11,15 +11,37 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/bouliehaan/samo-server/internal/libraryroots"
 )
 
 type Service struct {
-	db         *sql.DB
-	extraRoots []string
+	db    *sql.DB
+	roots *libraryroots.Resolver
 }
 
 func New(db *sql.DB, extraRoots ...string) *Service {
-	return &Service{db: db, extraRoots: extraRoots}
+	return &Service{db: db, roots: libraryroots.New(db, extraRoots...)}
+}
+
+// Roots exposes the resolver so other packages that touch media paths — the
+// catalog's delete-files path in particular — enforce the sandbox through the
+// same code rather than reimplementing it.
+func (s *Service) Roots() *libraryroots.Resolver {
+	if s == nil {
+		return nil
+	}
+	return s.roots
+}
+
+// InvalidateRoots drops the cached allowed-root set so the next media request
+// re-reads it. Call this after any library create/update/delete: without it an
+// operator's change would take up to the cache TTL to be reflected.
+func (s *Service) InvalidateRoots() {
+	if s == nil {
+		return
+	}
+	s.roots.Invalidate()
 }
 
 func (s *Service) ListMediaFilesForEpisode(ctx context.Context, episodeID string) ([]MediaFile, error) {
@@ -118,7 +140,7 @@ func (s *Service) ValidateLocalPath(ctx context.Context, path string) (string, o
 	if s == nil || s.db == nil {
 		return "", nil, ErrDisabled
 	}
-	return validateReadablePath(ctx, s.db, s.extraRoots, path)
+	return validateReadablePath(ctx, s.roots, path)
 }
 
 func (s *Service) ServeLocalPath(ctx context.Context, path string, w http.ResponseWriter, r *http.Request) error {

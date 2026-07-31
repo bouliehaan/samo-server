@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/bouliehaan/samo-server/internal/catalog"
+	"github.com/bouliehaan/samo-server/internal/catalogstore"
 	"github.com/bouliehaan/samo-server/internal/storage"
 )
 
@@ -31,7 +32,7 @@ func (s *Scanner) execWrite(ctx context.Context, query string, args ...any) (sql
 func (s *Scanner) upsertMusicArtist(ctx context.Context, artist catalog.MusicArtist) error {
 	if s.overrideIndex != nil {
 		var err error
-		artist, err = s.overrideIndex.GuardMusicArtist(ctx, s.db, artist)
+		artist, err = catalogstore.GuardMusicArtist(ctx, s.db, s.overrideIndex, artist)
 		if err != nil {
 			return err
 		}
@@ -67,7 +68,7 @@ func (s *Scanner) upsertMusicArtist(ctx context.Context, artist catalog.MusicArt
 func (s *Scanner) upsertMusicAlbum(ctx context.Context, album catalog.MusicAlbum) error {
 	if s.overrideIndex != nil {
 		var err error
-		album, err = s.overrideIndex.GuardMusicAlbum(ctx, s.db, album)
+		album, err = catalogstore.GuardMusicAlbum(ctx, s.db, s.overrideIndex, album)
 		if err != nil {
 			return err
 		}
@@ -181,7 +182,7 @@ func (s *Scanner) setAlbumArtists(ctx context.Context, albumID string, artists [
 func (s *Scanner) upsertMusicTrack(ctx context.Context, track catalog.MusicTrack) error {
 	if s.overrideIndex != nil {
 		var err error
-		track, err = s.overrideIndex.GuardMusicTrack(ctx, s.db, track)
+		track, err = catalogstore.GuardMusicTrack(ctx, s.db, s.overrideIndex, track)
 		if err != nil {
 			return err
 		}
@@ -253,7 +254,7 @@ func (s *Scanner) setTrackArtists(ctx context.Context, trackID string, artists [
 func (s *Scanner) upsertAudiobook(ctx context.Context, item catalog.AudiobookItem) (string, error) {
 	if s.overrideIndex != nil {
 		var err error
-		item, err = s.overrideIndex.GuardAudiobook(ctx, s.db, item)
+		item, err = catalogstore.GuardAudiobook(ctx, s.db, s.overrideIndex, item)
 		if err != nil {
 			return "", err
 		}
@@ -324,7 +325,7 @@ func (s *Scanner) upsertAudiobook(ctx context.Context, item catalog.AudiobookIte
 func (s *Scanner) upsertPodcast(ctx context.Context, item catalog.PodcastItem) error {
 	if s.overrideIndex != nil {
 		var err error
-		item, err = s.overrideIndex.GuardPodcast(ctx, s.db, item)
+		item, err = catalogstore.GuardPodcast(ctx, s.db, s.overrideIndex, item)
 		if err != nil {
 			return err
 		}
@@ -490,7 +491,7 @@ func (s *Scanner) setAudiobookSeries(ctx context.Context, audiobookID string, se
 func (s *Scanner) upsertPodcastEpisode(ctx context.Context, episode catalog.PodcastEpisode) error {
 	if s.overrideIndex != nil {
 		var err error
-		episode, err = s.overrideIndex.GuardPodcastEpisode(ctx, s.db, episode)
+		episode, err = catalogstore.GuardPodcastEpisode(ctx, s.db, s.overrideIndex, episode)
 		if err != nil {
 			return err
 		}

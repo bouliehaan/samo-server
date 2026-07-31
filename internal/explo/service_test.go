@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	"github.com/bouliehaan/samo-server/internal/catalog"
+	"github.com/bouliehaan/samo-server/internal/catalogstore"
 	"github.com/bouliehaan/samo-server/internal/metadata"
 	"github.com/bouliehaan/samo-server/internal/playlists"
 	"github.com/bouliehaan/samo-server/internal/storage/storagetest"
@@ -155,7 +156,7 @@ esac`)
 
 	// The matched track's title/artist were applied as a metadata override
 	// and are visible through the normal catalog projection - no file touched.
-	seed, err := catalog.LoadSeedFromDB(ctx, db)
+	seed, err := catalogstore.LoadSeedFromDB(ctx, db)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -277,7 +278,7 @@ func TestProcessNewTracksFallsBackToTextSearchWhenAcoustIDMisses(t *testing.T) {
 		t.Fatalf("matched_artist = %q, musicbrainz_recording_id = %q", matchedArtist, mbRecordingID)
 	}
 
-	seed, err := catalog.LoadSeedFromDB(ctx, db)
+	seed, err := catalogstore.LoadSeedFromDB(ctx, db)
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -2,10 +2,11 @@ package libraries
 
 import (
 	"context"
-	"log"
 	"sync/atomic"
 	"time"
 
+	"github.com/bouliehaan/samo-server/internal/log"
+	"github.com/bouliehaan/samo-server/internal/safego"
 	"github.com/bouliehaan/samo-server/internal/storage"
 )
 
@@ -30,7 +31,7 @@ func (s *Service) newScanProgressReporter(jobID string) *scanProgressReporter {
 func (r *scanProgressReporter) Start() {
 	r.setActivity("starting scan")
 	r.persistSeen(0)
-	go r.heartbeat()
+	safego.Go("scan progress heartbeat", r.heartbeat)
 }
 
 func (r *scanProgressReporter) Stop() {
@@ -79,7 +80,7 @@ func (r *scanProgressReporter) persistSeen(total int) {
 		return err
 	})
 	if err != nil {
-		log.Printf("libraries: scan job %q progress update failed: %v", r.jobID, err)
+		log.Warnf("libraries: scan job %q progress update failed: %v", r.jobID, err)
 	}
 }
 
@@ -96,7 +97,7 @@ func (r *scanProgressReporter) heartbeat() {
 			seen := int(r.seen.Load())
 			r.persistSeen(seen)
 			if pulse%5 == 0 {
-				log.Printf("libraries: scan job %q still running (%d files enumerated)", r.jobID, seen)
+				log.Infof("libraries: scan job %q still running (%d files enumerated)", r.jobID, seen)
 			}
 		}
 	}

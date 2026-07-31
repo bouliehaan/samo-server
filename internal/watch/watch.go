@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/bouliehaan/samo-server/internal/libraries"
+	"github.com/bouliehaan/samo-server/internal/safego"
 	"github.com/bouliehaan/samo-server/internal/scanner"
 	"github.com/fsnotify/fsnotify"
 )
@@ -94,7 +95,7 @@ func (w *Watcher) Run(ctx context.Context) error {
 	trigger := make(chan struct{}, 1)
 	done := make(chan struct{})
 	pending := newPendingChanges()
-	go w.scanLoop(ctx, trigger, done, pending, roots)
+	safego.Go("library watch scan loop", func() { w.scanLoop(ctx, trigger, done, pending, roots) })
 	defer func() {
 		close(trigger)
 		<-done

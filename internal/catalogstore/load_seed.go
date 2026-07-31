@@ -1,4 +1,4 @@
-package catalog
+package catalogstore
 
 import (
 	"context"
@@ -10,56 +10,58 @@ import (
 	"time"
 
 	"github.com/bouliehaan/samo-server/internal/media"
+
+	"github.com/bouliehaan/samo-server/internal/catalog"
 )
 
-func LoadSeedFromDB(ctx context.Context, db *sql.DB) (Seed, error) {
+func LoadSeedFromDB(ctx context.Context, db *sql.DB) (catalog.Seed, error) {
 	artists, err := loadMusicArtists(ctx, db)
 	if err != nil {
-		return Seed{}, err
+		return catalog.Seed{}, err
 	}
 	albums, err := loadMusicAlbums(ctx, db)
 	if err != nil {
-		return Seed{}, err
+		return catalog.Seed{}, err
 	}
 	tracks, err := loadMusicTracks(ctx, db)
 	if err != nil {
-		return Seed{}, err
+		return catalog.Seed{}, err
 	}
 	playlists, err := loadMusicPlaylists(ctx, db)
 	if err != nil {
-		return Seed{}, err
+		return catalog.Seed{}, err
 	}
 	genres, err := loadGenres(ctx, db)
 	if err != nil {
-		return Seed{}, err
+		return catalog.Seed{}, err
 	}
 	audiobooks, err := loadAudiobooks(ctx, db)
 	if err != nil {
-		return Seed{}, err
+		return catalog.Seed{}, err
 	}
 	podcasts, err := loadPodcasts(ctx, db)
 	if err != nil {
-		return Seed{}, err
+		return catalog.Seed{}, err
 	}
 	contributors, err := loadContributors(ctx, db)
 	if err != nil {
-		return Seed{}, err
+		return catalog.Seed{}, err
 	}
 	series, err := loadSeries(ctx, db)
 	if err != nil {
-		return Seed{}, err
+		return catalog.Seed{}, err
 	}
 	episodes, err := loadPodcastEpisodes(ctx, db)
 	if err != nil {
-		return Seed{}, err
+		return catalog.Seed{}, err
 	}
 
 	coversBySource, err := loadExtractedCoversBySource(ctx, db)
 	if err != nil {
-		return Seed{}, err
+		return catalog.Seed{}, err
 	}
 
-	seed := Seed{
+	seed := catalog.Seed{
 		MusicArtists:            artists,
 		MusicAlbums:             albums,
 		MusicTracks:             tracks,
@@ -73,23 +75,23 @@ func LoadSeedFromDB(ctx context.Context, db *sql.DB) (Seed, error) {
 		ExtractedCoversBySource: coversBySource,
 	}
 
-	deriveExploArtists(&seed)
+	catalog.DeriveExploArtists(&seed)
 
 	overrides, err := LoadMetadataOverrides(ctx, db)
 	if err != nil {
-		return Seed{}, err
+		return catalog.Seed{}, err
 	}
 	if len(overrides) > 0 {
 		feedPodcastIDs, err := LoadPodcastFeedPodcastIDs(ctx, db)
 		if err != nil {
-			return Seed{}, err
+			return catalog.Seed{}, err
 		}
-		ProjectMetadataOverrides(&seed, overrides, feedPodcastIDs)
+		catalog.ProjectMetadataOverrides(&seed, overrides, feedPodcastIDs)
 	}
 	return seed, nil
 }
 
-func loadMusicArtists(ctx context.Context, db *sql.DB) ([]MusicArtist, error) {
+func loadMusicArtists(ctx context.Context, db *sql.DB) ([]catalog.MusicArtist, error) {
 	rows, err := db.QueryContext(ctx, `
 		SELECT id, name, sort_name, disambiguation, biography, country, genres_json, styles_json, moods_json,
 		       links_json, images_json, external_ids_json, album_count, track_count, duration_seconds,
@@ -100,9 +102,9 @@ func loadMusicArtists(ctx context.Context, db *sql.DB) ([]MusicArtist, error) {
 	}
 	defer rows.Close()
 
-	var items []MusicArtist
+	var items []catalog.MusicArtist
 	for rows.Next() {
-		var item MusicArtist
+		var item catalog.MusicArtist
 		var genresJSON, stylesJSON, moodsJSON, linksJSON, imagesJSON, externalJSON, playbackJSON string
 		var addedAt, updatedAt sql.NullString
 		if err := rows.Scan(&item.ID, &item.Name, &item.SortName, &item.Disambiguation, &item.Biography, &item.Country,
@@ -124,7 +126,7 @@ func loadMusicArtists(ctx context.Context, db *sql.DB) ([]MusicArtist, error) {
 	return items, rows.Err()
 }
 
-func loadMusicAlbums(ctx context.Context, db *sql.DB) ([]MusicAlbum, error) {
+func loadMusicAlbums(ctx context.Context, db *sql.DB) ([]catalog.MusicAlbum, error) {
 	artistRefs, err := loadAlbumArtistRefs(ctx, db)
 	if err != nil {
 		return nil, err
@@ -141,9 +143,9 @@ func loadMusicAlbums(ctx context.Context, db *sql.DB) ([]MusicAlbum, error) {
 	}
 	defer rows.Close()
 
-	var items []MusicAlbum
+	var items []catalog.MusicAlbum
 	for rows.Next() {
-		var item MusicAlbum
+		var item catalog.MusicAlbum
 		var compilation, hiddenFromRecentlyAdded int
 		var genresJSON, stylesJSON, moodsJSON, tagsJSON, imagesJSON, externalJSON, playbackJSON string
 		var addedAt, updatedAt sql.NullString
@@ -175,7 +177,7 @@ func loadMusicAlbums(ctx context.Context, db *sql.DB) ([]MusicAlbum, error) {
 	return items, rows.Err()
 }
 
-func loadMusicTracks(ctx context.Context, db *sql.DB) ([]MusicTrack, error) {
+func loadMusicTracks(ctx context.Context, db *sql.DB) ([]catalog.MusicTrack, error) {
 	artistRefs, err := loadTrackArtistRefs(ctx, db)
 	if err != nil {
 		return nil, err
@@ -196,9 +198,9 @@ func loadMusicTracks(ctx context.Context, db *sql.DB) ([]MusicTrack, error) {
 	}
 	defer rows.Close()
 
-	var items []MusicTrack
+	var items []catalog.MusicTrack
 	for rows.Next() {
-		var item MusicTrack
+		var item catalog.MusicTrack
 		var albumID sql.NullString
 		var genresJSON, moodsJSON, tagsJSON, lyricsJSON, imagesJSON, externalJSON, playbackJSON string
 		var explicit, isExplo int
@@ -230,7 +232,7 @@ func loadMusicTracks(ctx context.Context, db *sql.DB) ([]MusicTrack, error) {
 	return items, rows.Err()
 }
 
-func loadMusicPlaylists(ctx context.Context, db *sql.DB) ([]MusicPlaylist, error) {
+func loadMusicPlaylists(ctx context.Context, db *sql.DB) ([]catalog.MusicPlaylist, error) {
 	rows, err := db.QueryContext(ctx, `
 		SELECT id, name, description, owner_id, public, collaborative, track_ids_json, track_count,
 		       duration_seconds, images_json, playback_json, created_at, updated_at, system
@@ -240,9 +242,9 @@ func loadMusicPlaylists(ctx context.Context, db *sql.DB) ([]MusicPlaylist, error
 	}
 	defer rows.Close()
 
-	var items []MusicPlaylist
+	var items []catalog.MusicPlaylist
 	for rows.Next() {
-		var item MusicPlaylist
+		var item catalog.MusicPlaylist
 		var public, collaborative, system int
 		var trackIDsJSON, imagesJSON, playbackJSON string
 		var createdAt, updatedAt sql.NullString
@@ -264,16 +266,16 @@ func loadMusicPlaylists(ctx context.Context, db *sql.DB) ([]MusicPlaylist, error
 	return items, rows.Err()
 }
 
-func loadGenres(ctx context.Context, db *sql.DB) ([]GenreSummary, error) {
+func loadGenres(ctx context.Context, db *sql.DB) ([]catalog.GenreSummary, error) {
 	rows, err := db.QueryContext(ctx, `SELECT name, kind, item_count, track_count, album_count FROM genres`)
 	if err != nil {
 		return nil, fmt.Errorf("load genres: %w", err)
 	}
 	defer rows.Close()
 
-	var items []GenreSummary
+	var items []catalog.GenreSummary
 	for rows.Next() {
-		var item GenreSummary
+		var item catalog.GenreSummary
 		var kind string
 		if err := rows.Scan(&item.Name, &kind, &item.ItemCount, &item.TrackCount, &item.AlbumCount); err != nil {
 			return nil, fmt.Errorf("scan genre: %w", err)
@@ -284,7 +286,7 @@ func loadGenres(ctx context.Context, db *sql.DB) ([]GenreSummary, error) {
 	return items, rows.Err()
 }
 
-func loadAudiobooks(ctx context.Context, db *sql.DB) ([]AudiobookItem, error) {
+func loadAudiobooks(ctx context.Context, db *sql.DB) ([]catalog.AudiobookItem, error) {
 	files, err := loadAudioFiles(ctx, db, "audiobook_id")
 	if err != nil {
 		return nil, err
@@ -305,9 +307,9 @@ func loadAudiobooks(ctx context.Context, db *sql.DB) ([]AudiobookItem, error) {
 	}
 	defer rows.Close()
 
-	var items []AudiobookItem
+	var items []catalog.AudiobookItem
 	for rows.Next() {
-		var item AudiobookItem
+		var item catalog.AudiobookItem
 		var missing, invalid int
 		var coverJSON, tagsJSON, genresJSON, progressJSON string
 		var bookJSON sql.NullString
@@ -320,7 +322,7 @@ func loadAudiobooks(ctx context.Context, db *sql.DB) ([]AudiobookItem, error) {
 		}
 		item.Missing = missing != 0
 		item.Invalid = invalid != 0
-		var cover Image
+		var cover catalog.Image
 		decodeJSON(coverJSON, &cover)
 		if cover.ID != "" || cover.URL != "" || cover.Path != "" {
 			item.Cover = &cover
@@ -329,7 +331,7 @@ func loadAudiobooks(ctx context.Context, db *sql.DB) ([]AudiobookItem, error) {
 		decodeJSON(genresJSON, &item.Genres)
 		decodeJSON(progressJSON, &item.Progress)
 		if bookJSON.Valid && bookJSON.String != "" {
-			var book BookMetadata
+			var book catalog.BookMetadata
 			decodeJSON(bookJSON.String, &book)
 			item.Book = &book
 		}
@@ -343,7 +345,7 @@ func loadAudiobooks(ctx context.Context, db *sql.DB) ([]AudiobookItem, error) {
 	return items, rows.Err()
 }
 
-func loadPodcasts(ctx context.Context, db *sql.DB) ([]PodcastItem, error) {
+func loadPodcasts(ctx context.Context, db *sql.DB) ([]catalog.PodcastItem, error) {
 	files, err := loadAudioFiles(ctx, db, "podcast_id")
 	if err != nil {
 		return nil, err
@@ -359,9 +361,9 @@ func loadPodcasts(ctx context.Context, db *sql.DB) ([]PodcastItem, error) {
 	}
 	defer rows.Close()
 
-	var items []PodcastItem
+	var items []catalog.PodcastItem
 	for rows.Next() {
-		var item PodcastItem
+		var item catalog.PodcastItem
 		var missing, invalid int
 		var coverJSON, tagsJSON, genresJSON, progressJSON string
 		var podcastJSON sql.NullString
@@ -373,7 +375,7 @@ func loadPodcasts(ctx context.Context, db *sql.DB) ([]PodcastItem, error) {
 		}
 		item.Missing = missing != 0
 		item.Invalid = invalid != 0
-		var cover Image
+		var cover catalog.Image
 		decodeJSON(coverJSON, &cover)
 		if cover.ID != "" || cover.URL != "" || cover.Path != "" {
 			item.Cover = &cover
@@ -382,7 +384,7 @@ func loadPodcasts(ctx context.Context, db *sql.DB) ([]PodcastItem, error) {
 		decodeJSON(genresJSON, &item.Genres)
 		decodeJSON(progressJSON, &item.Progress)
 		if podcastJSON.Valid && podcastJSON.String != "" {
-			var podcast PodcastMetadata
+			var podcast catalog.PodcastMetadata
 			decodeJSON(podcastJSON.String, &podcast)
 			item.Podcast = &podcast
 		}
@@ -395,16 +397,16 @@ func loadPodcasts(ctx context.Context, db *sql.DB) ([]PodcastItem, error) {
 	return items, rows.Err()
 }
 
-func loadContributors(ctx context.Context, db *sql.DB) ([]Contributor, error) {
+func loadContributors(ctx context.Context, db *sql.DB) ([]catalog.Contributor, error) {
 	rows, err := db.QueryContext(ctx, `SELECT id, name, sort_name, description, images_json, external_ids_json, item_count, series_count, duration_seconds FROM contributors`)
 	if err != nil {
 		return nil, fmt.Errorf("load contributors: %w", err)
 	}
 	defer rows.Close()
 
-	var items []Contributor
+	var items []catalog.Contributor
 	for rows.Next() {
-		var item Contributor
+		var item catalog.Contributor
 		var imagesJSON, externalJSON string
 		if err := rows.Scan(&item.ID, &item.Name, &item.SortName, &item.Description, &imagesJSON, &externalJSON, &item.AudiobookCount, &item.SeriesCount, &item.DurationSeconds); err != nil {
 			return nil, fmt.Errorf("scan contributor: %w", err)
@@ -416,16 +418,16 @@ func loadContributors(ctx context.Context, db *sql.DB) ([]Contributor, error) {
 	return items, rows.Err()
 }
 
-func loadSeries(ctx context.Context, db *sql.DB) ([]Series, error) {
+func loadSeries(ctx context.Context, db *sql.DB) ([]catalog.Series, error) {
 	rows, err := db.QueryContext(ctx, `SELECT id, name, description, authors_json, item_ids_json, item_count, duration_seconds, external_ids_json FROM series`)
 	if err != nil {
 		return nil, fmt.Errorf("load series: %w", err)
 	}
 	defer rows.Close()
 
-	var items []Series
+	var items []catalog.Series
 	for rows.Next() {
-		var item Series
+		var item catalog.Series
 		var authorsJSON, audiobookIDsJSON, externalJSON string
 		if err := rows.Scan(&item.ID, &item.Name, &item.Description, &authorsJSON, &audiobookIDsJSON, &item.AudiobookCount, &item.DurationSeconds, &externalJSON); err != nil {
 			return nil, fmt.Errorf("scan series: %w", err)
@@ -438,7 +440,7 @@ func loadSeries(ctx context.Context, db *sql.DB) ([]Series, error) {
 	return items, rows.Err()
 }
 
-func loadPodcastEpisodes(ctx context.Context, db *sql.DB) ([]PodcastEpisode, error) {
+func loadPodcastEpisodes(ctx context.Context, db *sql.DB) ([]catalog.PodcastEpisode, error) {
 	files, err := loadAudioFiles(ctx, db, "episode_id")
 	if err != nil {
 		return nil, err
@@ -458,9 +460,9 @@ func loadPodcastEpisodes(ctx context.Context, db *sql.DB) ([]PodcastEpisode, err
 	}
 	defer rows.Close()
 
-	var items []PodcastEpisode
+	var items []catalog.PodcastEpisode
 	for rows.Next() {
-		var item PodcastEpisode
+		var item catalog.PodcastEpisode
 		var publishedAt, addedAt, updatedAt sql.NullString
 		var explicit int
 		var progressJSON, externalJSON string
@@ -538,7 +540,7 @@ func loadTrackArtistRefs(ctx context.Context, db *sql.DB) (map[string]namedRefs,
 	return refs, rows.Err()
 }
 
-func loadAudioFiles(ctx context.Context, db *sql.DB, ownerColumn string) (map[string][]AudioFile, error) {
+func loadAudioFiles(ctx context.Context, db *sql.DB, ownerColumn string) (map[string][]catalog.AudioFile, error) {
 	rows, err := db.QueryContext(ctx, fmt.Sprintf(`
 		SELECT %s, id, path, relative_path, file_name, container, mime_type, codec, codec_profile, metadata_formats_json, bitrate,
 		       bit_depth, sample_rate, channels, channel_layout, duration_seconds, duration_ms, size_bytes, modified_at,
@@ -551,10 +553,10 @@ func loadAudioFiles(ctx context.Context, db *sql.DB, ownerColumn string) (map[st
 	}
 	defer rows.Close()
 
-	files := map[string][]AudioFile{}
+	files := map[string][]catalog.AudioFile{}
 	for rows.Next() {
 		var ownerID string
-		var item AudioFile
+		var item catalog.AudioFile
 		var modifiedAt sql.NullString
 		var durationMs sql.NullInt64
 		var metadataFormatsJSON, embeddedTagsJSON string
@@ -572,42 +574,16 @@ func loadAudioFiles(ctx context.Context, db *sql.DB, ownerColumn string) (map[st
 		decodeJSON(metadataFormatsJSON, &item.MetadataFormats)
 		decodeJSON(embeddedTagsJSON, &item.EmbeddedTags)
 		item.ModifiedAt = parseTimePtr(modifiedAt)
-		item = NormalizeAudioFile(item)
+		item = catalog.NormalizeAudioFile(item)
 		files[ownerID] = append(files[ownerID], item)
 	}
 	for ownerID := range files {
-		files[ownerID] = assignStreamOffsets(SortAudioFiles(files[ownerID]))
+		files[ownerID] = catalog.AssignStreamOffsets(catalog.SortAudioFiles(files[ownerID]))
 	}
 	return files, rows.Err()
 }
 
-// assignStreamOffsets stamps each file's StartOffsetSeconds with the running
-// book-global start position — the exact, millisecond-derived sum of every
-// earlier file's duration. This per-file manifest lets clients map book-time
-// <-> (file, file-time) without re-accumulating durations and drifting.
-// Single-file items keep offset 0; the slice must already be sorted.
-func assignStreamOffsets(files []AudioFile) []AudioFile {
-	if len(files) <= 1 {
-		return files
-	}
-	offset := 0.0
-	for i := range files {
-		files[i].StartOffsetSeconds = offset
-		offset += audioFileDurationSeconds(files[i])
-	}
-	return files
-}
-
-// audioFileDurationSeconds returns the file duration in fractional seconds,
-// preferring the exact millisecond field.
-func audioFileDurationSeconds(file AudioFile) float64 {
-	if file.DurationMs > 0 {
-		return float64(file.DurationMs) / 1000
-	}
-	return float64(file.DurationSeconds)
-}
-
-func loadAudiobookChapters(ctx context.Context, db *sql.DB) (map[string][]AudioChapter, error) {
+func loadAudiobookChapters(ctx context.Context, db *sql.DB) (map[string][]catalog.AudioChapter, error) {
 	rows, err := db.QueryContext(ctx, `
 		SELECT audiobook_id, id, chapter_index, title, start_seconds, end_seconds, start_ms, end_ms
 		FROM audiobook_chapters
@@ -620,7 +596,7 @@ func loadAudiobookChapters(ctx context.Context, db *sql.DB) (map[string][]AudioC
 	return scanChapterRows(rows)
 }
 
-func loadEpisodeChapters(ctx context.Context, db *sql.DB) (map[string][]AudioChapter, error) {
+func loadEpisodeChapters(ctx context.Context, db *sql.DB) (map[string][]catalog.AudioChapter, error) {
 	rows, err := db.QueryContext(ctx, `
 		SELECT episode_id, id, chapter_index, title, start_seconds, end_seconds, start_ms, end_ms
 		FROM episode_chapters
@@ -633,11 +609,11 @@ func loadEpisodeChapters(ctx context.Context, db *sql.DB) (map[string][]AudioCha
 	return scanChapterRows(rows)
 }
 
-func scanChapterRows(rows *sql.Rows) (map[string][]AudioChapter, error) {
-	chapters := map[string][]AudioChapter{}
+func scanChapterRows(rows *sql.Rows) (map[string][]catalog.AudioChapter, error) {
+	chapters := map[string][]catalog.AudioChapter{}
 	for rows.Next() {
 		var ownerID string
-		var item AudioChapter
+		var item catalog.AudioChapter
 		// start_seconds/end_seconds are the legacy whole-second columns; start_ms
 		// /end_ms carry the precise values. Prefer ms and fall back to seconds for
 		// rows written before migration 026.
@@ -661,7 +637,7 @@ func scanChapterRows(rows *sql.Rows) (map[string][]AudioChapter, error) {
 	return chapters, rows.Err()
 }
 
-func loadExtractedCoversBySource(ctx context.Context, db *sql.DB) (map[string]Image, error) {
+func loadExtractedCoversBySource(ctx context.Context, db *sql.DB) (map[string]catalog.Image, error) {
 	rows, err := db.QueryContext(ctx, `
 		SELECT id, source_path, path, mime_type
 		FROM extracted_covers`)
@@ -670,9 +646,9 @@ func loadExtractedCoversBySource(ctx context.Context, db *sql.DB) (map[string]Im
 	}
 	defer rows.Close()
 
-	covers := map[string]Image{}
+	covers := map[string]catalog.Image{}
 	for rows.Next() {
-		var image Image
+		var image catalog.Image
 		var sourcePath string
 		if err := rows.Scan(&image.ID, &sourcePath, &image.Path, &image.MimeType); err != nil {
 			return nil, fmt.Errorf("scan extracted cover: %w", err)
@@ -689,7 +665,7 @@ func loadExtractedCoversBySource(ctx context.Context, db *sql.DB) (map[string]Im
 	return covers, rows.Err()
 }
 
-func registerCoverPathKey(covers map[string]Image, key string, image Image) {
+func registerCoverPathKey(covers map[string]catalog.Image, key string, image catalog.Image) {
 	key = strings.TrimSpace(key)
 	if key == "" {
 		return

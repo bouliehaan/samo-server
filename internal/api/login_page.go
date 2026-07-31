@@ -1,8 +1,8 @@
 package api
 
 import (
+	"github.com/bouliehaan/samo-server/internal/log"
 	"html/template"
-	"log"
 	"net/http"
 )
 
@@ -21,7 +21,7 @@ func (s *Server) loginPage(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	if err := loginTemplate.Execute(w, nil); err != nil {
-		log.Printf("failed to render login page: %v", err)
+		log.Warnf("failed to render login page: %v", err)
 	}
 }
 

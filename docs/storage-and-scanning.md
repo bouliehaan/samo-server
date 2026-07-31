@@ -133,3 +133,23 @@ Use `SAMO_METADATA_PROVIDERS` to enable providers for future manual enrichment w
 ## Current Limits
 
 This is the first durable scanner/source layer. It does not yet remove database rows for files deleted from disk, extract embedded cover art, download covers, transcode audio, probe live internet radio metadata, or refresh podcast feeds on a background schedule. It is intentionally built so those pieces can be added behind the same catalog schema and API contracts.
+
+## Logging
+
+`SAMO_LOG_LEVEL` controls verbosity: `debug`, `info` (default), `warn`, or
+`error`. Unset or unrecognised values mean `info`, so a typo can never silence
+the log.
+
+- `debug` adds per-item detail — the file the scanner is indexing, ffprobe
+  fallbacks, ffmpeg subprocess stderr, and net/http's own connection errors.
+  Useful when diagnosing one bad file; far too loud for normal running on a
+  large library.
+- `info` is the default: startup, scans beginning and finishing, features
+  enabling or disabling.
+- `warn` is degraded-but-continuing — a provider that failed and will be
+  retried, a config that was ignored.
+- `error` is a failure that will not retry on its own. Recovered panics always
+  log at this level.
+
+The level is also reported in the startup banner and can be changed without a
+restart only by restarting with a new value; there is no runtime API for it.

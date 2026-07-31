@@ -6,11 +6,11 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"log"
 	"net/http"
 	"net/url"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/bouliehaan/samo-server/internal/artistimages"
@@ -23,6 +23,7 @@ import (
 	"github.com/bouliehaan/samo-server/internal/files"
 	"github.com/bouliehaan/samo-server/internal/lastfm"
 	"github.com/bouliehaan/samo-server/internal/libraries"
+	"github.com/bouliehaan/samo-server/internal/log"
 	"github.com/bouliehaan/samo-server/internal/metadata"
 	"github.com/bouliehaan/samo-server/internal/playback"
 	"github.com/bouliehaan/samo-server/internal/playlists"
@@ -30,6 +31,7 @@ import (
 	"github.com/bouliehaan/samo-server/internal/podcaststream"
 	"github.com/bouliehaan/samo-server/internal/radio"
 	"github.com/bouliehaan/samo-server/internal/search"
+	"github.com/bouliehaan/samo-server/internal/serverid"
 	"github.com/bouliehaan/samo-server/internal/sources"
 	"github.com/bouliehaan/samo-server/internal/users"
 )
@@ -62,6 +64,13 @@ type ServerOptions struct {
 	// post-create probe. Useful for tests that close DB/tempdirs immediately.
 	DisableInitialInternetRadioProbe bool
 	StartedAt                        time.Time
+
+	// BaseContext roots the fire-and-forget work handlers kick off — cache
+	// warms, explo passes, scrobble delivery. Those must outlive the request
+	// that started them but must NOT outlive the process, which is what
+	// context.Background() gave them: at shutdown they kept running against a
+	// database that was about to close. Pass the process lifetime context.
+	BaseContext context.Context
 }
 
 type Server struct {
@@ -90,8 +99,43 @@ type Server struct {
 	channels                         *channels.Service
 	reloadCatalog                    func(context.Context) error
 	disableInitialInternetRadioProbe bool
+	baseCtx                          context.Context
 	startedAt                        time.Time
 	loginLimiter                     *loginLimiter
+	healthProbe                      *healthProbe
+	serverIDMu                       sync.RWMutex
+	serverID                         string
+}
+
+// serverIdentity returns this server's stable ID, resolving it from the
+// database on first use and caching it for the process lifetime.
+//
+// The value is additive on every response that carries it, so a lookup failure
+// (a database not yet migrated during early boot) yields an empty string and
+// the field is omitted rather than failing the request. Only successes are
+// cached, so a later call retries.
+func (s *Server) serverIdentity(ctx context.Context) string {
+	s.serverIDMu.RLock()
+	cached := s.serverID
+	s.serverIDMu.RUnlock()
+	if cached != "" {
+		return cached
+	}
+
+	if s.db == nil {
+		return ""
+	}
+
+	id, err := serverid.Ensure(ctx, s.db)
+	if err != nil {
+		log.Warnf("server identity unavailable: %v", err)
+		return ""
+	}
+
+	s.serverIDMu.Lock()
+	s.serverID = id
+	s.serverIDMu.Unlock()
+	return id
 }
 
 func NewServer(options ServerOptions) http.Handler {
@@ -143,11 +187,16 @@ func NewServer(options ServerOptions) http.Handler {
 		channels:                         options.Channels,
 		reloadCatalog:                    options.ReloadCatalog,
 		disableInitialInternetRadioProbe: options.DisableInitialInternetRadioProbe,
+		baseCtx:                          options.BaseContext,
 		startedAt:                        options.StartedAt,
 		loginLimiter:                     newLoginLimiter(),
+		healthProbe:                      &healthProbe{},
 	}
 	if server.startedAt.IsZero() {
 		server.startedAt = time.Now()
+	}
+	if server.baseCtx == nil {
+		server.baseCtx = context.Background()
 	}
 	server.routes()
 	return WithSecurityHeaders(WithCORS(server))
@@ -199,6 +248,9 @@ func (s *Server) routes() {
 	s.handleAPI("GET /api/v1/users/me/tokens", s.listUserTokens)
 	s.handleAPI("POST /api/v1/users/me/tokens", s.createUserToken)
 	s.handleAPI("DELETE /api/v1/users/me/tokens/{id}", s.revokeUserToken)
+	s.handleAPI("GET /api/v1/users/me/subsonic", s.getSubsonicCredential)
+	s.handleAPI("POST /api/v1/users/me/subsonic", s.createSubsonicCredential)
+	s.handleAPI("DELETE /api/v1/users/me/subsonic", s.deleteSubsonicCredential)
 	s.handleAPI("GET /api/v1/users", s.listUsers)
 	s.handleAPI("POST /api/v1/users", s.createUser)
 
@@ -416,24 +468,15 @@ func (s *Server) routes() {
 	// header. Same pattern as /api/v1/music/tracks/{id}/stream.
 	s.mux.HandleFunc("GET /channels/{id}/playlist.m3u", s.requireUser(s.channelPlaylist))
 	s.mux.HandleFunc("GET /channels/{id}/stream", s.requireUser(s.channelStream))
+
+	// Subsonic compatibility surface. Mounted last and entirely additive: it
+	// carries its own auth (the protocol's own scheme) and reuses the native
+	// streaming and scrobble handlers, so nothing above changes.
+	s.registerSubsonic()
 }
 
 func (s *Server) handleAPI(pattern string, handler http.HandlerFunc) {
 	s.mux.HandleFunc(pattern, s.requireUser(handler))
-}
-
-type healthResponse struct {
-	OK        bool      `json:"ok"`
-	Service   string    `json:"service"`
-	Timestamp time.Time `json:"timestamp"`
-}
-
-func (s *Server) health(w http.ResponseWriter, r *http.Request) {
-	writeJSON(w, http.StatusOK, healthResponse{
-		OK:        true,
-		Service:   "samo-server",
-		Timestamp: time.Now().UTC(),
-	})
 }
 
 type stationResponse struct {
@@ -574,7 +617,7 @@ func (s *Server) stream(w http.ResponseWriter, r *http.Request) {
 
 	err := s.radio.Stream(r.Context(), stationID, time.Now().UTC(), w)
 	if err != nil && !errors.Is(err, context.Canceled) {
-		log.Printf("radio stream failed: %v", err)
+		log.Warnf("radio stream failed: %v", err)
 	}
 }
 
@@ -614,7 +657,7 @@ func writeJSON(w http.ResponseWriter, status int, value any) {
 	w.WriteHeader(status)
 
 	if err := json.NewEncoder(w).Encode(value); err != nil {
-		log.Printf("failed to write json response: %v", err)
+		log.Warnf("failed to write json response: %v", err)
 	}
 }
 

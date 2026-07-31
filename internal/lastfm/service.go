@@ -15,6 +15,7 @@ import (
 
 	"github.com/bouliehaan/samo-server/internal/catalog"
 	"github.com/bouliehaan/samo-server/internal/playback"
+	"github.com/bouliehaan/samo-server/internal/safego"
 )
 
 const (
@@ -301,7 +302,7 @@ func (s *Service) CompleteAuth(ctx context.Context, userID, token string) (AuthC
 	if err := resetQueueBackoff(ctx, s.db, userID); err != nil {
 		s.logger("last.fm queue backoff reset failed: %v", err)
 	}
-	go func() {
+	safego.Go("last.fm post-auth flush", func() {
 		flushCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 2*time.Minute)
 		defer cancel()
 		if flushed, err := s.FlushQueue(flushCtx, userID, 200); err != nil {
@@ -309,7 +310,7 @@ func (s *Service) CompleteAuth(ctx context.Context, userID, token string) (AuthC
 		} else if flushed > 0 {
 			s.logger("last.fm delivered %d submission(s) held while disconnected", flushed)
 		}
-	}()
+	})
 	return AuthCompleteResponse{
 		Username:    record.Username,
 		Connected:   true,

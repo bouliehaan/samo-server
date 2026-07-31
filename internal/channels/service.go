@@ -17,6 +17,11 @@ type ServiceOptions struct {
 	InternetStations InternetStationLookup
 	FFmpegPath       string
 	Logger           *log.Logger
+
+	// BaseContext roots every streamer's ffmpeg subprocess. Pass the process
+	// lifetime context so shutdown reaps them; see StreamerOptions.BaseContext
+	// for why leaving this unset leaks a transcoder per channel per restart.
+	BaseContext context.Context
 }
 
 // Service is the public entry point. It owns one ffmpeg streamer per
@@ -29,6 +34,7 @@ type Service struct {
 	internetStations InternetStationLookup
 	ffmpegPath       string
 	logger           *log.Logger
+	baseCtx          context.Context
 
 	mu        sync.Mutex
 	streamers map[string]*channelStreamer
@@ -39,6 +45,10 @@ func NewService(opts ServiceOptions) *Service {
 	if logger == nil {
 		logger = log.Default()
 	}
+	baseCtx := opts.BaseContext
+	if baseCtx == nil {
+		baseCtx = context.Background()
+	}
 	return &Service{
 		db:               opts.DB,
 		catalog:          opts.Catalog,
@@ -46,7 +56,29 @@ func NewService(opts ServiceOptions) *Service {
 		internetStations: opts.InternetStations,
 		ffmpegPath:       opts.FFmpegPath,
 		logger:           logger,
+		baseCtx:          baseCtx,
 		streamers:        map[string]*channelStreamer{},
+	}
+}
+
+// Close stops every running streamer and waits for their ffmpeg subprocesses
+// to be reaped. Call it during shutdown: Go does not kill child processes on
+// exit, so without this a restart leaves one orphaned transcoder per active
+// channel, still holding its input and still burning CPU.
+func (s *Service) Close(ctx context.Context) {
+	if s == nil {
+		return
+	}
+	s.mu.Lock()
+	streamers := make([]*channelStreamer, 0, len(s.streamers))
+	for id, streamer := range s.streamers {
+		streamers = append(streamers, streamer)
+		delete(s.streamers, id)
+	}
+	s.mu.Unlock()
+
+	for _, streamer := range streamers {
+		streamer.stopAndWait(ctx)
 	}
 }
 
@@ -232,7 +264,11 @@ func (s *Service) streamerFor(ctx context.Context, channelID string) (*channelSt
 	}
 	deps := s.schedDeps()
 	sched := NewScheduler(deps)
-	streamer := newChannelStreamer(channel, deps, sched, StreamerOptions{FFmpegPath: s.ffmpegPath, Logger: s.logger}, &serviceRecorder{db: s.db})
+	streamer := newChannelStreamer(channel, deps, sched, StreamerOptions{
+		FFmpegPath:  s.ffmpegPath,
+		Logger:      s.logger,
+		BaseContext: s.baseCtx,
+	}, &serviceRecorder{db: s.db, baseCtx: s.baseCtx})
 	s.streamers[channelID] = streamer
 	return streamer, nil
 }
@@ -271,22 +307,41 @@ func (s *Service) stopStreamer(channelID string) {
 
 // ----- recorder implementation ----------------------------------------
 
+// serviceRecorder writes the play log. Its writes are deliberately given their
+// own short deadline rather than the streamer's item context: the play log for
+// a track that just ended should still be written when that item was cancelled,
+// but it must not outlive the process.
 type serviceRecorder struct {
-	db *sql.DB
+	db      *sql.DB
+	baseCtx context.Context
+}
+
+const playLogWriteTimeout = 5 * time.Second
+
+func (r *serviceRecorder) writeCtx() (context.Context, context.CancelFunc) {
+	base := r.baseCtx
+	if base == nil {
+		base = context.Background()
+	}
+	return context.WithTimeout(base, playLogWriteTimeout)
 }
 
 func (r *serviceRecorder) OnPlayStart(channelID string, item PlaybackItem) (string, error) {
 	if r.db == nil {
 		return "", nil
 	}
-	return RecordPlayStart(context.Background(), r.db, channelID, item)
+	ctx, cancel := r.writeCtx()
+	defer cancel()
+	return RecordPlayStart(ctx, r.db, channelID, item)
 }
 
 func (r *serviceRecorder) OnPlayEnd(playLogID string) {
 	if r.db == nil || playLogID == "" {
 		return
 	}
-	_ = RecordPlayEnd(context.Background(), r.db, playLogID)
+	ctx, cancel := r.writeCtx()
+	defer cancel()
+	_ = RecordPlayEnd(ctx, r.db, playLogID)
 }
 
 func contentTypeFor(codec string) string {

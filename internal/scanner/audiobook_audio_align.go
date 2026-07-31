@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/bouliehaan/samo-server/internal/catalog"
+	"github.com/bouliehaan/samo-server/internal/catalogstore"
 	"github.com/bouliehaan/samo-server/internal/chapteraudio"
 )
 
@@ -64,7 +65,7 @@ func (s *Scanner) AnalyzeAudiobookChapters(ctx context.Context, audiobookID stri
 	if !s.AudioChapterAnalysisEnabled() {
 		return nil, nil, "", nil, fmt.Errorf("audio chapter analysis unavailable: no ffmpeg configured")
 	}
-	files, err := catalog.AudiobookAudioFiles(ctx, s.db, audiobookID)
+	files, err := catalogstore.AudiobookAudioFiles(ctx, s.db, audiobookID)
 	if err != nil {
 		return nil, nil, "", nil, err
 	}
@@ -137,7 +138,7 @@ func (s *Scanner) audiobookChapterLookup(ctx context.Context, audiobookID string
 		audiobookID).Scan(&bookJSON, &verifiedASIN)
 	var book catalog.BookMetadata
 	_ = json.Unmarshal([]byte(bookJSON), &book)
-	if enriched, err := catalog.OverlayAudiobookOverride(ctx, s.db, catalog.AudiobookItem{ID: audiobookID, Book: &book}); err == nil && enriched.Book != nil {
+	if enriched, err := catalogstore.OverlayAudiobookOverride(ctx, s.db, catalog.AudiobookItem{ID: audiobookID, Book: &book}); err == nil && enriched.Book != nil {
 		book = *enriched.Book
 	}
 
@@ -333,7 +334,7 @@ func (s *Scanner) RunChapterAnalysisPass(ctx context.Context, scope ChapterPassS
 		if err := ctx.Err(); err != nil {
 			return analyzed, applied, err
 		}
-		files, ferr := catalog.AudiobookAudioFiles(ctx, s.db, b.id)
+		files, ferr := catalogstore.AudiobookAudioFiles(ctx, s.db, b.id)
 		if ferr != nil {
 			log.Printf("scanner: audio chapters: load files for %q failed: %v", b.label(), ferr)
 			continue

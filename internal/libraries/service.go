@@ -7,7 +7,6 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
-	"log"
 	"os"
 	"path/filepath"
 	"strings"
@@ -15,6 +14,8 @@ import (
 	"time"
 
 	"github.com/bouliehaan/samo-server/internal/config"
+	"github.com/bouliehaan/samo-server/internal/log"
+	"github.com/bouliehaan/samo-server/internal/safego"
 	"github.com/bouliehaan/samo-server/internal/scanner"
 	"github.com/bouliehaan/samo-server/internal/storage"
 )
@@ -449,7 +450,9 @@ func (s *Service) executeScan(ctx context.Context, job ScanJob, scanLibraries []
 			cb := s.onScanComplete
 			jobCopy := job
 			statsCopy := lastStats
-			go cb(ctx, jobCopy, statsCopy)
+			safego.Go("scan complete callback", func() {
+				cb(ctx, jobCopy, statsCopy)
+			})
 		}
 	}()
 
@@ -510,7 +513,7 @@ func (s *Service) finishScanJob(ctx context.Context, job *ScanJob, stats scanner
 	if err := storage.Retry(persistCtx, 12, func() error {
 		return updateScanJob(persistCtx, s.db, *job)
 	}); err != nil {
-		log.Printf("libraries: persist scan job %q terminal state: %v", job.ID, err)
+		log.Infof("libraries: persist scan job %q terminal state: %v", job.ID, err)
 	}
 }
 

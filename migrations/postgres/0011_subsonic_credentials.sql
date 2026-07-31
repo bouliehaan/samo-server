@@ -1,0 +1,14 @@
+-- Subsonic client credentials.
+--
+-- The Subsonic protocol's default auth mode is token+salt: the client sends
+-- md5(password + salt), which the server can only verify if it can recover the
+-- plaintext password. Samo stores login passwords as bcrypt hashes and is not
+-- going to stop doing that, so Subsonic gets its own credential instead.
+--
+-- subsonic_password is a generated, revocable app password — NOT the user's
+-- login password. It is stored recoverably because the protocol requires it.
+-- The blast radius is deliberately bounded: it grants Subsonic read/stream
+-- access for that one user and nothing else, it can be rotated from the UI
+-- without touching the real password, and an empty value means Subsonic access
+-- is simply off for that user (the default).
+ALTER TABLE users ADD COLUMN IF NOT EXISTS subsonic_password TEXT NOT NULL DEFAULT '';
