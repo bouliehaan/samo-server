@@ -18,7 +18,7 @@ import "./login.css";
         const params = new URLSearchParams(window.location.search);
         const next = params.get("next");
         if (next && next.startsWith("/")) return next;
-      } catch (err) { /* ignore */ }
+      } catch { /* malformed ?next — fall through to the default */ }
       return "/app";
     }
     const destination = nextDestination();

@@ -7,6 +7,13 @@
 // cascade — as a separate shared chunk its order would not be guaranteed.
 import "./app.css";
 
+import { channelCard, channelNowPlayingBody, channelScheduleTimeline } from "./ui/channels.js";
+import { composerChannel, composerChannelSchedule, composerChannelSourceFile, composerChannelSourceInternet, composerChannelSourceLive, composerChannelSourcePodcast, composerClose, composerLibrary, composerMessage, composerPlaylist, composerPlaylistEdit, composerPlaylistImport, composerPodcastAttachFeed, composerPodcastFeed, composerRadioStation, fieldHTML, toggleComposer } from "./ui/composer.js";
+import { formatClock, formatDataSize, formatDate, formatDuration, formatUptime, minuteToHHMM, parseHHMM, weekdayMaskToLabel } from "./ui/format.js";
+import { attr, escapeHTML, progressBar, setMessage, setStatus, splitTags, tagsLine } from "./ui/html.js";
+import { audiobookSub, audiobookTitle, browseAlbums, browseResultCount, candidateFeedURL, isLibraryFolderPodcast, libraryKindLabel, musicPaginationFooter, nowPlayingLine, playlistCoverBlock, podcastHasLinkedFeed, podcastSub, podcastTitle, recentlyAddedKindLabel, scanPruneSummary } from "./ui/labels.js";
+import { globalScanActionsHTML, libraryKindScanActionsHTML, libraryScanActionsHTML, withButton } from "./ui/scan_actions.js";
+
 (function () {
   const tokenKey = "samo-token";
   const legacyLastFMPendingKey = "samo-lastfm-token";
@@ -43,15 +50,6 @@ import "./app.css";
 
   function isAdmin() {
     return currentUser && currentUser.role === "admin";
-  }
-
-  function isLibraryFolderPodcast(item) {
-    const path = String((item && item.path) || "");
-    return Boolean(path && !path.startsWith("samo://"));
-  }
-
-  function podcastHasLinkedFeed(item) {
-    return Boolean(item && item.rssFeed && item.rssFeed.id);
   }
 
   async function findPodcastLinkedFeed(podcastId) {
@@ -119,50 +117,12 @@ import "./app.css";
     return body;
   }
 
-  function escapeHTML(value) {
-    return String(value == null ? "" : value).replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", "\"": "&quot;" }[c]));
-  }
-
-  function attr(value) {
-    return escapeHTML(value).replace(/'/g, "&#39;");
-  }
-
-  function formatDuration(seconds) {
-    seconds = Math.max(0, Math.floor(seconds || 0));
-    const h = Math.floor(seconds / 3600);
-    const m = Math.floor((seconds % 3600) / 60);
-    const s = seconds % 60;
-    if (h > 0) return h + "H " + m + "M";
-    return m + ":" + String(s).padStart(2, "0");
-  }
-
-  function formatDate(value) {
-    if (!value) return "NEVER";
-    const date = new Date(value);
-    if (Number.isNaN(date.getTime())) return "UNKNOWN";
-    if (date.getFullYear() < 2000) return "NEVER";
-    return date.toLocaleString([], { year: "numeric", month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" }).toUpperCase();
-  }
-
-  function setStatus(text) {
-    const el = document.getElementById("barStatusText");
-    if (el) el.textContent = text;
-  }
-
   function renderLoading() {
     main.innerHTML = "<div class=\"boot-line\">// loading...</div>";
   }
 
   function renderError(message) {
     main.innerHTML = "<div class=\"empty-state\">// " + escapeHTML(message) + "</div>";
-  }
-
-  function setMessage(id, message, bad) {
-    const el = document.getElementById(id);
-    if (!el) return;
-    el.className = "status-line " + (bad ? "bad" : "good");
-    el.textContent = "// " + message;
-    el.hidden = false;
   }
 
   function statCard(label, value, accent) {
@@ -209,11 +169,6 @@ import "./app.css";
     let url = "/api/v1/music/playlists/" + encodeURIComponent(id) + "/cover" + streamQuery();
     if (bust) url += (url.includes("?") ? "&" : "?") + "_=" + bust;
     return url;
-  }
-
-  function musicPaginationFooter(loaded, total) {
-    if (!total || loaded >= total) return "";
-    return '<div class="section-row"><button class="btn ghost btn-small" data-action="music-load-more">LOAD MORE (' + loaded + " / " + total + ')</button></div>';
   }
 
   function audiobookStreamURL(id) {
@@ -263,98 +218,6 @@ import "./app.css";
     return base + (base.includes("?") ? "&" : "?") + "offsetSeconds=" + at;
   }
 
-  function libraryKindLabel(lib) {
-    if (!lib) return "UNKNOWN";
-    switch (lib.kind) {
-      case "mixed":     return "MIXED";
-      case "music":     return "MUSIC";
-      case "audiobook": return "AUDIOBOOKS";
-      case "podcast":   return "PODCASTS";
-    }
-    return String(lib.kind || "unknown").toUpperCase();
-  }
-
-  function librarySupportsRepair(lib) {
-    return lib && (lib.kind === "music" || lib.kind === "mixed");
-  }
-
-  function libraryScanActionsHTML(lib, btnClass) {
-    btnClass = btnClass || "btn ghost btn-mini";
-    if (!lib || !lib.id) return "";
-    let html =
-      '<button class="' + btnClass + '" data-action="scan-library" data-id="' + attr(lib.id) + '" title="Quick scan — new and changed files only">SCAN</button>' +
-      '<button class="' + btnClass + '" data-action="scan-library-full" data-id="' + attr(lib.id) + '" title="Full scan — re-probe every file in this library">FULL</button>';
-    if (librarySupportsRepair(lib)) {
-      html += '<button class="' + btnClass + '" data-action="repair-library" data-id="' + attr(lib.id) + '" title="Re-index metadata and covers (music only)">REPAIR</button>';
-    }
-    return html;
-  }
-
-  function globalScanActionsHTML(options) {
-    options = options || {};
-    const btnClass = options.btnClass || "btn ghost btn-small";
-    const primaryClass = options.primaryClass || "btn primary btn-small";
-    let html =
-      '<button class="' + btnClass + '" data-action="scan-quick-all" title="Quick rescan of every attached library — new and changed files only">SCAN ALL</button>' +
-      '<button class="' + primaryClass + '" data-action="scan-all" title="Full scan — re-probe every file in every library">FULL SCAN</button>' +
-      '<button class="' + btnClass + '" data-action="repair-all" title="Re-index music metadata and covers without re-reading every file">REPAIR INDEX</button>';
-    if (options.includeArtistPhotos !== false) {
-      html += '<button class="' + btnClass + '" data-action="fetch-artist-images" title="Download missing artist photos from Deezer into the local cover cache">FETCH ARTIST PHOTOS</button>';
-    }
-    return html;
-  }
-
-  function libraryKindScanActionsHTML(kind) {
-    const btnClass = "btn ghost btn-small";
-    const folder = kind === "audiobook" ? "Audiobooks" : "Podcasts";
-    return '<button class="' + btnClass + '" data-action="scan-library-kind" data-kind="' + attr(kind) + '" data-mode="quick" title="Quick scan of the ' + folder + ' folder — new/changed files only">SCAN</button>' +
-      '<button class="' + btnClass + '" data-action="scan-library-kind" data-kind="' + attr(kind) + '" data-mode="full" title="Full scan of the ' + folder + ' folder — re-probe every file">FULL</button>';
-  }
-
-  function audiobookTitle(item) {
-    if (!item) return "Untitled";
-    if (item.book && item.book.title) return item.book.title;
-    return item.title || "Untitled";
-  }
-
-  function audiobookSub(item) {
-    if (!item) return "";
-    if (item.book && item.book.authors && item.book.authors.length > 0) {
-      return item.book.authors.map((author) => author.name).join(", ");
-    }
-    return "AUDIOBOOK";
-  }
-
-  function podcastTitle(item) {
-    if (!item) return "Untitled";
-    if (item.podcast && item.podcast.title) return item.podcast.title;
-    return item.title || "Untitled";
-  }
-
-  function podcastSub(item) {
-    if (!item) return "";
-    if (item.podcast && item.podcast.author) return item.podcast.author;
-    return "PODCAST";
-  }
-
-  function progressBar(state, duration) {
-    const progress = state && state.progressSeconds ? state.progressSeconds : 0;
-    const pct = duration > 0 ? Math.min(100, Math.round((progress / duration) * 100)) : 0;
-    return '<div class="progress-track"><div class="bar" style="width:' + pct + '%"></div></div>';
-  }
-
-  function browseAlbums(data) {
-    if (!data) return [];
-    if (Array.isArray(data.items)) return data.items;
-    return data.albums || [];
-  }
-
-  function browseTracks(data) {
-    if (!data) return [];
-    if (Array.isArray(data.items)) return data.items;
-    return data.tracks || [];
-  }
-
   function musicSortQuery() {
     return "sort=" + encodeURIComponent(musicSort) + "&direction=" + encodeURIComponent(musicDirection);
   }
@@ -374,15 +237,6 @@ import "./app.css";
         '<button class="pill ' + (ascActive ? "active" : "") + '" data-action="music-direction" data-direction="asc">ASC</button>' +
       '</div>' +
     '</div>';
-  }
-
-  function tagsLine(tags) {
-    if (!tags || tags.length === 0) return "";
-    return '<div class="tag-line">' + tags.slice(0, 8).map((tag) => '<span class="meta-chip">' + escapeHTML(tag) + '</span>').join("") + '</div>';
-  }
-
-  function splitTags(raw) {
-    return String(raw || "").split(",").map((tag) => tag.trim()).filter(Boolean);
   }
 
   function asBool(raw) {
@@ -416,15 +270,6 @@ import "./app.css";
     (libs || []).forEach((lib) => {
       if (lib && lib.id) libraryNameById[lib.id] = lib.name || lib.id;
     });
-  }
-
-  function scanPruneSummary(job) {
-    if (!job) return "";
-    const parts = [];
-    if (job.filesMarked) parts.push(job.filesMarked + " missing files");
-    if (job.filesPruned) parts.push(job.filesPruned + " stale files");
-    if (job.itemsPruned) parts.push(job.itemsPruned + " orphan items");
-    return parts.length ? " · " + parts.join(" · ") : "";
   }
 
   function scanJobScopeLabel(job) {
@@ -583,16 +428,6 @@ import "./app.css";
     }
   }
 
-  function formatUptime(seconds) {
-    const s = Math.max(0, Number(seconds) || 0);
-    const days = Math.floor(s / 86400);
-    const hrs = Math.floor((s % 86400) / 3600);
-    const mins = Math.floor((s % 3600) / 60);
-    if (days > 0) return days + "d " + hrs + "h";
-    if (hrs > 0) return hrs + "h " + mins + "m";
-    return mins + "m";
-  }
-
   async function openActivityPanel() {
     if (!activityPanel || !activityBody) return;
     closeScanPanel();
@@ -695,7 +530,9 @@ import "./app.css";
       const items = (jobs && jobs.items) || [];
       const active = items.find((job) => job.status === "running" || job.status === "pending");
       if (active && active.id) watchScanJob(active.id);
-    } catch (_) {}
+    } catch {
+      // Best effort: no job list means nothing to resume watching.
+    }
   }
 
   function stopArtistImagePolling() {
@@ -738,7 +575,8 @@ import "./app.css";
         if (!job || (job.status !== "running" && job.status !== "pending")) {
           stopArtistImagePolling();
         }
-      } catch (_) {
+      } catch {
+        // Poll failed — stop rather than hammer a server that is not answering.
         stopArtistImagePolling();
       }
     };
@@ -751,7 +589,9 @@ import "./app.css";
       const data = await api("/api/v1/music/artists/images/backfill");
       const job = data && data.job;
       if (job && (job.status === "running" || job.status === "pending")) watchArtistImageBackfill();
-    } catch (_) {}
+    } catch {
+      // No backfill job to resume.
+    }
   }
 
   async function cancelActiveScan() {
@@ -865,17 +705,6 @@ import "./app.css";
     const body = await res.json().catch(() => ({}));
     if (!res.ok) throw new Error(body.error || ("upload failed: " + res.status));
     return body;
-  }
-
-  function playlistCoverBlock(id, coverURL, canEdit) {
-    const style = coverURL ? 'style="background-image:url(&quot;' + attr(coverURL) + '&quot;)"' : 'style="background-color:#0a0a0a"';
-    if (!canEdit) {
-      return '<div class="detail-cover" ' + style + '></div>';
-    }
-    return '<label class="detail-cover radio-cover-upload" ' + style + ' title="Upload custom artwork">' +
-      '<input type="file" class="radio-cover-input" accept="image/*" data-playlist-id="' + attr(id) + '">' +
-      '<span class="radio-cover-hint">UPLOAD</span>' +
-    '</label>';
   }
 
   function podcastCoverBlock(id, coverURL) {
@@ -1043,7 +872,8 @@ import "./app.css";
               body: { targetKind: kind, targetId: item.id, candidate: candidates[0], fields: [] },
             });
             applied++;
-          } catch (err) {
+          } catch {
+            // One item failing must not abort the batch; it is counted instead.
             failed++;
           }
         }
@@ -1058,23 +888,6 @@ import "./app.css";
     } catch (err) {
       updateRefreshUI("error", "METADATA", err.message || "scan failed");
     }
-  }
-
-  function candidateFeedURL(candidate) {
-    if (!candidate) return "";
-    for (const raw of (candidate.externalIds && candidate.externalIds.urls) || []) {
-      const trimmed = String(raw || "").trim();
-      if (!trimmed) continue;
-      const lower = trimmed.toLowerCase();
-      if (lower.endsWith(".xml") || lower.includes("/feed") || lower.includes("rss")) {
-        return trimmed;
-      }
-    }
-    for (const link of candidate.links || []) {
-      const label = String((link && link.label) || "").toLowerCase();
-      if (label.includes("rss") && link.url) return String(link.url).trim();
-    }
-    return "";
   }
 
   async function applyIdentifyCandidate(kind, id, candidate) {
@@ -1106,22 +919,6 @@ import "./app.css";
       }
     } catch (err) {
       identifyResults.innerHTML = '<div class="empty-state">// ' + escapeHTML(err.message || "apply failed") + '</div>';
-    }
-  }
-
-  async function withButton(button, busyText, fn) {
-    const oldText = button ? button.textContent : "";
-    if (button) {
-      button.disabled = true;
-      if (busyText) button.textContent = busyText;
-    }
-    try {
-      return await fn();
-    } finally {
-      if (button) {
-        button.disabled = false;
-        button.textContent = oldText;
-      }
     }
   }
 
@@ -1187,7 +984,9 @@ import "./app.css";
       if (state && !state.completed && state.progressSeconds != null) {
         resume = Math.max(resume, Math.floor(state.progressSeconds || 0));
       }
-    } catch (_) {}
+    } catch {
+      // No stored position — start from wherever the caller asked.
+    }
     playURL(podcastEpisodeStreamURLAt(id, resume), title || "Episode", subtitle || "Podcast", {
       kind: "podcast-episode",
       id: id,
@@ -1214,16 +1013,6 @@ import "./app.css";
     } catch (err) {
       setStatus("PLAYBACK · " + err.message);
     }
-  }
-
-  function formatClock(seconds) {
-    seconds = Math.max(0, Math.floor(seconds || 0));
-    const h = Math.floor(seconds / 3600);
-    const m = Math.floor((seconds % 3600) / 60);
-    const s = seconds % 60;
-    const mm = h > 0 ? String(m).padStart(2, "0") : String(m);
-    const ss = String(s).padStart(2, "0");
-    return h > 0 ? h + ":" + mm + ":" + ss : mm + ":" + ss;
   }
 
   function setPlayerGlyph(paused) {
@@ -1332,7 +1121,11 @@ import "./app.css";
     const releaseScrub = (event) => {
       if (!scrubbing) return;
       scrubbing = false;
-      try { playerSeek.releasePointerCapture(event.pointerId); } catch (_) {}
+      try {
+        playerSeek.releasePointerCapture(event.pointerId);
+      } catch {
+        // Capture was already released (pointercancel, or the element went away).
+      }
     };
     playerSeek.addEventListener("pointerup", releaseScrub);
     playerSeek.addEventListener("pointercancel", releaseScrub);
@@ -1494,15 +1287,6 @@ import "./app.css";
       '<div class="title">' + escapeHTML(album.title || album.name || "Untitled") + '</div>' +
       '<div class="sub">' + escapeHTML(album.displayArtist || album.artist || "Various") + '</div>' +
     '</a>';
-  }
-
-  function recentlyAddedKindLabel(kind) {
-    switch (kind) {
-      case "music-album": return "ALBUM";
-      case "audiobook": return "AUDIOBOOK";
-      case "podcast": return "PODCAST";
-      default: return "";
-    }
   }
 
   function recentlyAddedCard(entry) {
@@ -1717,14 +1501,6 @@ import "./app.css";
   function playlistDeletableByCurrentUser(playlist) {
     if (!playlist || playlist.system) return false;
     return playlistOwnedByCurrentUser(playlist) || isAdmin();
-  }
-
-  function browseResultCount(data) {
-    if (!data) return 0;
-    return ((data.albums && data.albums.length) || 0) +
-      ((data.tracks && data.tracks.length) || 0) +
-      ((data.artists && data.artists.length) || 0) +
-      ((data.playlists && data.playlists.length) || 0);
   }
 
   function musicMixedResults(data, label) {
@@ -2287,22 +2063,6 @@ import "./app.css";
     if (activeTab === "radio") scheduleRadioPoll();
   }
 
-  function channelCard(ch) {
-    const codec = (ch.codec || "mp3").toUpperCase() + " · " + (ch.bitrateKbps || 192) + "K";
-    return '<div class="channel-card">' +
-      '<div class="channel-card-meta">' +
-        '<div class="channel-eyebrow">// CHANNEL</div>' +
-        '<h3 class="name">' + escapeHTML(ch.name) + '</h3>' +
-        (ch.description ? '<p class="desc">' + escapeHTML(ch.description) + '</p>' : '') +
-        '<div class="channel-spec">' + codec + ' · ' + (ch.enabled ? 'ENABLED' : 'DISABLED') + '</div>' +
-      '</div>' +
-      '<div class="channel-actions">' +
-        '<button class="btn primary btn-small" data-action="channel-tune-in" data-id="' + attr(ch.id) + '" data-name="' + attr(ch.name) + '">TUNE IN</button>' +
-        '<button class="btn ghost btn-small" data-action="channel-open" data-id="' + attr(ch.id) + '">PROGRAM &rarr;</button>' +
-      '</div>' +
-    '</div>';
-  }
-
   async function renderChannelDetail(channelID, isRefresh) {
     const [ch, sources, schedule, now, recent, podcasts, internet] = await Promise.all([
       api("/api/v1/channels/" + encodeURIComponent(channelID)).catch(() => null),
@@ -2372,27 +2132,6 @@ import "./app.css";
     if (activeTab === "radio") scheduleRadioPoll();
   }
 
-  function channelNowPlayingBody(now) {
-    const listeners = (now && now.listenerCount) || 0;
-    const listenersChip = '<span class="channel-listeners">' + listeners + ' LISTENER' + (listeners === 1 ? '' : 'S') + '</span>';
-    if (!now || !now.current) {
-      return '<div class="channel-now-body"><div class="empty-state">// no listeners — tune in to start the stream</div>' +
-        '<div class="channel-now-stats">' + listenersChip + '</div></div>';
-    }
-    const cur = now.current;
-    const sub = cur.sourceLabel || cur.kind || "";
-    const startedAt = now.startedAt ? formatDate(now.startedAt) : "";
-    return '<div class="channel-now-body">' +
-      '<div class="channel-now-current">' +
-        '<div class="channel-eyebrow">' + (cur.live ? 'LIVE CUT-IN' : 'NOW') + '</div>' +
-        '<div class="name">' + escapeHTML(cur.title || 'Untitled') + '</div>' +
-        (cur.artist ? '<div class="sub">' + escapeHTML(cur.artist) + '</div>' : '') +
-        '<div class="sub mono">' + escapeHTML(sub) + (startedAt ? ' · STARTED ' + escapeHTML(startedAt) : '') + '</div>' +
-      '</div>' +
-      '<div class="channel-now-stats">' + listenersChip + '</div>' +
-    '</div>';
-  }
-
   function channelSourcesBody(items, podcasts, internetStations) {
     if (!items || items.length === 0) {
       return '<div class="empty-state">// no sources — add a file pool, podcast subscription, or internet station above</div>';
@@ -2431,59 +2170,6 @@ import "./app.css";
     }).join("") + '</div>';
   }
 
-  // channelScheduleTimeline renders a per-weekday 24-hour strip with
-  // colored bands for each scheduled rule. Same source → same color so
-  // patterns across days are immediately visible. The "now" indicator
-  // is a thin vertical line tracking current wall clock; idle slots
-  // show through as dim gridlines so the user sees where rotation
-  // takes over.
-  function channelScheduleTimeline(rules, sourceLookup) {
-    const weekdays = ["SUN", "MON", "TUE", "WED", "THU", "FRI", "SAT"];
-    const palette = ["#f59e0b", "#22d3ee", "#a78bfa", "#34d399", "#fb7185", "#fbbf24", "#60a5fa", "#f472b6"];
-    const sourceColorMap = {};
-    let palIdx = 0;
-    function colorFor(sourceID) {
-      if (!sourceID) return palette[0];
-      if (sourceColorMap[sourceID] != null) return sourceColorMap[sourceID];
-      sourceColorMap[sourceID] = palette[palIdx % palette.length];
-      palIdx++;
-      return sourceColorMap[sourceID];
-    }
-    const now = new Date();
-    const nowDay = now.getDay();
-    const nowMin = now.getHours() * 60 + now.getMinutes();
-    const nowPct = (nowMin / 1440) * 100;
-
-    let html = '<div class="sched-timeline">' +
-      '<div class="sched-hour-labels">';
-    for (let h = 0; h <= 24; h += 3) {
-      html += '<span style="left:' + ((h / 24) * 100) + '%">' + String(h).padStart(2, "0") + ':00</span>';
-    }
-    html += '</div>';
-
-    for (let day = 0; day < 7; day++) {
-      const dayRules = rules.filter((r) => r.enabled && (r.weekdayMask & (1 << day)));
-      html += '<div class="sched-row' + (day === nowDay ? ' today' : '') + '">' +
-        '<div class="sched-row-label">' + weekdays[day] + '</div>' +
-        '<div class="sched-row-track">';
-      dayRules.forEach((r) => {
-        const left = (r.startMinute / 1440) * 100;
-        const width = ((r.endMinute - r.startMinute) / 1440) * 100;
-        const src = sourceLookup[r.sourceId];
-        const color = colorFor(r.sourceId);
-        const label = r.label || (src ? src.label || src.kind : "rule");
-        const title = label + " · " + minuteToHHMM(r.startMinute) + "–" + minuteToHHMM(r.endMinute);
-        html += '<div class="sched-band" style="left:' + left + '%;width:' + width + '%;background:' + color + '" title="' + attr(title) + '">' + escapeHTML(label) + '</div>';
-      });
-      if (day === nowDay) {
-        html += '<div class="sched-now" style="left:' + nowPct + '%"></div>';
-      }
-      html += '</div></div>';
-    }
-    html += '</div>';
-    return html;
-  }
-
   function channelScheduleBody(rules, sourceLookup) {
     if (!rules || rules.length === 0) {
       return '<div class="empty-state">// no schedule rules — without rules the channel runs pure rotation</div>';
@@ -2517,192 +2203,8 @@ import "./app.css";
     )).join("") + '</div>';
   }
 
-  function weekdayMaskToLabel(mask) {
-    const names = ["SUN", "MON", "TUE", "WED", "THU", "FRI", "SAT"];
-    if (mask === 127) return "EVERY DAY";
-    if (mask === 62) return "WEEKDAYS"; // Mon-Fri
-    if (mask === 65) return "WEEKENDS"; // Sun+Sat
-    const out = [];
-    for (let i = 0; i < 7; i++) {
-      if (mask & (1 << i)) out.push(names[i]);
-    }
-    return out.join(", ");
-  }
-
-  function minuteToHHMM(min) {
-    const h = Math.floor(min / 60);
-    const m = min % 60;
-    return String(h).padStart(2, "0") + ":" + String(m).padStart(2, "0");
-  }
-
-  function parseHHMM(text) {
-    const trimmed = String(text || "").trim();
-    if (!trimmed) return -1;
-    const parts = trimmed.split(":");
-    if (parts.length !== 2) return -1;
-    const h = parseInt(parts[0], 10);
-    const m = parseInt(parts[1], 10);
-    if (Number.isNaN(h) || Number.isNaN(m) || h < 0 || h > 24 || m < 0 || m > 59) return -1;
-    return Math.min(1440, h * 60 + m);
-  }
-
-  function composerChannel() {
-    const body =
-      '<div class="composer-row">' +
-        fieldHTML("composerChannelName", "Name", "Jake's Radio", "text", "") +
-        fieldHTML("composerChannelDescription", "Description", "optional", "text", "") +
-      '</div>' +
-      '<div class="composer-row">' +
-        '<label class="field"><span class="field-label">Codec</span><select id="composerChannelCodec">' +
-          '<option value="mp3">MP3 (broad compatibility)</option>' +
-          '<option value="aac">AAC</option>' +
-          '<option value="opus">OPUS</option>' +
-        '</select></label>' +
-        fieldHTML("composerChannelBitrate", "Bitrate (kbps)", "192", "number", "192") +
-      '</div>' +
-      '<div class="composer-actions">' +
-        '<button class="btn primary" data-action="composer-submit" data-composer="channel">CREATE CHANNEL</button>' +
-        '<button class="btn ghost" data-action="composer-toggle" data-composer="channel">CANCEL</button>' +
-      '</div>';
-    return composerHTML("channel", "NEW PERSONAL CHANNEL", body,
-      "// pick a codec your clients support — MP3 is the safest default for browsers and most apps");
-  }
-
-  function composerChannelSourceFile(channelID) {
-    const body =
-      '<div class="composer-row">' +
-        fieldHTML("composerSrcFileLabel", "Label", "Commercials", "text", "") +
-        fieldHTML("composerSrcFileWeight", "Weight", "1", "number", "1") +
-      '</div>' +
-      '<div class="composer-row">' +
-        textAreaHTML("composerSrcFilePaths", "Paths (one per line — files, folders, or globs)", "/data/media/commercials\n/data/media/oldies/*.mp3", "", "full") +
-      '</div>' +
-      '<div class="composer-actions">' +
-        '<button class="btn primary" data-action="composer-submit" data-composer="channel-source-file" data-channel-id="' + attr(channelID) + '">ADD FILE POOL</button>' +
-        '<button class="btn ghost" data-action="composer-toggle" data-composer="channel-source-file">CANCEL</button>' +
-      '</div>';
-    return composerHTML("channel-source-file", "NEW FILE POOL SOURCE", body,
-      "// folders are scanned one level deep; globs use shell-style patterns. Paths must be readable by samo-server.");
-  }
-
-  function composerChannelSourcePodcast(channelID, podcasts) {
-    if (!podcasts || podcasts.length === 0) {
-      const body =
-        '<div class="empty-state" style="margin: 0">// add a podcast feed under PODCASTS first, then come back here to subscribe a channel to it</div>' +
-        '<div class="composer-actions">' +
-          '<button class="btn ghost" data-action="composer-toggle" data-composer="channel-source-podcast">CLOSE</button>' +
-        '</div>';
-      return composerHTML("channel-source-podcast", "NEW PODCAST SUBSCRIPTION SOURCE", body, "");
-    }
-    const options = podcasts.map((p) => {
-      const title = podcastTitle(p);
-      return '<option value="' + attr(p.id) + '">' + escapeHTML(title) + '</option>';
-    }).join("");
-    const body =
-      '<div class="composer-row">' +
-        '<label class="field"><span class="field-label">Podcast</span><select id="composerSrcPodID">' + options + '</select></label>' +
-        fieldHTML("composerSrcPodLabel", "Label (optional)", "leave blank to use show title", "text", "") +
-      '</div>' +
-      '<div class="composer-row">' +
-        fieldHTML("composerSrcPodMaxAge", "Max age (days)", "30", "number", "30") +
-        fieldHTML("composerSrcPodWeight", "Weight", "1", "number", "1") +
-      '</div>' +
-      '<div class="composer-actions">' +
-        '<button class="btn primary" data-action="composer-submit" data-composer="channel-source-podcast" data-channel-id="' + attr(channelID) + '">SUBSCRIBE</button>' +
-        '<button class="btn ghost" data-action="composer-toggle" data-composer="channel-source-podcast">CANCEL</button>' +
-      '</div>';
-    return composerHTML("channel-source-podcast", "NEW PODCAST SUBSCRIPTION SOURCE", body,
-      "// the channel will play the freshest unplayed episode of this show. Max-age skips episodes older than the cutoff.");
-  }
-
-  function composerChannelSourceInternet(channelID, stations) {
-    if (!stations || stations.length === 0) {
-      const body =
-        '<div class="empty-state" style="margin: 0">// add an internet radio station under RADIO → INTERNET first, then come back here</div>' +
-        '<div class="composer-actions">' +
-          '<button class="btn ghost" data-action="composer-toggle" data-composer="channel-source-internet">CLOSE</button>' +
-        '</div>';
-      return composerHTML("channel-source-internet", "NEW INTERNET STATION SOURCE", body, "");
-    }
-    const options = stations.map((st) => (
-      '<option value="' + attr(st.id) + '">' + escapeHTML(st.name) + '</option>'
-    )).join("");
-    const body =
-      '<div class="composer-row">' +
-        '<label class="field"><span class="field-label">Station</span><select id="composerSrcInetID">' + options + '</select></label>' +
-        fieldHTML("composerSrcInetLabel", "Label (optional)", "leave blank to use station name", "text", "") +
-      '</div>' +
-      '<div class="composer-row">' +
-        '<label class="field checkbox"><input id="composerSrcInetRotation" type="checkbox"><span>Eligible for rotation when no schedule rule is active</span></label>' +
-      '</div>' +
-      '<div class="composer-actions">' +
-        '<button class="btn primary" data-action="composer-submit" data-composer="channel-source-internet" data-channel-id="' + attr(channelID) + '">ATTACH STATION</button>' +
-        '<button class="btn ghost" data-action="composer-toggle" data-composer="channel-source-internet">CANCEL</button>' +
-      '</div>';
-    return composerHTML("channel-source-internet", "NEW INTERNET STATION SOURCE", body,
-      "// reuses an existing internet radio station. When the channel cuts to this source, ffmpeg proxies the station's stream URL live.");
-  }
-
-  function composerChannelSourceLive(channelID) {
-    const body =
-      '<div class="composer-row">' +
-        fieldHTML("composerSrcLiveLabel", "Label", "NPR Live", "text", "") +
-        fieldHTML("composerSrcLiveURL", "Stream URL", "https://example.com/live.mp3", "url", "") +
-      '</div>' +
-      '<div class="composer-row">' +
-        '<label class="field checkbox"><input id="composerSrcLiveRotation" type="checkbox"><span>Eligible for rotation when no schedule rule is active</span></label>' +
-      '</div>' +
-      '<div class="composer-actions">' +
-        '<button class="btn primary" data-action="composer-submit" data-composer="channel-source-live" data-channel-id="' + attr(channelID) + '">ATTACH LIVE STREAM</button>' +
-        '<button class="btn ghost" data-action="composer-toggle" data-composer="channel-source-live">CANCEL</button>' +
-      '</div>';
-    return composerHTML("channel-source-live", "NEW LIVE STREAM SOURCE", body,
-      "// schedule this source via a rule to cut in at specific times (e.g. NPR at 16:00–17:00). Leaving rotation off keeps it from playing outside its window.");
-  }
-
-  function composerChannelSchedule(channelID, sources) {
-    const sourceOptions = sources.map((s) => '<option value="' + attr(s.id) + '">' + escapeHTML(s.label || s.kind) + ' · ' + escapeHTML(s.kind) + '</option>').join("");
-    const body =
-      '<div class="composer-row">' +
-        fieldHTML("composerSchedLabel", "Label", "ATC Weekdays", "text", "") +
-        '<label class="field"><span class="field-label">Source</span><select id="composerSchedSource">' + sourceOptions + '</select></label>' +
-      '</div>' +
-      '<div class="composer-row">' +
-        fieldHTML("composerSchedStart", "Start (HH:MM)", "16:00", "text", "") +
-        fieldHTML("composerSchedEnd", "End (HH:MM)", "17:00", "text", "") +
-        fieldHTML("composerSchedPriority", "Priority", "200", "number", "200") +
-      '</div>' +
-      '<div class="composer-row">' +
-        '<label class="field"><span class="field-label">Days</span><select id="composerSchedDays">' +
-          '<option value="127">EVERY DAY</option>' +
-          '<option value="62">WEEKDAYS (MON–FRI)</option>' +
-          '<option value="65">WEEKENDS (SAT+SUN)</option>' +
-          '<option value="2">MONDAY</option>' +
-          '<option value="4">TUESDAY</option>' +
-          '<option value="8">WEDNESDAY</option>' +
-          '<option value="16">THURSDAY</option>' +
-          '<option value="32">FRIDAY</option>' +
-          '<option value="64">SATURDAY</option>' +
-          '<option value="1">SUNDAY</option>' +
-        '</select></label>' +
-      '</div>' +
-      '<div class="composer-actions">' +
-        '<button class="btn primary" data-action="composer-submit" data-composer="channel-schedule" data-channel-id="' + attr(channelID) + '">ADD RULE</button>' +
-        '<button class="btn ghost" data-action="composer-toggle" data-composer="channel-schedule">CANCEL</button>' +
-      '</div>';
-    return composerHTML("channel-schedule", "NEW SCHEDULE RULE", body,
-      "// when the rule's window is active it preempts rotation. Higher priority wins when multiple rules overlap. Cross-midnight windows? Add two rules.");
-  }
-
   function channelStreamURL(channelID) {
     return "/channels/" + encodeURIComponent(channelID) + "/stream" + streamQuery();
-  }
-
-  function nowPlayingLine(now, liveText, idleLabel) {
-    if (now && liveText) {
-      return '<div class="now-playing"><span class="dot"></span><span class="np-label">NOW</span><span class="np-text">' + escapeHTML(liveText) + '</span></div>';
-    }
-    return '<div class="now-playing idle"><span class="dot"></span><span class="np-label">' + escapeHTML(idleLabel) + '</span></div>';
   }
 
   function internetRadioAdminCard(station) {
@@ -2983,14 +2485,6 @@ import "./app.css";
     return html;
   }
 
-  function formatDataSize(bytes) {
-    bytes = Number(bytes) || 0;
-    if (bytes < 1024) return bytes + " B";
-    if (bytes < 1024 * 1024) return (bytes / 1024).toFixed(1) + " KB";
-    if (bytes < 1024 * 1024 * 1024) return (bytes / (1024 * 1024)).toFixed(1) + " MB";
-    return (bytes / (1024 * 1024 * 1024)).toFixed(2) + " GB";
-  }
-
   async function settingsPodcasts() {
     const [feedData, cacheData] = await Promise.all([
       api("/api/v1/podcasts/feeds?limit=80").catch(() => ({ items: [] })),
@@ -3231,198 +2725,6 @@ import "./app.css";
 
     html += '</div>';
     return html;
-  }
-
-  function fieldHTML(id, label, placeholder, type, value, cls) {
-    return '<label class="field ' + (cls || "") + '"><span class="field-label">' + escapeHTML(label) + '</span>' +
-      '<input id="' + attr(id) + '" type="' + attr(type || "text") + '" placeholder="' + attr(placeholder || "") + '" value="' + attr(value || "") + '">' +
-    '</label>';
-  }
-
-  function textAreaHTML(id, label, placeholder, value, cls) {
-    return '<label class="field ' + (cls || "") + '"><span class="field-label">' + escapeHTML(label) + '</span>' +
-      '<textarea id="' + attr(id) + '" rows="8" placeholder="' + attr(placeholder || "") + '">' + escapeHTML(value || "") + '</textarea>' +
-    '</label>';
-  }
-
-  /* ---- Inline composer helpers ----
-   * Add-flows live in the same view as the list they extend. composerHTML
-   * renders a hidden panel; toggleComposer(id) reveals/hides it. The button
-   * that triggers the composer carries data-composer="<id>" so the global
-   * click handler can wire it up generically. */
-  function composerHTML(id, head, body, hint) {
-    return '<div class="composer" id="composer-' + attr(id) + '" hidden>' +
-      '<div class="composer-head"><span>// ' + head + '</span>' +
-        '<button type="button" class="composer-close" data-action="composer-toggle" data-composer="' + attr(id) + '" aria-label="Close">×</button>' +
-      '</div>' +
-      body +
-      (hint ? '<div class="composer-hint">' + hint + '</div>' : "") +
-      '<div class="status-line" id="composer-' + attr(id) + '-message" hidden></div>' +
-    '</div>';
-  }
-
-  function toggleComposer(id) {
-    const el = document.getElementById("composer-" + id);
-    if (!el) return;
-    const opening = el.hidden;
-    el.hidden = !el.hidden;
-    if (opening) {
-      const first = el.querySelector("input, select, textarea");
-      if (first) first.focus();
-    }
-  }
-
-  function composerMessage(id, message, bad) {
-    setMessage("composer-" + id + "-message", message, bad);
-  }
-
-  function composerClose(id) {
-    const el = document.getElementById("composer-" + id);
-    if (el) el.hidden = true;
-  }
-
-  /* Composer markup factories. Each returns the HTML for a self-contained
-   * panel. The shared submit handler reads field values, posts to the API,
-   * then closes the composer and refreshes the view. */
-  function composerRadioStation() {
-    const body =
-      '<div class="composer-row">' +
-        fieldHTML("composerRadioName", "Name", "WFMU", "text", "") +
-        fieldHTML("composerRadioStream", "Stream URL", "https://example.com/live.mp3", "url", "") +
-      '</div>' +
-      '<div class="composer-row">' +
-        fieldHTML("composerRadioHomepage", "Homepage", "https://example.com", "url", "") +
-        '<label class="field"><span class="field-label">Cover image</span><input id="composerRadioCover" type="file" accept="image/*"></label>' +
-      '</div>' +
-      '<div class="composer-row">' +
-        '<label class="field"><span class="field-label">Tags</span>' +
-          '<input id="composerRadioTags" type="text" placeholder="jazz, late night" data-tags-target="composerRadioTagsPreview">' +
-          '<div class="tag-preview" id="composerRadioTagsPreview"><span class="tag-preview-empty">// chips appear as you type</span></div>' +
-        '</label>' +
-      '</div>' +
-      '<div class="composer-actions">' +
-        '<button class="btn primary" data-action="composer-submit" data-composer="radio-station">ATTACH STATION</button>' +
-        '<button class="btn ghost" data-action="composer-toggle" data-composer="radio-station">CANCEL</button>' +
-      '</div>';
-    return composerHTML("radio-station", "NEW INTERNET RADIO STATION", body,
-      "// stream URL is required · Samo will probe it for live metadata after attach");
-  }
-
-  function composerPodcastFeed() {
-    const body =
-      '<div class="composer-row">' +
-        fieldHTML("composerPodcastTitle", "Title", "optional", "text", "") +
-        fieldHTML("composerPodcastURL", "Feed URL", "https://example.com/feed.xml", "url", "") +
-      '</div>' +
-      '<div class="composer-row">' +
-        '<label class="field checkbox full"><input id="composerPodcastAutoDownload" type="checkbox"><span>Auto-download new episodes</span></label>' +
-      '</div>' +
-      '<div class="composer-actions">' +
-        '<button class="btn primary" data-action="composer-submit" data-composer="podcast-feed">ADD FEED</button>' +
-        '<button class="btn ghost" data-action="composer-toggle" data-composer="podcast-feed">CANCEL</button>' +
-      '</div>';
-    return composerHTML("podcast-feed", "NEW PODCAST FEED", body,
-      "// the title field is optional — Samo will read it from the RSS feed");
-  }
-
-  function composerPodcastAttachFeed(podcastID, suggestedURL) {
-    const body =
-      '<input type="hidden" id="composerPodcastAttachShowId" value="' + attr(podcastID || "") + '">' +
-      '<div class="composer-row">' +
-        fieldHTML("composerPodcastAttachURL", "RSS feed URL", "https://feeds.example.com/podcast.xml", "url", suggestedURL || "", "full") +
-      '</div>' +
-      '<div class="composer-row">' +
-        '<label class="field checkbox full"><input id="composerPodcastAttachAutoDownload" type="checkbox"><span>Auto-download new episodes</span></label>' +
-      '</div>' +
-      '<div class="composer-actions">' +
-        '<button class="btn primary" data-action="composer-submit" data-composer="podcast-attach-feed">LINK RSS FEED</button>' +
-        '<button class="btn ghost" data-action="composer-toggle" data-composer="podcast-attach-feed">CANCEL</button>' +
-      '</div>';
-    return composerHTML("podcast-attach-feed", "LINK RSS TO LIBRARY PODCAST", body,
-      "// keeps your downloaded files · matches RSS episodes to local files · fixes release dates from the feed");
-  }
-
-  function composerPlaylist() {
-    const body =
-      '<div class="composer-row">' +
-        fieldHTML("composerPlaylistName", "Name", "Road mix", "text", "") +
-        '<label class="field checkbox"><input id="composerPlaylistPublic" type="checkbox"><span>Public</span></label>' +
-      '</div>' +
-      '<div class="composer-row">' +
-        fieldHTML("composerPlaylistDescription", "Description", "optional", "text", "", "full") +
-      '</div>' +
-      '<div class="composer-actions">' +
-        '<button class="btn primary" data-action="composer-submit" data-composer="playlist">CREATE PLAYLIST</button>' +
-        '<button class="btn ghost" data-action="composer-toggle" data-composer="playlist">CANCEL</button>' +
-      '</div>';
-    return composerHTML("playlist", "NEW SERVER PLAYLIST", body,
-      "// create an empty playlist here, then import or patch track IDs through the API");
-  }
-
-  function composerPlaylistEdit(playlist) {
-    const body =
-      '<input type="hidden" id="composerPlaylistEditId" value="' + attr(playlist.id || "") + '">' +
-      '<div class="composer-row">' +
-        fieldHTML("composerPlaylistEditName", "Name", "Road mix", "text", playlist.name || "") +
-        '<label class="field checkbox"><input id="composerPlaylistEditPublic" type="checkbox"' + (playlist.public ? " checked" : "") + '><span>Public</span></label>' +
-      '</div>' +
-      '<div class="composer-row">' +
-        textAreaHTML("composerPlaylistEditDescription", "Description", "optional", playlist.description || "", "full") +
-      '</div>' +
-      '<div class="composer-actions">' +
-        '<button class="btn primary" data-action="composer-submit" data-composer="playlist-edit">SAVE PLAYLIST</button>' +
-        '<button class="btn ghost" data-action="composer-toggle" data-composer="playlist-edit">CANCEL</button>' +
-      '</div>';
-    return composerHTML("playlist-edit", "EDIT PLAYLIST", body,
-      "// rename, set description, and upload a cover from the artwork slot above");
-  }
-
-  function composerPlaylistImport() {
-    const body =
-      '<div class="composer-row">' +
-        fieldHTML("composerImportName", "Playlist Name", "Imported mix", "text", "") +
-        '<label class="field"><span class="field-label">Format</span><select id="composerImportSource">' +
-          '<option value="auto">Auto-detect</option>' +
-          '<option value="csv">CSV</option>' +
-          '<option value="m3u">M3U / M3U8</option>' +
-          '<option value="plain">Plain text</option>' +
-          '<option value="json">JSON</option>' +
-          '<option value="youtube">YouTube Music URL</option>' +
-        '</select></label>' +
-        '<label class="field checkbox"><input id="composerImportPublic" type="checkbox"><span>Public</span></label>' +
-      '</div>' +
-      '<div class="composer-row">' +
-        fieldHTML("composerImportURL", "URL", "https://music.youtube.com/playlist?list=...", "url", "", "full") +
-        textAreaHTML("composerImportContent", "Pasted Content", "CSV rows, #EXTM3U content, JSON, or plain Artist - Title lines", "", "full") +
-      '</div>' +
-      '<div class="composer-actions">' +
-        '<button class="btn primary" data-action="composer-submit" data-composer="playlist-import">IMPORT</button>' +
-        '<button class="btn ghost" data-action="composer-toggle" data-composer="playlist-import">CANCEL</button>' +
-      '</div>';
-    return composerHTML("playlist-import", "IMPORT PLAYLIST", body,
-      "// Samo matches imported metadata to your local music. It does not download remote tracks.");
-  }
-
-  function composerLibrary() {
-    const body =
-      '<div class="composer-row">' +
-        fieldHTML("composerLibPath", "Path", "/srv/media", "text", "", "full") +
-      '</div>' +
-      '<div class="composer-row">' +
-        '<label class="field"><span class="field-label">Kind</span><select id="composerLibKind">' +
-          '<option value="mixed">Mixed (auto-detect)</option>' +
-          '<option value="music">Music only</option>' +
-          '<option value="audiobook">Audiobooks</option>' +
-          '<option value="podcast">Podcasts</option>' +
-        '</select></label>' +
-        fieldHTML("composerLibName", "Name", "autodetect", "text", "") +
-      '</div>' +
-      '<div class="composer-actions">' +
-        '<button class="btn primary" data-action="composer-submit" data-composer="library">ATTACH LIBRARY</button>' +
-        '<button class="btn ghost" data-action="composer-toggle" data-composer="library">CANCEL</button>' +
-      '</div>';
-    return composerHTML("library", "ATTACH MEDIA FOLDER", body,
-      "// pick Mixed if you're not sure — Samo will classify subfolders for you");
   }
 
   async function composerSubmit(name) {
@@ -4432,7 +3734,7 @@ import "./app.css";
           const tab = document.getElementById("exploTab");
           if (tab) tab.hidden = false;
         }
-      } catch (err) { /* explo unavailable — tab stays hidden */ }
+      } catch { /* explo unavailable — tab stays hidden */ }
     } catch (err) {
       setStatus("ERROR · " + (err.message || "unknown"));
       return;

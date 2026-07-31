@@ -111,7 +111,6 @@ import "./setup.css";
     }
 
     /* ---------------- STEP 2 : libraries ---------------- */
-    let currentBrowsePath = "";
     let attachedLibraries = [];
     let attachedPodcastFeeds = [];
 
@@ -119,7 +118,7 @@ import "./setup.css";
       try {
         const data = await withToken("/api/v1/podcasts/feeds?limit=50", { method: "GET" });
         attachedPodcastFeeds = (data && data.items) || [];
-      } catch (err) {
+      } catch {
         attachedPodcastFeeds = [];
       }
       renderAttachedFeedList();
@@ -149,7 +148,6 @@ import "./setup.css";
     }
 
     async function loadDirectories(path) {
-      currentBrowsePath = path || "";
       const url = "/api/v1/setup/directories" + (path ? "?path=" + encodeURIComponent(path) : "");
       const data = await withToken(url, { method: "GET" });
       renderDirectoryListing(data);

@@ -35,8 +35,14 @@ bundle-chromaprint-all:
 # compile-time dependency, so a missing build directory is not a stale UI, it
 # is a build failure — and `go build ./...` has to keep working for anyone with
 # only Go installed. Run this after changing anything under web/src.
+# Lint runs before the bundle, and the rule that earns its keep is no-undef.
+# The UI was one 4,400-line IIFE where every function saw every other by
+# sharing a scope; split into modules, a call to something you forgot to import
+# is a reference to an undefined global. Rollup bundles that without complaint
+# and it throws the first time the code path runs — on a tab nobody clicked
+# during testing. no-undef turns that into a build failure.
 ui:
-	cd web && npm ci && npm run build
+	cd web && npm ci && npm run lint && npm run build
 
 # Fails if the committed bundle is not what web/src currently produces. The
 # risk with a committed build artifact is that it silently drifts from its
