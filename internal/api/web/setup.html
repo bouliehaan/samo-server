@@ -1,0 +1,42 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>samo server · setup</title>
+  <link rel="preload" as="font" type="font/otf" href="/assets/fonts/officecodepro-regular.otf" crossorigin>
+  <link rel="preload" as="font" type="font/otf" href="/assets/fonts/officecodepro-bold.otf" crossorigin>
+  <link rel="icon" type="image/png" href="/favicon-dark.png">
+  <link rel="icon" type="image/png" href="/favicon-light.png" media="(prefers-color-scheme: light)">
+  <link rel="icon" type="image/png" href="/favicon-dark.png" media="(prefers-color-scheme: dark)">
+  <style>__SAMO_BASE_CSS__</style>
+  <style>__SAMO_PAGE_CSS__</style>
+</head>
+<body>
+  <div class="grid-bg"></div>
+  <main class="page-main">
+    <header class="samo-head">
+      <div>
+        <div class="samo-wm head"><span class="word">samo</span><span class="word dim">server</span></div>
+        <div class="samo-status pulse" id="hostStatus"><span class="dot"></span><span class="status-text">SETUP · STEP 1 OF 3</span></div>
+      </div>
+      <div class="samo-ledger">
+        <div><span class="label">PROTOCOL</span><span class="value">SAMO-NATIVE V1</span></div>
+        <div><span class="label">SESSION</span><span class="value" id="hostSession">SIGNED OUT</span></div>
+      </div>
+    </header>
+
+    <section class="wizard">
+      <div class="step-meta" id="progress">
+        <span class="step-pill" data-step="admin">[ 01 / ACCOUNT ]</span>
+        <span class="step-pill" data-step="libraries">[ 02 / LIBRARIES ]</span>
+        <span class="step-pill" data-step="scan">[ 03 / SCAN ]</span>
+      </div>
+      <section class="card step-card" id="step-card">
+        <p class="lede">Loading setup state…</p>
+      </section>
+    </section>
+  </main>
+  <script>__SAMO_PAGE_JS__</script>
+</body>
+</html>

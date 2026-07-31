@@ -1,0 +1,45 @@
+
+    body {
+      display: grid;
+      align-items: center;
+    }
+    main.login-main {
+      display: grid;
+      grid-template-columns: 1fr 400px;
+      gap: 60px;
+      align-items: center;
+      width: 100%;
+      max-width: 1080px;
+      margin: 0 auto;
+    }
+    @media (max-width: 720px) {
+      main.login-main { grid-template-columns: 1fr; gap: 40px; padding: 32px 24px; }
+    }
+    .login-hero { display: grid; gap: 16px; }
+    .login-shell {
+      display: grid;
+      gap: 6px;
+    }
+    .login-shell h1 {
+      margin: 0 0 6px;
+      font-family: var(--mono);
+      font-size: 1.5rem;
+      font-weight: 700;
+      letter-spacing: 0.02em;
+    }
+    .login-shell p.lede {
+      margin: 0 0 24px;
+      color: var(--muted);
+      font-family: var(--mono);
+      line-height: 1.6;
+    }
+    .footer-note {
+      margin-top: 22px;
+      font-family: var(--mono);
+      font-size: 0.72rem;
+      letter-spacing: 0.06em;
+      color: var(--muted);
+      line-height: 1.6;
+    }
+    .footer-note a { color: var(--accent); }
+  
