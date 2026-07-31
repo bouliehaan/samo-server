@@ -7,6 +7,7 @@
 // cascade — as a separate shared chunk its order would not be guaranteed.
 import "./app.css";
 
+import { connect as connectEvents } from "./ui/events.js";
 import { channelCard, channelNowPlayingBody, channelScheduleTimeline } from "./ui/channels.js";
 import { composerChannel, composerChannelSchedule, composerChannelSourceFile, composerChannelSourceInternet, composerChannelSourceLive, composerChannelSourcePodcast, composerClose, composerLibrary, composerMessage, composerPlaylist, composerPlaylistEdit, composerPlaylistImport, composerPodcastAttachFeed, composerPodcastFeed, composerRadioStation, fieldHTML, toggleComposer } from "./ui/composer.js";
 import { formatClock, formatDataSize, formatDate, formatDuration, formatUptime, minuteToHHMM, parseHHMM, weekdayMaskToLabel } from "./ui/format.js";
@@ -257,9 +258,7 @@ import { globalScanActionsHTML, libraryKindScanActionsHTML, libraryScanActionsHT
   const scanPanelCurrent = document.getElementById("scanPanelCurrent");
   const scanPanelHistory = document.getElementById("scanPanelHistory");
   const scanCancelBtn = document.getElementById("scanCancelBtn");
-  let scanPollHandle = null;
   let scanWatchJobID = "";
-  let artistImagePollHandle = null;
   let scanLastFilesSeen = 0;
   let scanLastLabel = "SCAN";
   let scanLastText = "starting…";
@@ -462,10 +461,6 @@ import { globalScanActionsHTML, libraryKindScanActionsHTML, libraryScanActionsHT
     }
   }
 
-  function stopScanPolling() {
-    if (scanPollHandle) { clearInterval(scanPollHandle); scanPollHandle = null; }
-  }
-
   function applyScanJobStatus(job, jobID) {
     scanLastFilesSeen = job.filesSeen || 0;
     const total = job.filesTotal || 0;
@@ -484,7 +479,6 @@ import { globalScanActionsHTML, libraryKindScanActionsHTML, libraryScanActionsHT
     if (scanWatchJobID === jobID) {
       scanWatchJobID = "";
     }
-    stopScanPolling();
     if (job.status === "completed") {
       const parts = [scanLastFilesSeen + " files"];
       if (job.filesPruned) parts.push(job.filesPruned + " stale files");
@@ -501,27 +495,30 @@ import { globalScanActionsHTML, libraryKindScanActionsHTML, libraryScanActionsHT
     return true;
   }
 
+  // Watching a scan is now just remembering which job we care about: progress
+  // arrives on the event stream. The one fetch here covers the gap between the
+  // job existing and its first published snapshot.
   async function watchScanJob(jobID) {
     if (!jobID) return;
-    stopScanPolling();
     scanWatchJobID = jobID;
     scanLastFilesSeen = 0;
     updateRefreshUI("running", "SCAN", "starting...");
-    const tick = async () => {
-      if (scanWatchJobID !== jobID) return;
-      try {
-        const job = await api("/api/v1/scan/jobs/" + encodeURIComponent(jobID));
-        if (applyScanJobStatus(job, jobID) && activeTab && views[activeTab]) {
-          await views[activeTab]();
-        }
-      } catch (err) {
-        scanWatchJobID = "";
-        stopScanPolling();
-        updateRefreshUI("error", "FAILED", err.message || "polling failed");
-      }
-    };
-    tick();
-    scanPollHandle = setInterval(tick, 1500);
+    try {
+      await handleScanJobEvent(await api("/api/v1/scan/jobs/" + encodeURIComponent(jobID)));
+    } catch (err) {
+      scanWatchJobID = "";
+      updateRefreshUI("error", "FAILED", err.message || "could not read scan job");
+    }
+  }
+
+  // Applies one scan-job snapshot, from the stream or from the initial fetch.
+  // Snapshots for a job we are not watching are ignored — a second dashboard
+  // can start a scan we never asked about.
+  async function handleScanJobEvent(job) {
+    if (!job || !job.id || job.id !== scanWatchJobID) return;
+    if (applyScanJobStatus(job, job.id) && activeTab && views[activeTab]) {
+      await views[activeTab]();
+    }
   }
 
   async function resumeActiveScan() {
@@ -533,10 +530,6 @@ import { globalScanActionsHTML, libraryKindScanActionsHTML, libraryScanActionsHT
     } catch {
       // Best effort: no job list means nothing to resume watching.
     }
-  }
-
-  function stopArtistImagePolling() {
-    if (artistImagePollHandle) { clearInterval(artistImagePollHandle); artistImagePollHandle = null; }
   }
 
   function updateArtistImageJobPanel(job) {
@@ -565,23 +558,15 @@ import { globalScanActionsHTML, libraryKindScanActionsHTML, libraryScanActionsHT
     return html;
   }
 
+  // One fetch to render current state; everything after it arrives on the
+  // event stream.
   async function watchArtistImageBackfill() {
-    if (artistImagePollHandle) return;
-    const tick = async () => {
-      try {
-        const data = await api("/api/v1/music/artists/images/backfill");
-        const job = data && data.job;
-        updateArtistImageJobPanel(job);
-        if (!job || (job.status !== "running" && job.status !== "pending")) {
-          stopArtistImagePolling();
-        }
-      } catch {
-        // Poll failed — stop rather than hammer a server that is not answering.
-        stopArtistImagePolling();
-      }
-    };
-    await tick();
-    artistImagePollHandle = setInterval(tick, 2000);
+    try {
+      const data = await api("/api/v1/music/artists/images/backfill");
+      updateArtistImageJobPanel(data && data.job);
+    } catch {
+      // No job to show yet.
+    }
   }
 
   async function resumeArtistImageBackfill() {
@@ -618,8 +603,7 @@ import { globalScanActionsHTML, libraryKindScanActionsHTML, libraryScanActionsHT
         }
       } catch (err) {
         scanWatchJobID = "";
-        stopScanPolling();
-        updateRefreshUI("error", "FAILED", err.message || "polling failed");
+        updateRefreshUI("error", "FAILED", err.message || "could not read scan job");
         return;
       }
       await new Promise((resolve) => setTimeout(resolve, 200));
@@ -3321,7 +3305,6 @@ import { globalScanActionsHTML, libraryKindScanActionsHTML, libraryScanActionsHT
         event.preventDefault();
         if (!confirm("Cancel artist photo download? Images already downloaded stay in the library.")) return;
         await api("/api/v1/music/artists/images/backfill/cancel", { method: "POST" });
-        stopArtistImagePolling();
         updateArtistImageJobPanel(await api("/api/v1/music/artists/images/backfill").then((d) => d && d.job).catch(() => null));
       } else if (action === "scan-library") {
         event.preventDefault();
@@ -3713,6 +3696,28 @@ import { globalScanActionsHTML, libraryKindScanActionsHTML, libraryScanActionsHT
     window.location.href = "/login";
   });
 
+  // Live updates. Scan and backfill progress used to be polled every 1.5-2s
+  // per open tab for as long as a job ran; it is now pushed.
+  function startEventStream() {
+    connectEvents({
+      url: "/api/v1/events",
+      token: () => token,
+      onEvent: (event) => {
+        if (event.type === "scan-job") {
+          handleScanJobEvent(event.data);
+        } else if (event.type === "artist-images") {
+          updateArtistImageJobPanel(event.data && event.data.job);
+        }
+      },
+      onStatus: (state) => {
+        // Only downgrade the status line; "live" is the normal case and
+        // should not stomp on whatever the current view is reporting.
+        if (state === "down") setStatus("RECONNECTING…");
+        else if (state === "live" && currentUser) setStatus("ONLINE · CATALOG READY");
+      },
+    });
+  }
+
   /* -------- boot -------- */
   (async function boot() {
     try {
@@ -3723,6 +3728,7 @@ import { globalScanActionsHTML, libraryKindScanActionsHTML, libraryScanActionsHT
       // rendered later in the session keep working without flicker.
       setInterval(() => { refreshStreamToken().catch(() => {}); }, 20 * 60 * 1000);
       setStatus("ONLINE · CATALOG READY");
+      startEventStream();
       await resumeActiveScan();
       await resumeArtistImageBackfill();
       // Unhide the EXPLO tab when the feature is configured (even if

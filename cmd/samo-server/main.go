@@ -22,6 +22,7 @@ import (
 	"github.com/bouliehaan/samo-server/internal/config"
 	"github.com/bouliehaan/samo-server/internal/covers"
 	"github.com/bouliehaan/samo-server/internal/discovery"
+	"github.com/bouliehaan/samo-server/internal/events"
 	"github.com/bouliehaan/samo-server/internal/explo"
 	"github.com/bouliehaan/samo-server/internal/files"
 	"github.com/bouliehaan/samo-server/internal/lastfm"
@@ -502,6 +503,13 @@ func main() {
 		BaseContext: ctx,
 	})
 
+	// One hub, shared by the services that report progress and the SSE
+	// endpoint that fans it out. Wired here rather than inside NewServer so
+	// the publishers and the subscriber are demonstrably the same hub.
+	eventHub := events.NewHub()
+	libraryService.SetEventHub(eventHub)
+	artistImageService.SetEventHub(eventHub)
+
 	handler := api.NewServer(api.ServerOptions{
 		DB:            db,
 		APIToken:      cfg.APIToken,
@@ -522,6 +530,7 @@ func main() {
 		LastFM:        lastfmService,
 		Explo:         exploService,
 		ArtistImages:  artistImageService,
+		Events:        eventHub,
 		ArtistMeta:    artistMetaService,
 		Users:         userService,
 		Channels:      channelsService,

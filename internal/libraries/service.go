@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/bouliehaan/samo-server/internal/config"
+	"github.com/bouliehaan/samo-server/internal/events"
 	"github.com/bouliehaan/samo-server/internal/log"
 	"github.com/bouliehaan/samo-server/internal/safego"
 	"github.com/bouliehaan/samo-server/internal/scanner"
@@ -31,6 +32,31 @@ type Service struct {
 	activeCancel   context.CancelFunc
 	bgCtx          context.Context
 	onScanComplete ScanCompleteCallback
+	events         *events.Hub
+}
+
+// SetEventHub attaches the live-update fan-out. Optional: a nil hub is a
+// working no-op, so scans run identically with no dashboard connected.
+func (s *Service) SetEventHub(hub *events.Hub) {
+	s.events = hub
+}
+
+// publishScanJob broadcasts the job's current state to any connected
+// dashboard.
+//
+// It reads the row back rather than publishing a value the caller happens to
+// hold, so subscribers always see what was actually persisted — a snapshot
+// assembled in memory could disagree with the database after a failed write.
+// Best effort throughout: a scan must never fail because nobody was listening.
+func (s *Service) publishScanJob(ctx context.Context, jobID string) {
+	if s.events == nil || strings.TrimSpace(jobID) == "" {
+		return
+	}
+	job, err := s.GetScanJob(ctx, jobID)
+	if err != nil {
+		return
+	}
+	s.events.Publish(events.Event{Type: events.TypeScanJob, Data: job})
 }
 
 func New(db *sql.DB, scan *scanner.Scanner) *Service {
@@ -220,6 +246,7 @@ func (s *Service) CancelScan(ctx context.Context, jobID string) (ScanJob, error)
 		if err := updateScanJob(ctx, s.db, job); err != nil {
 			return ScanJob{}, err
 		}
+		s.publishScanJob(ctx, job.ID)
 		return job, nil
 	default:
 		return ScanJob{}, ErrScanNotCancellable
@@ -515,6 +542,9 @@ func (s *Service) finishScanJob(ctx context.Context, job *ScanJob, stats scanner
 	}); err != nil {
 		log.Infof("libraries: persist scan job %q terminal state: %v", job.ID, err)
 	}
+	// The terminal snapshot is the one the dashboard most needs: it is what
+	// flips the UI out of "scanning" and carries the final counts.
+	s.publishScanJob(persistCtx, job.ID)
 }
 
 func validateCreateInput(input CreateLibraryInput) (Library, error) {

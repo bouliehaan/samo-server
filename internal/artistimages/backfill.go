@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/bouliehaan/samo-server/internal/catalog"
+	"github.com/bouliehaan/samo-server/internal/events"
 	"github.com/bouliehaan/samo-server/internal/safego"
 )
 
@@ -176,8 +177,33 @@ func (s *Service) CancelBackfill() (BackfillJob, error) {
 }
 
 type backfillRunner struct {
-	job    BackfillJob
-	cancel context.CancelFunc
+	job         BackfillJob
+	cancel      context.CancelFunc
+	lastPublish time.Time
+}
+
+// backfillPublishInterval bounds how often progress reaches subscribers.
+const backfillPublishInterval = 750 * time.Millisecond
+
+// SetEventHub attaches the live-update fan-out. Optional: a nil hub is a
+// working no-op, so a backfill runs identically with no dashboard connected.
+func (s *Service) SetEventHub(hub *events.Hub) {
+	s.events = hub
+}
+
+// publishBackfill broadcasts a job snapshot. Best effort — a backfill must
+// never fail because nobody was listening.
+func (s *Service) publishBackfill(job BackfillJob) {
+	if s == nil || s.events == nil {
+		return
+	}
+	s.events.Publish(events.Event{Type: events.TypeArtistImages, Data: backfillJobPayload{Job: &job}})
+}
+
+// backfillJobPayload matches the shape GET /music/artists/images/backfill
+// returns, so the dashboard applies an event and a fetch through one path.
+type backfillJobPayload struct {
+	Job *BackfillJob `json:"job"`
 }
 
 func (s *Service) executeBackfill(ctx context.Context, artists []catalog.MusicArtist) {
@@ -212,7 +238,20 @@ func (s *Service) executeBackfill(ctx context.Context, artists []catalog.MusicAr
 		case backfillSkipped:
 			s.activeBackfill.job.Skipped++
 		}
+		snapshot := s.activeBackfill.job
+		due := time.Since(s.activeBackfill.lastPublish) >= backfillPublishInterval
+		if due {
+			s.activeBackfill.lastPublish = time.Now()
+		}
 		s.backfillMu.Unlock()
+
+		// Throttled: a cached-cover run can chew through hundreds of artists a
+		// second, and one event each would be far chattier than the 2s poll
+		// this replaced. The terminal snapshot in finishBackfill is never
+		// throttled, so the UI always lands on the true final state.
+		if due {
+			s.publishBackfill(snapshot)
+		}
 	}
 }
 
@@ -242,8 +281,8 @@ func (s *Service) backfillArtist(ctx context.Context, artist catalog.MusicArtist
 
 func (s *Service) finishBackfill(ctx context.Context, runErr error) {
 	s.backfillMu.Lock()
-	defer s.backfillMu.Unlock()
 	if s.activeBackfill == nil {
+		s.backfillMu.Unlock()
 		return
 	}
 	job := s.activeBackfill.job
@@ -263,6 +302,11 @@ func (s *Service) finishBackfill(ctx context.Context, runErr error) {
 	}
 	s.lastBackfill = &job
 	s.activeBackfill = nil
+	s.backfillMu.Unlock()
+
+	// Unthrottled and outside the lock: this is the snapshot that flips the UI
+	// out of "running", so it must never be the one that gets dropped.
+	s.publishBackfill(job)
 }
 
 func (s *Service) waitForBackfillTerminal(ctx context.Context, timeout time.Duration) (BackfillJob, error) {
