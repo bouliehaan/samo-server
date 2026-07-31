@@ -7,7 +7,7 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/bouliehaan/samo-server/internal/storage"
+	"github.com/bouliehaan/samo-server/internal/scannerstore"
 )
 
 type subprocessProgress struct {
@@ -67,13 +67,7 @@ func (p *subprocessProgress) persistSeen(total int) {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
 	defer cancel()
-	err := storage.Retry(ctx, 10, func() error {
-		_, err := p.db.ExecContext(ctx,
-			`UPDATE scan_jobs SET files_seen = ? WHERE id = ? AND status IN ('running', 'pending')`,
-			total, p.jobID)
-		return err
-	})
-	if err != nil {
+	if err := scannerstore.SetScanJobFilesSeen(ctx, p.db, p.jobID, total); err != nil {
 		log.Printf("scanner: subprocess scan job %q progress update failed: %v", p.jobID, err)
 	}
 }

@@ -2,7 +2,6 @@ package scanner
 
 import (
 	"context"
-	"database/sql"
 	"encoding/json"
 	"fmt"
 	"log"
@@ -52,60 +51,22 @@ func (s *Scanner) refreshMusicAlbumsForLibrary(ctx context.Context, libraryID st
 	if libraryID == "" {
 		return nil
 	}
-	rows, err := s.db.QueryContext(ctx, `
-		SELECT DISTINCT t.album_id
-		FROM music_tracks t
-		JOIN media_files mf ON mf.track_id = t.id
-		WHERE mf.library_id = ? AND t.album_id IS NOT NULL AND TRIM(t.album_id) != ''`,
-		libraryID)
+	albumIDs, err := s.store.AlbumIDsWithTracksInLibrary(ctx, libraryID)
 	if err != nil {
-		return fmt.Errorf("list albums for library refresh: %w", err)
+		return err
 	}
-	defer rows.Close()
-
 	ids := map[string]struct{}{}
-	for rows.Next() {
-		var id string
-		if err := rows.Scan(&id); err != nil {
-			return fmt.Errorf("scan album id for refresh: %w", err)
-		}
+	for _, id := range albumIDs {
 		if id = strings.TrimSpace(id); id != "" {
 			ids[id] = struct{}{}
 		}
 	}
-	if err := rows.Err(); err != nil {
-		return err
-	}
 	return s.refreshMusicAlbums(ctx, ids)
 }
 
-type albumRefreshTrack struct {
-	title         string
-	albumTitle    string
-	displayArtist string
-	imagesJSON    string
-}
-
 func (s *Scanner) refreshOneMusicAlbum(ctx context.Context, albumID string) error {
-	rows, err := s.db.QueryContext(ctx, `
-		SELECT title, album_title, display_artist, images_json
-		FROM music_tracks
-		WHERE album_id = ?
-		ORDER BY disc_number, track_number, title`, albumID)
+	tracks, err := s.store.AlbumRefreshTracks(ctx, albumID)
 	if err != nil {
-		return fmt.Errorf("load tracks for album refresh %q: %w", albumID, err)
-	}
-	defer rows.Close()
-
-	var tracks []albumRefreshTrack
-	for rows.Next() {
-		var row albumRefreshTrack
-		if err := rows.Scan(&row.title, &row.albumTitle, &row.displayArtist, &row.imagesJSON); err != nil {
-			return fmt.Errorf("scan track for album refresh: %w", err)
-		}
-		tracks = append(tracks, row)
-	}
-	if err := rows.Err(); err != nil {
 		return err
 	}
 	if len(tracks) == 0 {
@@ -114,17 +75,17 @@ func (s *Scanner) refreshOneMusicAlbum(ctx context.Context, albumID string) erro
 
 	titleCandidates := make([]string, 0, len(tracks))
 	for _, row := range tracks {
-		if v := strings.TrimSpace(row.albumTitle); v != "" {
+		if v := strings.TrimSpace(row.AlbumTitle); v != "" {
 			titleCandidates = append(titleCandidates, v)
 		}
 	}
-	title := majorityString(titleCandidates, strings.TrimSpace(tracks[0].albumTitle))
+	title := majorityString(titleCandidates, strings.TrimSpace(tracks[0].AlbumTitle))
 
-	displayArtist := strings.TrimSpace(albumDisplayArtistFromDB(ctx, s.db, albumID))
+	displayArtist := strings.TrimSpace(s.albumDisplayArtist(ctx, albumID))
 	if displayArtist == "" {
 		artistCandidates := make([]string, 0, len(tracks))
 		for _, row := range tracks {
-			if v := strings.TrimSpace(row.displayArtist); v != "" {
+			if v := strings.TrimSpace(row.DisplayArtist); v != "" {
 				artistCandidates = append(artistCandidates, v)
 			}
 		}
@@ -134,8 +95,8 @@ func (s *Scanner) refreshOneMusicAlbum(ctx context.Context, albumID string) erro
 	var coverImages []catalog.Image
 	for _, row := range tracks {
 		var images []catalog.Image
-		if row.imagesJSON != "" && row.imagesJSON != "[]" {
-			_ = json.Unmarshal([]byte(row.imagesJSON), &images)
+		if row.ImagesJSON != "" && row.ImagesJSON != "[]" {
+			_ = json.Unmarshal([]byte(row.ImagesJSON), &images)
 		}
 		if images = nonEmptyCatalogImages(images); len(images) > 0 {
 			coverImages = images
@@ -148,49 +109,15 @@ func (s *Scanner) refreshOneMusicAlbum(ctx context.Context, albumID string) erro
 		imagesJSON = jsonText(coverImages)
 	}
 
-	_, err = s.db.ExecContext(ctx, `
-		UPDATE music_albums
-		SET title = CASE WHEN ? != '' THEN ? ELSE title END,
-		    display_artist = CASE WHEN ? != '' THEN ? ELSE display_artist END,
-		    images_json = CASE
-		      WHEN ? NOT IN ('[]', 'null', '')
-		      THEN ?
-		      ELSE images_json
-		    END,
-		    updated_at = CURRENT_TIMESTAMP
-		WHERE id = ?`,
-		title, title,
-		displayArtist, displayArtist,
-		imagesJSON, imagesJSON,
-		albumID)
-	if err != nil {
-		return fmt.Errorf("refresh music album %q: %w", albumID, err)
-	}
-	return nil
+	return s.store.RefreshMusicAlbum(ctx, albumID, title, displayArtist, imagesJSON)
 }
 
-func albumDisplayArtistFromDB(ctx context.Context, db *sql.DB, albumID string) string {
-	rows, err := db.QueryContext(ctx, `
-		SELECT a.name
-		FROM music_album_artists aa
-		JOIN music_artists a ON a.id = aa.artist_id
-		WHERE aa.album_id = ?
-		ORDER BY aa.position`, albumID)
+// albumDisplayArtist renders the album's credited artists as one display
+// string. Credits, when present, outrank whatever the individual tracks claim.
+func (s *Scanner) albumDisplayArtist(ctx context.Context, albumID string) string {
+	names, err := s.store.AlbumArtistNames(ctx, albumID)
 	if err != nil {
 		return ""
-	}
-	defer rows.Close()
-
-	names := make([]string, 0, 4)
-	for rows.Next() {
-		var name string
-		if err := rows.Scan(&name); err != nil {
-			return strings.Join(names, ", ")
-		}
-		name = strings.TrimSpace(name)
-		if name != "" {
-			names = append(names, name)
-		}
 	}
 	return strings.Join(names, ", ")
 }

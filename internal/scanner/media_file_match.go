@@ -6,19 +6,13 @@ import (
 	"strings"
 
 	"github.com/bouliehaan/samo-server/internal/catalog"
+	"github.com/bouliehaan/samo-server/internal/scannerstore"
 )
 
-// indexedMediaFile is the subset of media_files columns used for move detection.
-type indexedMediaFile struct {
-	ID          string
-	LibraryID   string
-	Path        string
-	TrackID     string
-	TrackPID    string
-	ContentHash string
-	AlbumID     string
-	Missing     bool
-}
+// indexedMediaFile is the subset of media_files columns used for move
+// detection. It carried an AlbumID field that nothing ever read; the album a
+// file belongs to is part of its ContentHash, not a separate comparison.
+type indexedMediaFile = scannerstore.IndexedMediaFile
 
 // contentHashFromProbe builds a Navidrome-style metadata fingerprint used to
 // detect exact matches between a missing file and a newly scanned one.

@@ -19,22 +19,13 @@ type missingTrackGroup struct {
 // can pair them with newly indexed paths (Navidrome marks missing before phase 2).
 func (s *Scanner) markUnseenMediaFilesMissing(ctx context.Context, libraryID string, seenPaths map[string]struct{}) (int, error) {
 	seen := buildSeenPathSet(seenPaths)
-	rows, err := s.db.QueryContext(ctx, `
-		SELECT path FROM media_files WHERE library_id = ? AND missing = 0 AND track_id IS NOT NULL`,
-		libraryID)
+	paths, err := s.store.PresentTrackedPaths(ctx, libraryID)
 	if err != nil {
-		return 0, fmt.Errorf("list media files for missing mark: %w", err)
+		return 0, err
 	}
-	defer rows.Close()
 
 	var candidates []string
-	scanned := 0
-	for rows.Next() {
-		var path string
-		if err := rows.Scan(&path); err != nil {
-			return 0, err
-		}
-		scanned++
+	for scanned, path := range paths {
 		if pathSeen(seen, path) {
 			continue
 		}
@@ -45,9 +36,6 @@ func (s *Scanner) markUnseenMediaFilesMissing(ctx context.Context, libraryID str
 				s.onActivity(fmt.Sprintf("checking moved files… scanned %d", scanned))
 			}
 		}
-	}
-	if err := rows.Err(); err != nil {
-		return 0, err
 	}
 	if len(candidates) == 0 {
 		return 0, nil
@@ -68,7 +56,7 @@ func (s *Scanner) markUnseenMediaFilesMissing(ctx context.Context, libraryID str
 		if end > len(candidates) {
 			end = len(candidates)
 		}
-		n, err := s.markMediaFilesMissingBatch(ctx, libraryID, candidates[i:end])
+		n, err := s.store.MarkMediaFilesMissing(ctx, libraryID, candidates[i:end])
 		if err != nil {
 			return marked, err
 		}
@@ -81,32 +69,6 @@ func (s *Scanner) markUnseenMediaFilesMissing(ctx context.Context, libraryID str
 		log.Printf("scanner: marked %d missing media file(s) library=%q", marked, libraryID)
 	}
 	return marked, nil
-}
-
-func (s *Scanner) markMediaFilesMissingBatch(ctx context.Context, libraryID string, paths []string) (int, error) {
-	if len(paths) == 0 {
-		return 0, nil
-	}
-	placeholders := make([]string, len(paths))
-	args := make([]any, 0, len(paths)+1)
-	args = append(args, libraryID)
-	for i, path := range paths {
-		placeholders[i] = "?"
-		args = append(args, path)
-	}
-	query := fmt.Sprintf(`
-		UPDATE media_files
-		SET missing = 1,
-		    missing_detected_at = COALESCE(missing_detected_at, CURRENT_TIMESTAMP),
-		    updated_at = CURRENT_TIMESTAMP
-		WHERE library_id = ? AND missing = 0 AND path IN (%s)`,
-		strings.Join(placeholders, ","))
-	res, err := s.db.ExecContext(ctx, query, args...)
-	if err != nil {
-		return 0, fmt.Errorf("batch mark missing: %w", err)
-	}
-	n, _ := res.RowsAffected()
-	return int(n), nil
 }
 
 // runPhaseMissingTracks reconciles moved files using persistent track IDs,
@@ -151,27 +113,14 @@ func (s *Scanner) runPhaseMissingTracks(ctx context.Context, library Library, st
 }
 
 func (s *Scanner) loadMissingTrackGroups(ctx context.Context, libraryID string) ([]missingTrackGroup, error) {
-	rows, err := s.db.QueryContext(ctx, `
-		SELECT id, path, track_id, track_pid, content_hash, missing
-		FROM media_files
-		WHERE library_id = ? AND track_id IS NOT NULL AND TRIM(track_pid) != ''
-		ORDER BY track_pid, missing DESC, path`,
-		libraryID)
+	rows, err := s.store.TrackedFilesByPID(ctx, libraryID)
 	if err != nil {
-		return nil, fmt.Errorf("load media files for missing-track phase: %w", err)
+		return nil, err
 	}
-	defer rows.Close()
 
 	var groups []missingTrackGroup
 	var current *missingTrackGroup
-	for rows.Next() {
-		var row indexedMediaFile
-		var missing int
-		if err := rows.Scan(&row.ID, &row.Path, &row.TrackID, &row.TrackPID, &row.ContentHash, &missing); err != nil {
-			return nil, err
-		}
-		row.LibraryID = libraryID
-		row.Missing = missing != 0
+	for _, row := range rows {
 		if row.TrackPID == "" {
 			continue
 		}
@@ -190,7 +139,7 @@ func (s *Scanner) loadMissingTrackGroups(ctx context.Context, libraryID string) 
 	if current != nil && len(current.missing) > 0 && len(current.matched) > 0 {
 		groups = append(groups, *current)
 	}
-	return groups, rows.Err()
+	return groups, nil
 }
 
 func (s *Scanner) processMissingTrackGroup(ctx context.Context, group missingTrackGroup, state *scanState) (int, error) {
@@ -240,55 +189,30 @@ func (s *Scanner) moveMatchedTrack(ctx context.Context, libraryID string, target
 		return nil
 	}
 
-	var relPath, checksum, contentHash, embeddedTags string
-	var sizeBytes int64
-	var modifiedAt *string
-	err := s.db.QueryRowContext(ctx, `
-		SELECT relative_path, checksum, content_hash, embedded_tags_json, size_bytes, modified_at
-		FROM media_files WHERE id = ?`, target.ID).Scan(
-		&relPath, &checksum, &contentHash, &embeddedTags, &sizeBytes, &modifiedAt)
+	fields, err := s.store.MovedFileFieldsFor(ctx, target.ID)
 	if err != nil {
-		return fmt.Errorf("load matched file %q: %w", target.ID, err)
+		return err
 	}
 
-	deleteLibraryID := strings.TrimSpace(target.LibraryID)
-	if deleteLibraryID == "" {
-		deleteLibraryID = libraryID
-	}
-	newLibraryID := deleteLibraryID
-
-	// Delete the duplicate row at the new path before moving the canonical row,
-	// because media_files.path is UNIQUE (Navidrome deletes discarded, then updates).
-	_, err = s.db.ExecContext(ctx, `DELETE FROM media_files WHERE id = ? AND library_id = ?`, target.ID, deleteLibraryID)
-	if err != nil {
-		return fmt.Errorf("delete duplicate media file %q: %w", target.ID, err)
+	newLibraryID := strings.TrimSpace(target.LibraryID)
+	if newLibraryID == "" {
+		newLibraryID = libraryID
 	}
 
-	_, err = s.db.ExecContext(ctx, `
-		UPDATE media_files
-		SET library_id = ?,
-		    path = ?,
-		    relative_path = ?,
-		    file_name = ?,
-		    inode = ?,
-		    size_bytes = ?,
-		    modified_at = ?,
-		    checksum = ?,
-		    content_hash = ?,
-		    embedded_tags_json = ?,
-		    missing = 0,
-		    missing_detected_at = NULL,
-		    updated_at = CURRENT_TIMESTAMP
-		WHERE id = ?`,
-		newLibraryID, target.Path, relPath, filepath.Base(target.Path), fileInode(target.Path),
-		sizeBytes, modifiedAt, checksum, contentHash, embeddedTags, missing.ID)
-	if err != nil {
+	// Delete the duplicate row at the new path before moving the canonical row:
+	// media_files.path is UNIQUE, so the move would collide with the row phase 1
+	// created at the new location.
+	if err := s.store.DeleteMediaFileInLibrary(ctx, target.ID, newLibraryID); err != nil {
+		return err
+	}
+	if err := s.store.MoveMediaFile(ctx, missing.ID, newLibraryID, target.Path,
+		filepath.Base(target.Path), fileInode(target.Path), fields); err != nil {
 		return fmt.Errorf("move matched track %q -> %q: %w", missing.Path, target.Path, err)
 	}
 
 	if target.TrackID != "" && target.TrackID != missing.TrackID {
 		s.noteTrackIDMigration(target.TrackID, missing.TrackID)
-		_, _ = s.db.ExecContext(ctx, `DELETE FROM music_tracks WHERE id = ?`, target.TrackID)
+		s.store.DeleteMusicTrackIgnoringError(ctx, target.TrackID)
 	}
 	return nil
 }

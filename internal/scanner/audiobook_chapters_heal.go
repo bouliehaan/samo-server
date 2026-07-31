@@ -19,10 +19,8 @@ import (
 // honest provenance. No-op for books whose chapters never came from the audio
 // pass. Idempotent: after healing, provenance is no longer audio-*.
 func (s *Scanner) healAudioDerivedChapters(ctx context.Context, audiobookID string, files []catalog.AudioFile) error {
-	var source string
-	if err := s.db.QueryRowContext(ctx,
-		`SELECT COALESCE(chapter_source,'') FROM audiobooks WHERE id = ?`, audiobookID,
-	).Scan(&source); err != nil {
+	source, err := s.store.AudiobookChapterSource(ctx, audiobookID)
+	if err != nil {
 		return err
 	}
 	if source != chapterSourceAudioAligned && source != chapterSourceAudioDetected {
@@ -69,8 +67,7 @@ func (s *Scanner) fileTruthChapters(ctx context.Context, audiobookID string, fil
 		return chapters, chapterSourceEmbedded
 	}
 
-	var root string
-	_ = s.db.QueryRowContext(ctx, `SELECT COALESCE(path,'') FROM audiobooks WHERE id = ?`, audiobookID).Scan(&root)
+	root, _ := s.store.AudiobookPath(ctx, audiobookID)
 	if root == "" && len(files) > 0 {
 		root = filepath.Dir(files[0].Path)
 	}
