@@ -13,22 +13,6 @@ import (
 	"github.com/bouliehaan/samo-server/internal/storage"
 )
 
-// execWrite runs a catalog write with SQLITE_BUSY retry. Catalog upserts share
-// the pool with progress writes, the parallel music phase, and background
-// enrichment (artist images/meta); under that contention a single
-// "database is locked (5)" used to fail the whole scan mid-artist-upsert.
-// Retrying transient busy errors (same policy as the progress writer) keeps the
-// scan resilient instead of aborting.
-func (s *Scanner) execWrite(ctx context.Context, query string, args ...any) (sql.Result, error) {
-	var result sql.Result
-	err := storage.Retry(ctx, 8, func() error {
-		var execErr error
-		result, execErr = s.db.ExecContext(ctx, query, args...)
-		return execErr
-	})
-	return result, err
-}
-
 func (s *Scanner) upsertMusicArtist(ctx context.Context, artist catalog.MusicArtist) error {
 	if s.overrideIndex != nil {
 		var err error
@@ -339,105 +323,5 @@ func (s *Scanner) RefreshStats(ctx context.Context) error {
 }
 
 func (s *Scanner) refreshStats(ctx context.Context) error {
-	statements := []string{
-		`UPDATE music_albums
-		 SET track_count = (SELECT COUNT(*) FROM music_tracks WHERE album_id = music_albums.id),
-		     duration_seconds = COALESCE((SELECT SUM(duration_seconds) FROM music_tracks WHERE album_id = music_albums.id), 0),
-		     disc_count = COALESCE((SELECT MAX(disc_number) FROM music_tracks WHERE album_id = music_albums.id), 0)`,
-		`UPDATE music_artists
-		 SET track_count = COALESCE((SELECT COUNT(DISTINCT track_id) FROM music_track_artists WHERE artist_id = music_artists.id), 0),
-		     album_count = COALESCE((SELECT COUNT(DISTINCT album_id) FROM music_album_artists WHERE artist_id = music_artists.id), 0),
-		     duration_seconds = COALESCE((
-		       SELECT SUM(t.duration_seconds)
-		       FROM music_tracks t
-		       JOIN music_track_artists ta ON ta.track_id = t.id
-		       WHERE ta.artist_id = music_artists.id
-		     ), 0)`,
-		`UPDATE audiobooks
-		 SET duration_seconds = COALESCE((SELECT SUM(duration_seconds) FROM media_files WHERE audiobook_id = audiobooks.id), duration_seconds)`,
-		`UPDATE podcasts
-		 SET duration_seconds = COALESCE((SELECT SUM(duration_seconds) FROM media_files WHERE podcast_id = podcasts.id), duration_seconds)`,
-		`UPDATE contributors
-		 SET item_count = COALESCE((SELECT COUNT(DISTINCT audiobook_id) FROM audiobook_contributors WHERE contributor_id = contributors.id), 0),
-		     duration_seconds = COALESCE((
-		       SELECT SUM(a.duration_seconds)
-		       FROM audiobooks a
-		       JOIN audiobook_contributors ac ON ac.audiobook_id = a.id
-		       WHERE ac.contributor_id = contributors.id
-		     ), 0)`,
-		`UPDATE series
-		 SET item_count = COALESCE((SELECT COUNT(DISTINCT audiobook_id) FROM audiobook_series WHERE series_id = series.id), 0),
-		     duration_seconds = COALESCE((
-		       SELECT SUM(a.duration_seconds)
-		       FROM audiobooks a
-		       JOIN audiobook_series aas ON aas.audiobook_id = a.id
-		       WHERE aas.series_id = series.id
-		     ), 0)`,
-		// libraries.item_count surfaces on the home dashboard and the
-		// settings "attached libraries" panel. Count what a human would
-		// count for that kind:
-		//   - music:     distinct music_tracks
-		//   - audiobook: rows in audiobooks
-		//   - podcast:   rows in podcasts (the show, not episodes)
-		//   - mixed:     all three summed (any combination the scanner
-		//                discovered in this root)
-		// This statement runs every Scan, including partial-failure
-		// scans, so counts stay current even when one library throws.
-		`UPDATE libraries
-		 SET item_count = CASE
-		   WHEN kind = 'music' THEN COALESCE((
-		     SELECT COUNT(DISTINCT t.id)
-		     FROM music_tracks t
-		     JOIN media_files mf ON mf.track_id = t.id
-		     WHERE mf.library_id = libraries.id
-		   ), 0)
-		   WHEN kind = 'audiobook' THEN COALESCE((SELECT COUNT(*) FROM audiobooks WHERE library_id = libraries.id), 0)
-		   WHEN kind = 'podcast' THEN COALESCE((SELECT COUNT(*) FROM podcasts WHERE library_id = libraries.id), 0)
-		   WHEN kind = 'mixed' THEN COALESCE((
-		     SELECT COUNT(DISTINCT t.id)
-		     FROM music_tracks t
-		     JOIN media_files mf ON mf.track_id = t.id
-		     WHERE mf.library_id = libraries.id
-		   ), 0)
-		     + COALESCE((SELECT COUNT(*) FROM audiobooks WHERE library_id = libraries.id), 0)
-		     + COALESCE((SELECT COUNT(*) FROM podcasts WHERE library_id = libraries.id), 0)
-		   ELSE item_count
-		 END`,
-	}
-	for _, statement := range statements {
-		if _, err := s.execWrite(ctx, statement); err != nil {
-			return fmt.Errorf("refresh scanner stats: %w", err)
-		}
-	}
-	return nil
-}
-
-// durationMsValue returns the exact millisecond duration to persist, falling
-// back to whole seconds for files probed before ffprobe filled DurationMs.
-func durationMsValue(file catalog.AudioFile) int64 {
-	if file.DurationMs > 0 {
-		return file.DurationMs
-	}
-	return int64(file.DurationSeconds) * 1000
-}
-
-func boolInt(value bool) int {
-	if value {
-		return 1
-	}
-	return 0
-}
-
-func nullableString(value string) any {
-	if value == "" {
-		return nil
-	}
-	return value
-}
-
-func timeString(value *time.Time) any {
-	if value == nil {
-		return nil
-	}
-	return value.UTC().Format(time.RFC3339)
+	return s.store.RefreshAggregateStats(ctx)
 }
