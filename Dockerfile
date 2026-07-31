@@ -4,6 +4,27 @@
 # scanner and explo pipeline shell out to. Nothing else is needed at runtime —
 # the web UI and migrations are embedded in the binary.
 
+# ---- web stage -------------------------------------------------------------
+# Rebuilds the UI bundle from web/src rather than trusting the committed copy
+# in internal/api/web/build, so an image never ships a stale dashboard because
+# someone forgot to run `make ui`. Node is a build-time dependency only; it
+# does not reach the runtime image.
+FROM --platform=$BUILDPLATFORM node:22-bookworm-slim AS web
+# Mirror the repo layout: vite.config.js writes to ../internal/api/web/build,
+# so the output lands at /src/internal/api/web/build.
+WORKDIR /src/web
+
+COPY web/package.json web/package-lock.json ./
+RUN npm ci
+
+COPY web/ ./
+# vite.config.js points publicDir at internal/api so it can resolve the
+# /assets/fonts URLs in base.css. Nothing is copied out of it — the fonts are
+# embedded and served by Go — but it has to exist for the build to resolve.
+COPY internal/api/assets /src/internal/api/assets
+
+RUN npm run build
+
 # ---- build stage -----------------------------------------------------------
 FROM --platform=$BUILDPLATFORM golang:1.26-bookworm AS build
 ARG TARGETOS
@@ -15,6 +36,9 @@ COPY go.mod go.sum ./
 RUN go mod download
 
 COPY . .
+
+# Overwrite the committed bundle with the one just built from source.
+COPY --from=web /src/internal/api/web/build ./internal/api/web/build
 
 # Pure-Go dependencies (pgx) mean CGO can stay off, so the binary is fully
 # static and runs on the slim runtime image unchanged.

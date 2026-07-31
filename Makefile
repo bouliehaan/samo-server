@@ -1,4 +1,4 @@
-.PHONY: setup bundle bundle-linux bundle-chromaprint bundle-chromaprint-all build build-linux build-bundled test test-db install-dist clean release release-amd64 release-arm64
+.PHONY: setup bundle bundle-linux bundle-chromaprint bundle-chromaprint-all build build-linux build-bundled test test-db install-dist clean release release-amd64 release-arm64 ui ui-check
 
 BINARY ?= samo-server
 DIST_DIR ?= dist
@@ -29,6 +29,25 @@ bundle-chromaprint:
 
 bundle-chromaprint-all:
 	./scripts/bundle-chromaprint.sh --all
+
+# The web UI is built by Vite from web/src into internal/api/web/build, which
+# go:embed compiles into the binary. That output is COMMITTED: go:embed is a
+# compile-time dependency, so a missing build directory is not a stale UI, it
+# is a build failure — and `go build ./...` has to keep working for anyone with
+# only Go installed. Run this after changing anything under web/src.
+ui:
+	cd web && npm ci && npm run build
+
+# Fails if the committed bundle is not what web/src currently produces. The
+# risk with a committed build artifact is that it silently drifts from its
+# source; this is the check that catches it in CI.
+ui-check: ui
+	@if ! git diff --quiet -- internal/api/web/build; then \
+		echo "internal/api/web/build is stale — run 'make ui' and commit the result"; \
+		git --no-pager diff --stat -- internal/api/web/build; \
+		exit 1; \
+	fi
+	@echo "web bundle is up to date"
 
 build: bundle-linux
 	CGO_ENABLED=0 GOOS=$(GOOS) GOARCH=$(GOARCH) go build $(GOFLAGS) -ldflags "-s -w" -o $(DIST_DIR)/$(BINARY) ./cmd/samo-server

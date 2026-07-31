@@ -227,6 +227,7 @@ func (s *Server) routes() {
 	// Office Code Pro, embedded and served same-origin so the UI is fully
 	// styled with no CDN round-trip (see fonts.go). Public — the login and
 	// setup pages need the face before any token exists.
+	s.mux.Handle("GET /assets/build/", serveBuildAssets())
 	s.mux.HandleFunc("GET /assets/fonts/officecodepro-regular.otf", serveFont(officeCodeProRegular))
 	s.mux.HandleFunc("GET /assets/fonts/officecodepro-bold.otf", serveFont(officeCodeProBold))
 

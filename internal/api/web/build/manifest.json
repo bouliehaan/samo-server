@@ -1,0 +1,29 @@
+{
+  "src/app.js": {
+    "file": "app-D-EF9ygs.js",
+    "name": "app",
+    "src": "src/app.js",
+    "isEntry": true,
+    "css": [
+      "app-IJGVhhCd.css"
+    ]
+  },
+  "src/login.js": {
+    "file": "login-Be5H4Oc0.js",
+    "name": "login",
+    "src": "src/login.js",
+    "isEntry": true,
+    "css": [
+      "login-DC2c7iY9.css"
+    ]
+  },
+  "src/setup.js": {
+    "file": "setup-CEjR3d98.js",
+    "name": "setup",
+    "src": "src/setup.js",
+    "isEntry": true,
+    "css": [
+      "setup-ugJ78rMc.css"
+    ]
+  }
+}
