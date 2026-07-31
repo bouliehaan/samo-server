@@ -3,7 +3,6 @@ package scanner
 import (
 	"context"
 	"encoding/json"
-	"fmt"
 	"log"
 	"strings"
 )
@@ -51,22 +50,14 @@ func (s *Scanner) resolveMigratedTrackID(trackID string) string {
 // reconcilePlaylistTrackReferences rewrites playlist track_ids_json after a
 // scan so rows still point at valid music_tracks. Does not delete playlists.
 func (s *Scanner) reconcilePlaylistTrackReferences(ctx context.Context) (int, error) {
-	rows, err := s.db.QueryContext(ctx, `
-		SELECT id, track_ids_json, track_count
-		FROM music_playlists`)
+	playlists, err := s.store.PlaylistTrackReferences(ctx)
 	if err != nil {
-		return 0, fmt.Errorf("list playlists for track remap: %w", err)
+		return 0, err
 	}
-	defer rows.Close()
 
 	updated := 0
-	for rows.Next() {
-		var playlistID, trackIDsJSON string
-		var trackCount int
-		if err := rows.Scan(&playlistID, &trackIDsJSON, &trackCount); err != nil {
-			return updated, err
-		}
-		ids := decodeTrackIDList(trackIDsJSON)
+	for _, playlist := range playlists {
+		ids := decodeTrackIDList(playlist.TrackIDsJSON)
 		if len(ids) == 0 {
 			continue
 		}
@@ -74,19 +65,10 @@ func (s *Scanner) reconcilePlaylistTrackReferences(ctx context.Context) (int, er
 		if !changed {
 			continue
 		}
-		if _, err := s.db.ExecContext(ctx, `
-			UPDATE music_playlists
-			SET track_ids_json = ?,
-			    track_count = ?,
-			    updated_at = CURRENT_TIMESTAMP
-			WHERE id = ?`,
-			jsonText(remapped), len(remapped), playlistID); err != nil {
-			return updated, fmt.Errorf("update playlist %q track ids: %w", playlistID, err)
+		if err := s.store.SetPlaylistTrackIDs(ctx, playlist.ID, remapped); err != nil {
+			return updated, err
 		}
 		updated++
-	}
-	if err := rows.Err(); err != nil {
-		return updated, err
 	}
 	if updated > 0 {
 		log.Printf("scanner: remapped track ids on %d playlist(s)", updated)

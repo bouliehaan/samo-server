@@ -2,9 +2,7 @@ package scanner
 
 import (
 	"context"
-	"database/sql"
 	"encoding/json"
-	"fmt"
 	"log"
 	"path/filepath"
 )
@@ -15,23 +13,14 @@ func (s *Scanner) runPhaseCrossLibraryMoves(ctx context.Context, libraries []Lib
 	if len(libraries) <= 1 {
 		return nil
 	}
-	rows, err := s.db.QueryContext(ctx, `
-		SELECT id, library_id, path, track_id, track_pid, content_hash
-		FROM media_files
-		WHERE missing = 1 AND track_id IS NOT NULL AND TRIM(track_pid) != ''`)
+	missingFiles, err := s.store.MissingTrackedFiles(ctx)
 	if err != nil {
-		return fmt.Errorf("list cross-library missing tracks: %w", err)
+		return err
 	}
-	defer rows.Close()
 
 	matched := 0
 	state := &scanState{}
-	for rows.Next() {
-		var missing indexedMediaFile
-		if err := rows.Scan(&missing.ID, &missing.LibraryID, &missing.Path, &missing.TrackID, &missing.TrackPID, &missing.ContentHash); err != nil {
-			return err
-		}
-		missing.Missing = true
+	for _, missing := range missingFiles {
 		found, err := s.findCrossLibraryMatch(ctx, missing)
 		if err != nil {
 			log.Printf("scanner: cross-library match for %q: %v", missing.Path, err)
@@ -50,11 +39,11 @@ func (s *Scanner) runPhaseCrossLibraryMoves(ctx context.Context, libraries []Lib
 	if matched > 0 {
 		log.Printf("scanner: cross-library reconciled %d moved track(s)", matched)
 	}
-	return rows.Err()
+	return nil
 }
 
 func (s *Scanner) findCrossLibraryMatch(ctx context.Context, missing indexedMediaFile) (indexedMediaFile, error) {
-	if mb := musicBrainzTrackIDFromRow(ctx, s.db, missing.ID); mb != "" {
+	if mb := s.musicBrainzTrackID(ctx, missing.ID); mb != "" {
 		match, ok, err := s.findRecentByMBZTrackID(ctx, missing, mb)
 		if err != nil {
 			return indexedMediaFile{}, err
@@ -75,9 +64,9 @@ func (s *Scanner) findCrossLibraryMatch(ctx context.Context, missing indexedMedi
 	return s.findRecentByFileName(ctx, missing)
 }
 
-func musicBrainzTrackIDFromRow(ctx context.Context, db *sql.DB, fileID string) string {
-	var tagsJSON string
-	if err := db.QueryRowContext(ctx, `SELECT embedded_tags_json FROM media_files WHERE id = ?`, fileID).Scan(&tagsJSON); err != nil {
+func (s *Scanner) musicBrainzTrackID(ctx context.Context, fileID string) string {
+	tagsJSON, err := s.store.EmbeddedTagsJSON(ctx, fileID)
+	if err != nil {
 		return ""
 	}
 	var flat map[string]string
@@ -89,34 +78,19 @@ func musicBrainzTrackIDFromRow(ctx context.Context, db *sql.DB, fileID string) s
 }
 
 func (s *Scanner) findRecentByMBZTrackID(ctx context.Context, missing indexedMediaFile, mbzID string) (indexedMediaFile, bool, error) {
-	rows, err := s.db.QueryContext(ctx, `
-		SELECT id, library_id, path, track_id, track_pid, content_hash
-		FROM media_files
-		WHERE missing = 0 AND library_id != ? AND (
-			json_extract(embedded_tags_json, '$.musicbrainz_trackid') = ? OR
-			json_extract(embedded_tags_json, '$.musicbrainz_recordingid') = ?
-		)
-		ORDER BY updated_at DESC LIMIT 8`,
-		missing.LibraryID, mbzID, mbzID)
+	candidates, err := s.store.RecentByMusicBrainzID(ctx, missing.LibraryID, mbzID)
 	if err != nil {
 		return indexedMediaFile{}, false, err
 	}
-	defer rows.Close()
-	return firstMatchingRow(rows, missing)
+	return bestCandidate(candidates, missing)
 }
 
 func (s *Scanner) findRecentByContentHash(ctx context.Context, missing indexedMediaFile) (indexedMediaFile, bool, error) {
-	rows, err := s.db.QueryContext(ctx, `
-		SELECT id, library_id, path, track_id, track_pid, content_hash
-		FROM media_files
-		WHERE missing = 0 AND library_id != ? AND content_hash = ?
-		ORDER BY updated_at DESC LIMIT 8`,
-		missing.LibraryID, missing.ContentHash)
+	candidates, err := s.store.RecentByContentHash(ctx, missing.LibraryID, missing.ContentHash)
 	if err != nil {
 		return indexedMediaFile{}, false, err
 	}
-	defer rows.Close()
-	return firstMatchingRow(rows, missing)
+	return bestCandidate(candidates, missing)
 }
 
 func (s *Scanner) findRecentByFileName(ctx context.Context, missing indexedMediaFile) (indexedMediaFile, error) {
@@ -124,35 +98,23 @@ func (s *Scanner) findRecentByFileName(ctx context.Context, missing indexedMedia
 	if base == "" {
 		return indexedMediaFile{}, nil
 	}
-	rows, err := s.db.QueryContext(ctx, `
-		SELECT id, library_id, path, track_id, track_pid, content_hash
-		FROM media_files
-		WHERE missing = 0 AND library_id != ? AND file_name = ?
-		ORDER BY updated_at DESC LIMIT 8`,
-		missing.LibraryID, base)
+	candidates, err := s.store.RecentByFileName(ctx, missing.LibraryID, base)
 	if err != nil {
 		return indexedMediaFile{}, err
 	}
-	defer rows.Close()
-	match, ok, err := firstMatchingRow(rows, missing)
+	match, ok, err := bestCandidate(candidates, missing)
 	if err != nil || !ok {
 		return indexedMediaFile{}, err
 	}
 	return match, nil
 }
 
-func firstMatchingRow(rows *sql.Rows, missing indexedMediaFile) (indexedMediaFile, bool, error) {
-	var candidates []indexedMediaFile
-	for rows.Next() {
-		var row indexedMediaFile
-		if err := rows.Scan(&row.ID, &row.LibraryID, &row.Path, &row.TrackID, &row.TrackPID, &row.ContentHash); err != nil {
-			return indexedMediaFile{}, false, err
-		}
-		candidates = append(candidates, row)
-	}
-	if err := rows.Err(); err != nil {
-		return indexedMediaFile{}, false, err
-	}
+// bestCandidate picks the file a missing row most likely moved to.
+//
+// An exact content-hash match is accepted from any number of candidates. A mere
+// same-filename match is accepted only when it is the *only* candidate — with
+// several, "track01.mp3" says nothing about which one is the right track01.
+func bestCandidate(candidates []indexedMediaFile, missing indexedMediaFile) (indexedMediaFile, bool, error) {
 	for _, c := range candidates {
 		if mediaFileEquals(missing, c) {
 			return c, true, nil

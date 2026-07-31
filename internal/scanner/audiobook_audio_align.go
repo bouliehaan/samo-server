@@ -132,10 +132,7 @@ func (s *Scanner) AnalyzeAudiobookChapters(ctx context.Context, audiobookID stri
 // reason a whole library can sit on file-boundary chapters despite Samo already
 // knowing every book's ASIN.
 func (s *Scanner) audiobookChapterLookup(ctx context.Context, audiobookID string, files []catalog.AudioFile) ChapterLookup {
-	var bookJSON, verifiedASIN string
-	_ = s.db.QueryRowContext(ctx,
-		`SELECT COALESCE(book_json,'{}'), COALESCE(chapter_asin,'') FROM audiobooks WHERE id = ?`,
-		audiobookID).Scan(&bookJSON, &verifiedASIN)
+	bookJSON, verifiedASIN, _ := s.store.AudiobookBookJSON(ctx, audiobookID)
 	var book catalog.BookMetadata
 	_ = json.Unmarshal([]byte(bookJSON), &book)
 	if enriched, err := catalogstore.OverlayAudiobookOverride(ctx, s.db, catalog.AudiobookItem{ID: audiobookID, Book: &book}); err == nil && enriched.Book != nil {
@@ -262,9 +259,7 @@ func (s *Scanner) ApplyAudioChapterReport(ctx context.Context, audiobookID strin
 
 // chapterSourceOf reads a book's current chapter provenance label.
 func (s *Scanner) chapterSourceOf(ctx context.Context, audiobookID string) string {
-	var source string
-	_ = s.db.QueryRowContext(ctx,
-		`SELECT COALESCE(chapter_source,'') FROM audiobooks WHERE id = ?`, audiobookID).Scan(&source)
+	source, _ := s.store.AudiobookChapterSource(ctx, audiobookID)
 	return source
 }
 
@@ -390,28 +385,21 @@ func (b analysisBook) label() string {
 }
 
 func (s *Scanner) audiobooksForAnalysis(ctx context.Context) ([]analysisBook, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT id, COALESCE(path,''), COALESCE(chapter_audio_sig,''), COALESCE(chapter_source,'') FROM audiobooks`)
+	books, err := s.store.AudiobooksForAnalysis(ctx)
 	if err != nil {
-		return nil, fmt.Errorf("list audiobooks for analysis: %w", err)
+		return nil, err
 	}
-	defer rows.Close()
-	var out []analysisBook
-	for rows.Next() {
-		var b analysisBook
-		if err := rows.Scan(&b.id, &b.path, &b.sig, &b.source); err != nil {
-			return nil, fmt.Errorf("scan audiobook row: %w", err)
-		}
-		out = append(out, b)
+	out := make([]analysisBook, 0, len(books))
+	for _, book := range books {
+		out = append(out, analysisBook{id: book.ID, path: book.Path, sig: book.Sig, source: book.Source})
 	}
-	return out, rows.Err()
+	return out, nil
 }
 
 // AudiobookDisplay returns a human label (title, falling back to folder name) and
 // the on-disk path for one book — used by the inspector for readable output.
 func (s *Scanner) AudiobookDisplay(ctx context.Context, audiobookID string) (title, path string) {
-	var bookJSON string
-	_ = s.db.QueryRowContext(ctx, `SELECT COALESCE(path,''), COALESCE(book_json,'{}') FROM audiobooks WHERE id = ?`, audiobookID).
-		Scan(&path, &bookJSON)
+	path, bookJSON, _ := s.store.AudiobookPathAndBookJSON(ctx, audiobookID)
 	var book struct {
 		Title string `json:"title"`
 	}

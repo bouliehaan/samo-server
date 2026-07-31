@@ -2,9 +2,9 @@ package scanner
 
 import (
 	"context"
-	"database/sql"
-	"fmt"
 	"strings"
+
+	"github.com/bouliehaan/samo-server/internal/scannerstore"
 )
 
 const (
@@ -13,42 +13,11 @@ const (
 	ScanModeRepair = "repair"
 )
 
-type indexedFile struct {
-	Checksum    string
-	TrackID     string
-	AudiobookID string
-	PodcastID   string
-	EpisodeID   string
-}
+// indexedFile is what a quick scan compares a file on disk against.
+type indexedFile = scannerstore.IndexedFile
 
 func (s *Scanner) loadFileIndex(ctx context.Context, libraryID string) (map[string]indexedFile, error) {
-	rows, err := s.db.QueryContext(ctx, `
-		SELECT path, checksum, track_id, audiobook_id, podcast_id, episode_id
-		FROM media_files
-		WHERE library_id = ?`, libraryID)
-	if err != nil {
-		return nil, fmt.Errorf("load media file index: %w", err)
-	}
-	defer rows.Close()
-
-	index := map[string]indexedFile{}
-	for rows.Next() {
-		var path string
-		var entry indexedFile
-		var trackID, audiobookID, podcastID, episodeID sql.NullString
-		if err := rows.Scan(&path, &entry.Checksum, &trackID, &audiobookID, &podcastID, &episodeID); err != nil {
-			return nil, fmt.Errorf("scan media file index row: %w", err)
-		}
-		entry.TrackID = trackID.String
-		entry.AudiobookID = audiobookID.String
-		entry.PodcastID = podcastID.String
-		entry.EpisodeID = episodeID.String
-		index[path] = entry
-	}
-	if err := rows.Err(); err != nil {
-		return nil, err
-	}
-	return index, nil
+	return s.store.FileIndex(ctx, libraryID)
 }
 
 func (s *Scanner) fileNeedsProbe(path string) bool {

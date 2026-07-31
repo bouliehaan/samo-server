@@ -34,38 +34,15 @@ func (s *Scanner) loadCachedMediaProbe(ctx context.Context, libraryID, path, own
 		return probeInfo{}, sql.ErrNoRows
 	}
 
-	var embeddedJSON string
-	var checksum string
-	var relativePath string
-	var fileName string
-	var container string
-	var mimeType string
-	var codec string
-	var codecProfile string
-	var metadataFormatsJSON string
-	var channelLayout string
-	var durationSeconds int
-	var bitrate int
-	var bitDepth int
-	var sampleRate int
-	var channels int
-	var sizeBytes int64
-	var modifiedAt sql.NullString
-
-	query := `
-		SELECT embedded_tags_json, checksum, relative_path, file_name, container, mime_type, codec,
-		       codec_profile, metadata_formats_json, channel_layout, duration_seconds, bitrate,
-		       bit_depth, sample_rate, channels, size_bytes, modified_at
-		FROM media_files
-		WHERE library_id = ? AND path = ? AND ` + ownerColumn + ` IS NOT NULL AND ` + ownerColumn + ` != ''`
-	err := s.db.QueryRowContext(ctx, query, libraryID, path).Scan(
-		&embeddedJSON, &checksum, &relativePath, &fileName, &container, &mimeType, &codec,
-		&codecProfile, &metadataFormatsJSON, &channelLayout, &durationSeconds, &bitrate,
-		&bitDepth, &sampleRate, &channels, &sizeBytes, &modifiedAt,
-	)
+	cached, err := s.store.CachedProbeForOwner(ctx, libraryID, path, ownerColumn)
 	if err != nil {
 		return probeInfo{}, err
 	}
+	embeddedJSON := cached.EmbeddedTagsJSON
+	checksum := cached.Checksum
+	fileName := cached.FileName
+	sizeBytes := cached.SizeBytes
+	modifiedAt := cached.ModifiedAt
 
 	tags := catalog.Tags{}
 	if embeddedJSON != "" {
@@ -95,8 +72,8 @@ func (s *Scanner) loadCachedMediaProbe(ctx context.Context, libraryID, path, own
 	}
 
 	var metadataFormats []string
-	if metadataFormatsJSON != "" {
-		_ = json.Unmarshal([]byte(metadataFormatsJSON), &metadataFormats)
+	if cached.MetadataFormatsJSON != "" {
+		_ = json.Unmarshal([]byte(cached.MetadataFormatsJSON), &metadataFormats)
 	}
 	if len(metadataFormats) == 0 {
 		metadataFormats = metadataFormatsForPath(path, tags)
@@ -104,19 +81,19 @@ func (s *Scanner) loadCachedMediaProbe(ctx context.Context, libraryID, path, own
 
 	audioFile := catalog.AudioFile{
 		Path:            path,
-		RelativePath:    relativePath,
+		RelativePath:    cached.RelativePath,
 		FileName:        fileName,
-		Container:       container,
-		MimeType:        mimeType,
-		Codec:           codec,
-		CodecProfile:    codecProfile,
+		Container:       cached.Container,
+		MimeType:        cached.MimeType,
+		Codec:           cached.Codec,
+		CodecProfile:    cached.CodecProfile,
 		MetadataFormats: metadataFormats,
-		Bitrate:         bitrate,
-		BitDepth:        bitDepth,
-		SampleRate:      sampleRate,
-		Channels:        channels,
-		ChannelLayout:   channelLayout,
-		DurationSeconds: durationSeconds,
+		Bitrate:         cached.Bitrate,
+		BitDepth:        cached.BitDepth,
+		SampleRate:      cached.SampleRate,
+		Channels:        cached.Channels,
+		ChannelLayout:   cached.ChannelLayout,
+		DurationSeconds: cached.DurationSeconds,
 		SizeBytes:       sizeBytes,
 		ModifiedAt:      modified,
 		Checksum:        checksum,
