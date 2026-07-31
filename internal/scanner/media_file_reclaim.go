@@ -2,56 +2,45 @@ package scanner
 
 import (
 	"context"
-	"database/sql"
-	"fmt"
 	"strings"
+
+	"github.com/bouliehaan/samo-server/internal/scannerstore"
 )
 
-type mediaFileOwnerSnapshot struct {
-	TrackID     string
-	AudiobookID string
-	PodcastID   string
-	EpisodeID   string
-}
+// audioFileOwner and mediaFileOwnerSnapshot were two structs with identical
+// fields describing the same thing — which domain rows own a media file — one
+// used for the owner being written, one for the owner read back before the
+// write. They are the same shape because they are compared against each other.
+type (
+	audioFileOwner         = scannerstore.MediaFileOwner
+	mediaFileOwnerSnapshot = scannerstore.MediaFileOwner
+)
 
+// mediaFileIDByPath resolves the row already indexed at path, or "" when the
+// path is blank or unknown.
 func (s *Scanner) mediaFileIDByPath(ctx context.Context, path string) (string, error) {
 	path = strings.TrimSpace(path)
 	if path == "" {
 		return "", nil
 	}
-	var id string
-	err := s.db.QueryRowContext(ctx, `SELECT id FROM media_files WHERE path = ?`, path).Scan(&id)
-	if err == sql.ErrNoRows {
-		return "", nil
-	}
-	if err != nil {
-		return "", err
-	}
-	return id, nil
+	return s.store.MediaFileIDByPath(ctx, path)
 }
 
+// mediaFileOwners reads back the owners a file currently has, so a write can
+// tell what it displaced.
 func (s *Scanner) mediaFileOwners(ctx context.Context, fileID string) (mediaFileOwnerSnapshot, error) {
-	var snap mediaFileOwnerSnapshot
 	if fileID == "" {
-		return snap, nil
+		return mediaFileOwnerSnapshot{}, nil
 	}
-	var trackID, audiobookID, podcastID, episodeID sql.NullString
-	err := s.db.QueryRowContext(ctx, `
-		SELECT track_id, audiobook_id, podcast_id, episode_id
-		FROM media_files WHERE id = ?`, fileID).Scan(&trackID, &audiobookID, &podcastID, &episodeID)
-	if err == sql.ErrNoRows {
-		return snap, nil
-	}
-	if err != nil {
-		return snap, err
-	}
-	snap.TrackID = trackID.String
-	snap.AudiobookID = audiobookID.String
-	snap.PodcastID = podcastID.String
-	snap.EpisodeID = episodeID.String
-	return snap, nil
+	return s.store.MediaFileOwners(ctx, fileID)
 }
 
+// cleanupReplacedMediaOwners deletes an owner the file no longer belongs to,
+// once nothing else references it.
+//
+// Only a *dropped* owner is considered: a file that moved from track A to
+// track B leaves A possibly orphaned, but a file that simply gained a track it
+// did not have before displaces nothing.
 func (s *Scanner) cleanupReplacedMediaOwners(ctx context.Context, before mediaFileOwnerSnapshot, owner audioFileOwner) error {
 	if before.TrackID != "" && owner.TrackID == "" {
 		if err := s.deleteMusicTrackIfOrphan(ctx, before.TrackID); err != nil {
@@ -71,18 +60,14 @@ func (s *Scanner) deleteMusicTrackIfOrphan(ctx context.Context, trackID string) 
 	if trackID == "" {
 		return nil
 	}
-	var refs int
-	if err := s.db.QueryRowContext(ctx,
-		`SELECT COUNT(*) FROM media_files WHERE track_id = ?`, trackID).Scan(&refs); err != nil {
-		return fmt.Errorf("count media_files for track %q: %w", trackID, err)
+	refs, err := s.store.CountMediaFilesForTrack(ctx, trackID)
+	if err != nil {
+		return err
 	}
 	if refs > 0 {
 		return nil
 	}
-	if _, err := s.db.ExecContext(ctx, `DELETE FROM music_tracks WHERE id = ?`, trackID); err != nil {
-		return fmt.Errorf("delete orphan track %q: %w", trackID, err)
-	}
-	return nil
+	return s.store.DeleteMusicTrack(ctx, trackID)
 }
 
 func (s *Scanner) deletePodcastEpisodeIfOrphan(ctx context.Context, episodeID string) error {
@@ -90,16 +75,12 @@ func (s *Scanner) deletePodcastEpisodeIfOrphan(ctx context.Context, episodeID st
 	if episodeID == "" {
 		return nil
 	}
-	var refs int
-	if err := s.db.QueryRowContext(ctx,
-		`SELECT COUNT(*) FROM media_files WHERE episode_id = ?`, episodeID).Scan(&refs); err != nil {
-		return fmt.Errorf("count media_files for episode %q: %w", episodeID, err)
+	refs, err := s.store.CountMediaFilesForEpisode(ctx, episodeID)
+	if err != nil {
+		return err
 	}
 	if refs > 0 {
 		return nil
 	}
-	if _, err := s.db.ExecContext(ctx, `DELETE FROM podcast_episodes WHERE id = ?`, episodeID); err != nil {
-		return fmt.Errorf("delete orphan episode %q: %w", episodeID, err)
-	}
-	return nil
+	return s.store.DeletePodcastEpisode(ctx, episodeID)
 }

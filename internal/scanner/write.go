@@ -122,67 +122,7 @@ func (s *Scanner) upsertAudiobook(ctx context.Context, item catalog.AudiobookIte
 			return "", err
 		}
 	}
-	coverJSON := "{}"
-	if item.Cover != nil {
-		coverJSON = jsonText(item.Cover)
-	}
-	var bookJSON any
-	if item.Book != nil {
-		bookJSON = jsonText(item.Book)
-	}
-
-	_, err := s.execWrite(ctx, `
-		INSERT INTO audiobooks (
-		  id, library_id, path, folder_id, inode, size_bytes, missing, invalid,
-		  cover_json, tags_json, genres_json, duration_seconds, progress_json, book_json,
-		  updated_at, last_scan_at
-		)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
-		ON CONFLICT(id) DO UPDATE SET
-		  library_id = excluded.library_id,
-		  path = excluded.path,
-		  folder_id = excluded.folder_id,
-		  inode = excluded.inode,
-		  size_bytes = excluded.size_bytes,
-		  missing = excluded.missing,
-		  invalid = excluded.invalid,
-		  cover_json = excluded.cover_json,
-		  tags_json = excluded.tags_json,
-		  genres_json = excluded.genres_json,
-		  duration_seconds = excluded.duration_seconds,
-		  book_json = excluded.book_json,
-		  updated_at = CURRENT_TIMESTAMP,
-		  last_scan_at = CURRENT_TIMESTAMP`,
-		item.ID, item.LibraryID, item.Path, item.FolderID, item.Inode, item.SizeBytes,
-		boolInt(item.Missing), boolInt(item.Invalid), coverJSON, jsonText(item.Tags), jsonText(item.Genres),
-		item.DurationSeconds, jsonText(item.Progress), bookJSON)
-	if err == nil {
-		return item.ID, nil
-	}
-	if !strings.Contains(strings.ToLower(err.Error()), "unique") {
-		return "", fmt.Errorf("upsert audiobook %q: %w", item.ID, err)
-	}
-	// Path UNIQUE collision — a row exists at this path under a different
-	// id (e.g. left over from an earlier scan when the library_id hashed
-	// differently). Preserve the existing id and update everything else
-	// against it.
-	var existingID string
-	if err := s.db.QueryRowContext(ctx, `SELECT id FROM audiobooks WHERE path = ?`, item.Path).Scan(&existingID); err != nil {
-		return "", fmt.Errorf("resolve audiobook id by path %q: %w", item.Path, err)
-	}
-	_, err = s.execWrite(ctx, `
-		UPDATE audiobooks
-		SET library_id = ?, folder_id = ?, inode = ?, size_bytes = ?, missing = ?, invalid = ?,
-		    cover_json = ?, tags_json = ?, genres_json = ?, duration_seconds = ?, book_json = ?,
-		    updated_at = CURRENT_TIMESTAMP, last_scan_at = CURRENT_TIMESTAMP
-		WHERE path = ?`,
-		item.LibraryID, item.FolderID, item.Inode, item.SizeBytes,
-		boolInt(item.Missing), boolInt(item.Invalid), coverJSON, jsonText(item.Tags), jsonText(item.Genres),
-		item.DurationSeconds, bookJSON, item.Path)
-	if err != nil {
-		return "", fmt.Errorf("update audiobook by path %q: %w", item.Path, err)
-	}
-	return existingID, nil
+	return s.store.UpsertAudiobook(ctx, item)
 }
 
 func (s *Scanner) upsertPodcast(ctx context.Context, item catalog.PodcastItem) error {
@@ -193,89 +133,18 @@ func (s *Scanner) upsertPodcast(ctx context.Context, item catalog.PodcastItem) e
 			return err
 		}
 	}
-	coverJSON := "{}"
-	if item.Cover != nil {
-		coverJSON = jsonText(item.Cover)
-	}
-	var podcastJSON any
-	if item.Podcast != nil {
-		podcastJSON = jsonText(item.Podcast)
-	}
-
-	_, err := s.execWrite(ctx, `
-		INSERT INTO podcasts (
-		  id, library_id, path, folder_id, inode, size_bytes, missing, invalid,
-		  cover_json, tags_json, genres_json, duration_seconds, progress_json, podcast_json,
-		  updated_at, last_scan_at
-		)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
-		ON CONFLICT(id) DO UPDATE SET
-		  library_id = excluded.library_id,
-		  path = excluded.path,
-		  folder_id = excluded.folder_id,
-		  inode = excluded.inode,
-		  size_bytes = excluded.size_bytes,
-		  missing = excluded.missing,
-		  invalid = excluded.invalid,
-		  cover_json = excluded.cover_json,
-		  tags_json = excluded.tags_json,
-		  genres_json = excluded.genres_json,
-		  duration_seconds = excluded.duration_seconds,
-		  podcast_json = excluded.podcast_json,
-		  updated_at = CURRENT_TIMESTAMP,
-		  last_scan_at = CURRENT_TIMESTAMP`,
-		item.ID, item.LibraryID, item.Path, item.FolderID, item.Inode, item.SizeBytes,
-		boolInt(item.Missing), boolInt(item.Invalid), coverJSON, jsonText(item.Tags), jsonText(item.Genres),
-		item.DurationSeconds, jsonText(item.Progress), podcastJSON)
-	if err == nil {
-		return nil
-	}
-	if !strings.Contains(strings.ToLower(err.Error()), "unique") {
-		return fmt.Errorf("upsert podcast %q: %w", item.ID, err)
-	}
-	// Path UNIQUE collision — see upsertAudiobook for context.
-	_, err = s.execWrite(ctx, `
-		UPDATE podcasts
-		SET library_id = ?, folder_id = ?, inode = ?, size_bytes = ?, missing = ?, invalid = ?,
-		    cover_json = ?, tags_json = ?, genres_json = ?, duration_seconds = ?, podcast_json = ?,
-		    updated_at = CURRENT_TIMESTAMP, last_scan_at = CURRENT_TIMESTAMP
-		WHERE path = ?`,
-		item.LibraryID, item.FolderID, item.Inode, item.SizeBytes,
-		boolInt(item.Missing), boolInt(item.Invalid), coverJSON, jsonText(item.Tags), jsonText(item.Genres),
-		item.DurationSeconds, podcastJSON, item.Path)
-	if err != nil {
-		return fmt.Errorf("update podcast by path %q: %w", item.Path, err)
-	}
-	return nil
+	return s.store.UpsertPodcast(ctx, item)
 }
 
-// upsertContributor writes a row into the `contributors` table. Used by
-// the audiobook scanner to ensure authors / narrators exist before we link
-// them. Idempotent.
 func (s *Scanner) upsertContributor(ctx context.Context, contributor catalog.Contributor) error {
-	_, err := s.execWrite(ctx, `
-		INSERT INTO contributors (id, name, sort_name, description, images_json, external_ids_json)
-		VALUES (?, ?, ?, ?, ?, ?)
-		ON CONFLICT(id) DO UPDATE SET
-		  name = excluded.name,
-		  sort_name = excluded.sort_name,
-		  description = excluded.description,
-		  images_json = excluded.images_json,
-		  external_ids_json = excluded.external_ids_json`,
-		contributor.ID, contributor.Name, contributor.SortName, contributor.Description,
-		jsonText(contributor.Images), jsonText(contributor.ExternalIDs))
-	if err != nil {
-		return fmt.Errorf("upsert contributor %q: %w", contributor.Name, err)
-	}
-	return nil
+	return s.store.UpsertContributor(ctx, contributor)
 }
 
-// setAudiobookContributors replaces an audiobook's contributor list
-// (authors + narrators in one slice, distinguished by role). This is the
-// canonical write path — it ALWAYS upserts every contributor row first
-// before inserting the junction row, which closes the "FK constraint
-// failed" hole that bit us when narrators were never written to
-// shelf_authors before being linked.
+// setAudiobookContributors replaces an audiobook's contributor list (authors +
+// narrators in one slice, distinguished by role). It ALWAYS writes every
+// contributor row before inserting the junction row that references it, which
+// closes the foreign-key hole that appeared when narrators were linked without
+// ever having been written.
 func (s *Scanner) setAudiobookContributors(ctx context.Context, audiobookID string, contributors []catalog.ContributorRef) error {
 	if s.overrideIndex != nil {
 		if s.overrideIndex.HasField(catalog.OverrideKindAudiobook, audiobookID, "authors") ||
@@ -283,14 +152,14 @@ func (s *Scanner) setAudiobookContributors(ctx context.Context, audiobookID stri
 			return nil
 		}
 	}
-	if _, err := s.execWrite(ctx, `DELETE FROM audiobook_contributors WHERE audiobook_id = ?`, audiobookID); err != nil {
-		return fmt.Errorf("clear audiobook contributors: %w", err)
+	if err := s.store.ClearAudiobookContributors(ctx, audiobookID); err != nil {
+		return err
 	}
 	for _, ref := range contributors {
 		if ref.ID == "" {
 			continue
 		}
-		if err := s.upsertContributor(ctx, catalog.Contributor{
+		if err := s.store.UpsertContributor(ctx, catalog.Contributor{
 			ID:       ref.ID,
 			Name:     ref.Name,
 			SortName: ref.SortName,
@@ -302,53 +171,22 @@ func (s *Scanner) setAudiobookContributors(ctx context.Context, audiobookID stri
 		if ref.ID == "" {
 			continue
 		}
-		if _, err := s.execWrite(ctx, `
-			INSERT INTO audiobook_contributors (audiobook_id, contributor_id, role, position)
-			VALUES (?, ?, ?, ?)`,
-			audiobookID, ref.ID, ref.Role, index); err != nil {
-			return fmt.Errorf("insert audiobook contributor: %w", err)
+		if err := s.store.LinkAudiobookContributor(ctx, audiobookID, ref.ID, ref.Role, index); err != nil {
+			return err
 		}
 	}
 	return nil
 }
 
 func (s *Scanner) upsertSeries(ctx context.Context, series catalog.Series) error {
-	_, err := s.execWrite(ctx, `
-		INSERT INTO series (id, name, description, authors_json, item_ids_json, external_ids_json)
-		VALUES (?, ?, ?, ?, ?, ?)
-		ON CONFLICT(id) DO UPDATE SET
-		  name = excluded.name,
-		  description = excluded.description,
-		  authors_json = excluded.authors_json,
-		  item_ids_json = excluded.item_ids_json,
-		  external_ids_json = excluded.external_ids_json`,
-		series.ID, series.Name, series.Description, jsonText(series.Authors),
-		jsonText(series.AudiobookIDs), jsonText(series.ExternalIDs))
-	if err != nil {
-		return fmt.Errorf("upsert series %q: %w", series.Name, err)
-	}
-	return nil
+	return s.store.UpsertSeries(ctx, series)
 }
 
 func (s *Scanner) setAudiobookSeries(ctx context.Context, audiobookID string, series []catalog.SeriesRef) error {
 	if s.overrideIndex != nil && s.overrideIndex.HasField(catalog.OverrideKindAudiobook, audiobookID, "series") {
 		return nil
 	}
-	if _, err := s.execWrite(ctx, `DELETE FROM audiobook_series WHERE audiobook_id = ?`, audiobookID); err != nil {
-		return fmt.Errorf("clear audiobook series: %w", err)
-	}
-	for _, entry := range series {
-		if entry.ID == "" {
-			continue
-		}
-		if _, err := s.execWrite(ctx, `
-			INSERT INTO audiobook_series (audiobook_id, series_id, sequence, sequence_text)
-			VALUES (?, ?, ?, ?)`,
-			audiobookID, entry.ID, entry.Sequence, entry.SequenceText); err != nil {
-			return fmt.Errorf("insert audiobook series: %w", err)
-		}
-	}
-	return nil
+	return s.store.ReplaceAudiobookSeries(ctx, audiobookID, series)
 }
 
 func (s *Scanner) upsertPodcastEpisode(ctx context.Context, episode catalog.PodcastEpisode) error {
@@ -359,61 +197,28 @@ func (s *Scanner) upsertPodcastEpisode(ctx context.Context, episode catalog.Podc
 			return err
 		}
 	}
-	_, err := s.execWrite(ctx, `
-		INSERT INTO podcast_episodes (
-		  id, library_id, podcast_id, title, subtitle, description, published_at, season, episode,
-		  episode_type, duration_seconds, explicit, enclosure_url, enclosure_type, enclosure_bytes,
-		  progress_json, external_ids_json, updated_at
-		)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
-		ON CONFLICT(id) DO UPDATE SET
-		  library_id = excluded.library_id,
-		  podcast_id = excluded.podcast_id,
-		  title = excluded.title,
-		  subtitle = excluded.subtitle,
-		  description = excluded.description,
-		  published_at = excluded.published_at,
-		  season = excluded.season,
-		  episode = excluded.episode,
-		  episode_type = excluded.episode_type,
-		  duration_seconds = excluded.duration_seconds,
-		  explicit = excluded.explicit,
-		  enclosure_url = excluded.enclosure_url,
-		  enclosure_type = excluded.enclosure_type,
-		  enclosure_bytes = excluded.enclosure_bytes,
-		  external_ids_json = excluded.external_ids_json,
-		  updated_at = CURRENT_TIMESTAMP`,
-		episode.ID, episode.LibraryID, episode.PodcastID, episode.Title, episode.Subtitle, episode.Description,
-		timeString(episode.PublishedAt), episode.Season, episode.Episode, episode.EpisodeType, episode.DurationSeconds,
-		boolInt(episode.Explicit), episode.EnclosureURL, episode.EnclosureType, episode.EnclosureBytes,
-		jsonText(episode.Progress), jsonText(episode.ExternalIDs))
-	if err != nil {
-		return fmt.Errorf("upsert podcast episode %q: %w", episode.Title, err)
-	}
-	return nil
+	return s.store.UpsertPodcastEpisode(ctx, episode)
 }
 
-// replaceAudiobookChapters rewrites the audiobook's chapter list. Audio
-// books and podcast episodes have separate chapter tables now (was: shared
-// shelf_chapters) so the two flows do not race each other.
+// replaceAudiobookChapters rewrites the audiobook's chapter list. Audiobooks
+// and podcast episodes have separate chapter tables so the two flows do not
+// race each other.
 func (s *Scanner) replaceAudiobookChapters(ctx context.Context, audiobookID string, chapters []catalog.AudioChapter) error {
-	if _, err := s.execWrite(ctx, `DELETE FROM audiobook_chapters WHERE audiobook_id = ?`, audiobookID); err != nil {
-		return fmt.Errorf("clear audiobook chapters: %w", err)
-	}
+	return s.store.ReplaceAudiobookChapters(ctx, audiobookID, identifyChapters("audiobook", audiobookID, chapters))
+}
+
+// identifyChapters assigns each chapter the id it will be stored under.
+//
+// The id is derived from the owner, the index, the title and the start offset,
+// so re-deriving the same chapters yields the same ids and a rescan is a no-op
+// rather than a churn of new rows.
+func identifyChapters(kind, ownerID string, chapters []catalog.AudioChapter) []catalog.AudioChapter {
+	identified := make([]catalog.AudioChapter, 0, len(chapters))
 	for _, chapter := range chapters {
-		startMs, endMs := chapter.StartMs(), chapter.EndMs()
-		chapter.ID = stableID("chapter", "audiobook", audiobookID, fmt.Sprint(chapter.Index), chapter.Title, fmt.Sprint(startMs))
-		// start_seconds/end_seconds stay for back-compat reads; start_ms/end_ms
-		// are the precise canonical values the API now projects.
-		if _, err := s.execWrite(ctx, `
-			INSERT INTO audiobook_chapters (id, audiobook_id, chapter_index, title, start_seconds, end_seconds, start_ms, end_ms)
-			VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-			chapter.ID, audiobookID, chapter.Index, chapter.Title,
-			int(chapter.StartSeconds), int(chapter.EndSeconds), startMs, endMs); err != nil {
-			return fmt.Errorf("insert audiobook chapter %q: %w", chapter.Title, err)
-		}
+		chapter.ID = stableID("chapter", kind, ownerID, fmt.Sprint(chapter.Index), chapter.Title, fmt.Sprint(chapter.StartMs()))
+		identified = append(identified, chapter)
 	}
-	return nil
+	return identified
 }
 
 // setAudiobookChapterProvenance records WHERE a book's chapters came from
@@ -423,18 +228,7 @@ func (s *Scanner) replaceAudiobookChapters(ctx context.Context, audiobookID stri
 // "refresh chapters" admin path will reuse. asin/syncedAt are empty/nil for
 // file-derived chapters.
 func (s *Scanner) setAudiobookChapterProvenance(ctx context.Context, audiobookID, source, asin string, syncedAt *time.Time) error {
-	var synced any
-	if syncedAt != nil {
-		synced = syncedAt.UTC().Format(time.RFC3339)
-	}
-	if _, err := s.execWrite(ctx, `
-		UPDATE audiobooks
-		SET chapter_source = ?, chapter_asin = ?, chapter_synced_at = ?
-		WHERE id = ?`,
-		source, asin, synced, audiobookID); err != nil {
-		return fmt.Errorf("set audiobook chapter provenance for %q: %w", audiobookID, err)
-	}
-	return nil
+	return s.store.SetAudiobookChapterProvenance(ctx, audiobookID, source, asin, syncedAt)
 }
 
 // setAudioChapterMetrics records the audio chapter analysis confidence (0..1)
@@ -443,32 +237,11 @@ func (s *Scanner) setAudiobookChapterProvenance(ctx context.Context, audiobookID
 // expensive full-file decode happens once per file version rather than on every
 // scan.
 func (s *Scanner) setAudioChapterMetrics(ctx context.Context, audiobookID string, confidence float64, sig string) error {
-	if _, err := s.execWrite(ctx, `
-		UPDATE audiobooks
-		SET chapter_confidence = ?, chapter_audio_sig = ?
-		WHERE id = ?`,
-		confidence, sig, audiobookID); err != nil {
-		return fmt.Errorf("set audio chapter metrics for %q: %w", audiobookID, err)
-	}
-	return nil
+	return s.store.SetAudioChapterMetrics(ctx, audiobookID, confidence, sig)
 }
 
 func (s *Scanner) replaceEpisodeChapters(ctx context.Context, episodeID string, chapters []catalog.AudioChapter) error {
-	if _, err := s.execWrite(ctx, `DELETE FROM episode_chapters WHERE episode_id = ?`, episodeID); err != nil {
-		return fmt.Errorf("clear episode chapters: %w", err)
-	}
-	for _, chapter := range chapters {
-		startMs, endMs := chapter.StartMs(), chapter.EndMs()
-		chapter.ID = stableID("chapter", "episode", episodeID, fmt.Sprint(chapter.Index), chapter.Title, fmt.Sprint(startMs))
-		if _, err := s.execWrite(ctx, `
-			INSERT INTO episode_chapters (id, episode_id, chapter_index, title, start_seconds, end_seconds, start_ms, end_ms)
-			VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-			chapter.ID, episodeID, chapter.Index, chapter.Title,
-			int(chapter.StartSeconds), int(chapter.EndSeconds), startMs, endMs); err != nil {
-			return fmt.Errorf("insert episode chapter %q: %w", chapter.Title, err)
-		}
-	}
-	return nil
+	return s.store.ReplaceEpisodeChapters(ctx, episodeID, identifyChapters("episode", episodeID, chapters))
 }
 
 func (s *Scanner) upsertAudioFile(ctx context.Context, libraryID string, owner audioFileOwner, file catalog.AudioFile, trackPID, contentHash string) error {
@@ -488,66 +261,18 @@ func (s *Scanner) upsertAudioFile(ctx context.Context, libraryID string, owner a
 	}
 	file = finalizeAudioFile(file)
 
-	_, err = s.execWrite(ctx, `
-		INSERT INTO media_files (
-		  id, library_id, audiobook_id, podcast_id, track_id, episode_id, path, relative_path, file_name, inode, size_bytes,
-		  modified_at, container, mime_type, codec, codec_profile, metadata_formats_json, bitrate, bit_depth, sample_rate, channels,
-		  channel_layout, duration_seconds, duration_ms, checksum, embedded_tags_json, track_pid, content_hash,
-		  missing, missing_detected_at, updated_at
-		)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, NULL, CURRENT_TIMESTAMP)
-		ON CONFLICT(id) DO UPDATE SET
-		  library_id = excluded.library_id,
-		  audiobook_id = excluded.audiobook_id,
-		  podcast_id = excluded.podcast_id,
-		  track_id = excluded.track_id,
-		  episode_id = excluded.episode_id,
-		  path = excluded.path,
-		  relative_path = excluded.relative_path,
-		  file_name = excluded.file_name,
-		  inode = excluded.inode,
-		  size_bytes = excluded.size_bytes,
-		  modified_at = excluded.modified_at,
-		  container = excluded.container,
-		  mime_type = excluded.mime_type,
-		  codec = excluded.codec,
-		  codec_profile = excluded.codec_profile,
-		  metadata_formats_json = excluded.metadata_formats_json,
-		  bitrate = excluded.bitrate,
-		  bit_depth = excluded.bit_depth,
-		  sample_rate = excluded.sample_rate,
-		  channels = excluded.channels,
-		  channel_layout = excluded.channel_layout,
-		  duration_seconds = excluded.duration_seconds,
-		  duration_ms = excluded.duration_ms,
-		  checksum = excluded.checksum,
-		  embedded_tags_json = excluded.embedded_tags_json,
-		  track_pid = excluded.track_pid,
-		  content_hash = excluded.content_hash,
-		  missing = 0,
-		  missing_detected_at = NULL,
-		  updated_at = CURRENT_TIMESTAMP`,
-		file.ID, libraryID, nullableString(owner.AudiobookID), nullableString(owner.PodcastID),
-		nullableString(owner.TrackID), nullableString(owner.EpisodeID),
-		file.Path, file.RelativePath, file.FileName, fileInode(file.Path), file.SizeBytes, timeString(file.ModifiedAt),
-		file.Container, file.MimeType, file.Codec, file.CodecProfile, jsonText(file.MetadataFormats), file.Bitrate, file.BitDepth, file.SampleRate,
-		file.Channels, file.ChannelLayout, file.DurationSeconds, durationMsValue(file), file.Checksum, jsonText(file.EmbeddedTags),
-		trackPID, contentHash)
+	err = s.store.UpsertMediaFile(ctx, libraryID, owner, file, fileInode(file.Path), trackPID, contentHash)
 	if err != nil {
-		if strings.Contains(strings.ToLower(err.Error()), "unique") {
-			if err := s.reclaimMediaFileByPath(ctx, libraryID, owner, file, trackPID, contentHash); err != nil {
-				return fmt.Errorf("reclaim media file %q: %w", file.Path, err)
-			}
-		} else {
+		// A UNIQUE violation here is on path, not id: some other row already
+		// owns this path. Reclaim it rather than failing the file.
+		if !storage.IsUniqueViolation(err) {
 			return fmt.Errorf("upsert audio file %q: %w", file.Path, err)
 		}
+		if err := s.reclaimMediaFileByPath(ctx, libraryID, owner, file, trackPID, contentHash); err != nil {
+			return fmt.Errorf("reclaim media file %q: %w", file.Path, err)
+		}
 	} else {
-		if prior.TrackID != "" && owner.TrackID != "" && prior.TrackID != owner.TrackID {
-			s.noteTrackIDMigration(prior.TrackID, owner.TrackID)
-		}
-		if err := s.cleanupReplacedMediaOwners(ctx, prior, owner); err != nil {
-			log.Printf("scanner: cleanup after media file %q: %v", file.Path, err)
-		}
+		s.noteOwnerChange(ctx, prior, owner, file.Path)
 	}
 	if s.activeScan != nil {
 		s.activeScan.seeFile(file.Path)
@@ -569,62 +294,27 @@ func (s *Scanner) reclaimMediaFileByPath(ctx context.Context, libraryID string, 
 		return err
 	}
 	file = finalizeAudioFile(file)
-	_, err = s.execWrite(ctx, `
-		UPDATE media_files
-		SET library_id = ?,
-		    audiobook_id = ?,
-		    podcast_id = ?,
-		    track_id = ?,
-		    episode_id = ?,
-		    relative_path = ?,
-		    file_name = ?,
-		    inode = ?,
-		    size_bytes = ?,
-		    modified_at = ?,
-		    container = ?,
-		    mime_type = ?,
-		    codec = ?,
-		    codec_profile = ?,
-		    metadata_formats_json = ?,
-		    bitrate = ?,
-		    bit_depth = ?,
-		    sample_rate = ?,
-		    channels = ?,
-		    channel_layout = ?,
-		    duration_seconds = ?,
-		    duration_ms = ?,
-		    checksum = ?,
-		    embedded_tags_json = ?,
-		    track_pid = ?,
-		    content_hash = ?,
-		    missing = 0,
-		    missing_detected_at = NULL,
-		    updated_at = CURRENT_TIMESTAMP
-		WHERE path = ?`,
-		libraryID, nullableString(owner.AudiobookID), nullableString(owner.PodcastID),
-		nullableString(owner.TrackID), nullableString(owner.EpisodeID),
-		file.RelativePath, file.FileName, fileInode(file.Path), file.SizeBytes, timeString(file.ModifiedAt),
-		file.Container, file.MimeType, file.Codec, file.CodecProfile, jsonText(file.MetadataFormats), file.Bitrate, file.BitDepth, file.SampleRate,
-		file.Channels, file.ChannelLayout, file.DurationSeconds, durationMsValue(file), file.Checksum, jsonText(file.EmbeddedTags),
-		trackPID, contentHash, file.Path)
-	if err != nil {
+	if err := s.store.UpdateMediaFileByPath(ctx, libraryID, owner, file, fileInode(file.Path), trackPID, contentHash); err != nil {
 		return err
 	}
+	s.noteOwnerChange(ctx, prior, owner, file.Path)
+	return nil
+}
+
+// noteOwnerChange records what a successful media-file write displaced.
+//
+// Two things follow from a file changing hands. A track that moved id needs its
+// migration remembered, so playlists referencing the old id can be rewritten at
+// the end of the scan. And an owner left with no files at all is orphaned and
+// should go. Neither is worth failing the file over — the row itself is
+// correct — so a cleanup failure is logged and the scan continues.
+func (s *Scanner) noteOwnerChange(ctx context.Context, prior, owner audioFileOwner, path string) {
 	if prior.TrackID != "" && owner.TrackID != "" && prior.TrackID != owner.TrackID {
 		s.noteTrackIDMigration(prior.TrackID, owner.TrackID)
 	}
-	return s.cleanupReplacedMediaOwners(ctx, prior, owner)
-}
-
-// audioFileOwner identifies which domain row a media_files row belongs to.
-// At most one of the four IDs is populated. Music tracks set TrackID;
-// audiobook files set AudiobookID; podcast-episode files set both
-// PodcastID and EpisodeID (PodcastID is denormalized for fast joins).
-type audioFileOwner struct {
-	AudiobookID string
-	PodcastID   string
-	TrackID     string
-	EpisodeID   string
+	if err := s.cleanupReplacedMediaOwners(ctx, prior, owner); err != nil {
+		log.Printf("scanner: cleanup after media file %q: %v", path, err)
+	}
 }
 
 func (s *Scanner) upsertGenre(ctx context.Context, kind string, name string) error {
