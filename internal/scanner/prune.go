@@ -233,9 +233,8 @@ func (s *Scanner) scanLibraryWithStats(ctx context.Context, library Library, onF
 		return stats, err
 	}
 
-	_, err = s.db.ExecContext(ctx, `UPDATE libraries SET last_scan_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP WHERE id = ?`, library.ID)
-	if err != nil {
-		return stats, fmt.Errorf("update library last_scan_at: %w", err)
+	if err := s.store.TouchLibraryScanned(ctx, library.ID); err != nil {
+		return stats, err
 	}
 	return stats, nil
 }
@@ -333,34 +332,49 @@ func (s *Scanner) pruneLibrary(ctx context.Context, library Library, accumulator
 }
 
 func (s *Scanner) countIndexedPaths(ctx context.Context, libraryID string) (int, error) {
-	var count int
-	err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM media_files WHERE library_id = ?`, libraryID).Scan(&count)
-	return count, err
+	return s.store.CountMediaFilesForLibrary(ctx, libraryID)
 }
 
-func (s *Scanner) pruneMediaFiles(ctx context.Context, libraryID string, seenPaths map[string]struct{}) (int, int, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT path FROM media_files WHERE library_id = ? AND missing = 0`, libraryID)
-	if err != nil {
-		return 0, 0, fmt.Errorf("list media files for prune: %w", err)
+// pruneStale deletes every id the scan did not see, and reports how many went.
+//
+// The three item prunes below differ only in which table they read and which
+// they delete from — the decision itself, "present in the catalog but absent
+// from this scan", is identical for all of them.
+func pruneStale(ids []string, seen map[string]struct{}, delete func(string) error) (int, error) {
+	pruned := 0
+	for _, id := range ids {
+		if _, ok := seen[id]; ok {
+			continue
+		}
+		if err := delete(id); err != nil {
+			return pruned, err
+		}
+		pruned++
 	}
-	defer rows.Close()
+	return pruned, nil
+}
+
+// pruneMediaFiles removes files the scan did not see — but only the ones it can
+// prove are gone.
+//
+// A path that is still reachable on disk and yet was not walked means the file
+// really was deleted or moved, so the row goes. A path that is unreachable
+// means the storage is, so the row is marked missing instead: an unplugged
+// drive or a dropped NFS mount must not wipe the library.
+func (s *Scanner) pruneMediaFiles(ctx context.Context, libraryID string, seenPaths map[string]struct{}) (int, int, error) {
+	paths, err := s.store.PresentMediaFilePaths(ctx, libraryID)
+	if err != nil {
+		return 0, 0, err
+	}
 
 	var stale []string
-	for rows.Next() {
-		var path string
-		if err := rows.Scan(&path); err != nil {
-			return 0, 0, fmt.Errorf("scan media file path: %w", err)
-		}
+	for _, path := range paths {
 		if _, ok := seenPaths[path]; !ok {
 			stale = append(stale, path)
 		}
 	}
-	if err := rows.Err(); err != nil {
-		return 0, 0, err
-	}
 
-	pruned := 0
-	marked := 0
+	pruned, marked := 0, 0
 	for index, path := range stale {
 		if index > 0 && index%500 == 0 {
 			log.Printf("scanner: prune-check library=%q checked=%d/%d pruned=%d marked=%d", libraryID, index, len(stale), pruned, marked)
@@ -369,19 +383,14 @@ func (s *Scanner) pruneMediaFiles(ctx context.Context, libraryID string, seenPat
 			}
 		}
 		if fileReachable(ctx, path) {
-			if _, err := s.db.ExecContext(ctx, `DELETE FROM media_files WHERE library_id = ? AND path = ?`, libraryID, path); err != nil {
-				return pruned, marked, fmt.Errorf("delete stale media file %q: %w", path, err)
+			if err := s.store.DeleteMediaFileByPath(ctx, libraryID, path); err != nil {
+				return pruned, marked, err
 			}
 			pruned++
 			continue
 		}
-		if _, err := s.db.ExecContext(ctx, `
-			UPDATE media_files
-			SET missing = 1,
-			    missing_detected_at = COALESCE(missing_detected_at, CURRENT_TIMESTAMP),
-			    updated_at = CURRENT_TIMESTAMP
-			WHERE library_id = ? AND path = ?`, libraryID, path); err != nil {
-			return pruned, marked, fmt.Errorf("mark missing media file %q: %w", path, err)
+		if err := s.store.MarkMediaFileMissing(ctx, libraryID, path); err != nil {
+			return pruned, marked, err
 		}
 		marked++
 	}
@@ -389,120 +398,35 @@ func (s *Scanner) pruneMediaFiles(ctx context.Context, libraryID string, seenPat
 }
 
 func (s *Scanner) pruneAudiobooks(ctx context.Context, libraryID string, seen map[string]struct{}) (int, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT id FROM audiobooks WHERE library_id = ?`, libraryID)
+	ids, err := s.store.AudiobookIDsForLibrary(ctx, libraryID)
 	if err != nil {
-		return 0, fmt.Errorf("list audiobooks for prune: %w", err)
-	}
-	defer rows.Close()
-
-	var stale []string
-	for rows.Next() {
-		var id string
-		if err := rows.Scan(&id); err != nil {
-			return 0, fmt.Errorf("scan audiobook id: %w", err)
-		}
-		if _, ok := seen[id]; !ok {
-			stale = append(stale, id)
-		}
-	}
-	if err := rows.Err(); err != nil {
 		return 0, err
 	}
-
-	for _, id := range stale {
-		if _, err := s.db.ExecContext(ctx, `DELETE FROM audiobooks WHERE id = ?`, id); err != nil {
-			return 0, fmt.Errorf("delete stale audiobook %q: %w", id, err)
-		}
-	}
-	return len(stale), nil
+	return pruneStale(ids, seen, func(id string) error {
+		return s.store.DeleteAudiobook(ctx, id)
+	})
 }
 
 func (s *Scanner) prunePodcasts(ctx context.Context, libraryID string, seen map[string]struct{}) (int, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT id FROM podcasts WHERE library_id = ?`, libraryID)
+	ids, err := s.store.PodcastIDsForLibrary(ctx, libraryID)
 	if err != nil {
-		return 0, fmt.Errorf("list podcasts for prune: %w", err)
-	}
-	defer rows.Close()
-
-	var stale []string
-	for rows.Next() {
-		var id string
-		if err := rows.Scan(&id); err != nil {
-			return 0, fmt.Errorf("scan podcast id: %w", err)
-		}
-		if _, ok := seen[id]; !ok {
-			stale = append(stale, id)
-		}
-	}
-	if err := rows.Err(); err != nil {
 		return 0, err
 	}
-
-	for _, id := range stale {
-		if _, err := s.db.ExecContext(ctx, `DELETE FROM podcasts WHERE id = ?`, id); err != nil {
-			return 0, fmt.Errorf("delete stale podcast %q: %w", id, err)
-		}
-	}
-	return len(stale), nil
+	return pruneStale(ids, seen, func(id string) error {
+		return s.store.DeletePodcast(ctx, id)
+	})
 }
 
-func (s *Scanner) prunePodcastEpisodes(ctx context.Context, libraryID string, seenEpisodes map[string]struct{}) (int, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT id FROM podcast_episodes WHERE library_id = ?`, libraryID)
+func (s *Scanner) prunePodcastEpisodes(ctx context.Context, libraryID string, seen map[string]struct{}) (int, error) {
+	ids, err := s.store.PodcastEpisodeIDsForLibrary(ctx, libraryID)
 	if err != nil {
-		return 0, fmt.Errorf("list podcast episodes for prune: %w", err)
-	}
-	defer rows.Close()
-
-	var stale []string
-	for rows.Next() {
-		var id string
-		if err := rows.Scan(&id); err != nil {
-			return 0, fmt.Errorf("scan podcast episode id: %w", err)
-		}
-		if _, ok := seenEpisodes[id]; !ok {
-			stale = append(stale, id)
-		}
-	}
-	if err := rows.Err(); err != nil {
 		return 0, err
 	}
-
-	for _, id := range stale {
-		if _, err := s.db.ExecContext(ctx, `DELETE FROM podcast_episodes WHERE id = ?`, id); err != nil {
-			return 0, fmt.Errorf("delete stale podcast episode %q: %w", id, err)
-		}
-	}
-	return len(stale), nil
+	return pruneStale(ids, seen, func(id string) error {
+		return s.store.DeletePodcastEpisode(ctx, id)
+	})
 }
 
 func (s *Scanner) pruneOrphanMusic(ctx context.Context) (int, error) {
-	jsonEach := "json_each(p.track_ids_json) AS j"
-	if strings.Contains(fmt.Sprintf("%T", s.db.Driver()), "rewriteDriver") {
-		jsonEach = "json_array_elements_text(p.track_ids_json::json) AS j(value)"
-	}
-	statements := []string{
-		fmt.Sprintf(`DELETE FROM music_tracks
-		 WHERE id NOT IN (SELECT track_id FROM media_files WHERE track_id IS NOT NULL)
-		   AND id NOT IN (
-		     SELECT DISTINCT j.value
-		     FROM music_playlists p, %s
-		     WHERE j.value IS NOT NULL AND TRIM(j.value) != ''
-		   )`, jsonEach),
-		`DELETE FROM music_albums
-		 WHERE id NOT IN (SELECT album_id FROM music_tracks WHERE album_id IS NOT NULL)`,
-		`DELETE FROM music_artists
-		 WHERE id NOT IN (SELECT artist_id FROM music_track_artists)
-		   AND id NOT IN (SELECT artist_id FROM music_album_artists)`,
-	}
-	pruned := 0
-	for _, statement := range statements {
-		res, err := s.db.ExecContext(ctx, statement)
-		if err != nil {
-			return pruned, fmt.Errorf("prune orphan music rows: %w", err)
-		}
-		if rows, err := res.RowsAffected(); err == nil {
-			pruned += int(rows)
-		}
-	}
-	return pruned, nil
+	return s.store.PruneOrphanMusic(ctx)
 }
