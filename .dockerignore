@@ -1,5 +1,8 @@
 # Keep the build context small and free of local state.
 .git
+# The image rebuilds the UI in its own node stage; a host node_modules would
+# be both huge and wrong (native deps built for the host platform).
+web/node_modules
 .cache
 data
 dist

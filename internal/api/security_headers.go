@@ -5,18 +5,23 @@ import (
 	"strings"
 )
 
-// contentSecurityPolicy matches what the three hand-rolled HTML pages
-// (login, setup, app) actually load: everything is same-origin. The UI font
-// (Office Code Pro) is embedded in the binary and served from /assets/fonts,
-// so there is no longer any Google Fonts / gstatic origin to allow. All three
-// pages rely on inline <script>/<style> blocks rather than external files, so
-// script-src/style-src keep 'unsafe-inline' — tightening that to a nonce-based
-// policy would require threading a per-request nonce through every template
-// and is a follow-up, not a drive-by change. frame-ancestors/object-src/
-// base-uri still block clickjacking, plugin-based execution, and <base>
-// injection regardless.
+// contentSecurityPolicy matches what the three HTML pages (login, setup, app)
+// actually load: everything is same-origin. The UI font (Office Code Pro) is
+// embedded in the binary and served from /assets/fonts, so there is no Google
+// Fonts / gstatic origin to allow.
+//
+// script-src no longer needs 'unsafe-inline'. The pages used to carry their
+// JavaScript in inline <script> blocks; it now ships as hashed module bundles
+// under /assets/build, and none of the three pages uses an inline event
+// handler. That closes the single largest hole in this policy: an injected
+// <script> in any interpolated string is now inert.
+//
+// style-src still needs it. The dashboard writes 43 inline style="" attributes
+// through innerHTML (progress bars, cover positioning), and style-src governs
+// attributes as well as <style> blocks. Moving those to CSS custom properties
+// would let this tighten too — a follow-up, not a drive-by change.
 const contentSecurityPolicy = "default-src 'self'; " +
-	"script-src 'self' 'unsafe-inline'; " +
+	"script-src 'self'; " +
 	"style-src 'self' 'unsafe-inline'; " +
 	"font-src 'self'; " +
 	// Album/podcast/artist art can be a remote URL (podcast feed images are

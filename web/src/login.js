@@ -1,3 +1,11 @@
+// Entry point for the login page. Vite bundles this into
+// internal/api/web/build/, which go:embed compiles into the binary.
+//
+// The stylesheet is imported rather than linked so the bundler owns it too:
+// it emits one hashed .css per entry alongside the .js. base.css comes in
+// via an @import at the top of that stylesheet, which keeps it first in the
+// cascade — as a separate shared chunk its order would not be guaranteed.
+import "./login.css";
 
   (function () {
     const tokenKey = "samo-token";

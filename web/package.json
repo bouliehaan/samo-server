@@ -1,0 +1,15 @@
+{
+  "name": "samo-server-web",
+  "private": true,
+  "type": "module",
+  "description": "Frontend for samo-server. Built by Vite into internal/api/web/build/, which go:embed compiles into the binary.",
+  "scripts": {
+    "build": "vite build",
+    "watch": "vite build --watch",
+    "lint": "eslint src"
+  },
+  "devDependencies": {
+    "eslint": "^9.17.0",
+    "vite": "^6.0.7"
+  }
+}
