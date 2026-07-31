@@ -1,0 +1,42 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>samo server · sign in</title>
+  <link rel="preload" as="font" type="font/otf" href="/assets/fonts/officecodepro-regular.otf" crossorigin>
+  <link rel="preload" as="font" type="font/otf" href="/assets/fonts/officecodepro-bold.otf" crossorigin>
+  <link rel="icon" type="image/png" href="/favicon-dark.png">
+  <link rel="icon" type="image/png" href="/favicon-light.png" media="(prefers-color-scheme: light)">
+  <link rel="icon" type="image/png" href="/favicon-dark.png" media="(prefers-color-scheme: dark)">
+  <style>__SAMO_BASE_CSS__</style>
+  <style>__SAMO_PAGE_CSS__</style>
+</head>
+<body>
+  <div class="grid-bg"></div>
+  <main class="login-main">
+    <section class="login-hero">
+      <div class="samo-wm hero"><span class="word">samo</span><span class="word dim">server</span></div>
+      <div class="samo-status pulse"><span class="dot"></span><span>ONLINE · AWAITING SIGN IN</span></div>
+    </section>
+    <section class="card login-shell">
+      <div class="card-head"><span class="caret">&gt;</span> SIGN IN</div>
+      <h1>Welcome back.</h1>
+      <p class="lede">Use the username and password you created during setup.</p>
+      <label class="field">
+        <span class="field-label">USERNAME</span>
+        <input type="text" id="username" autocomplete="username" autofocus>
+      </label>
+      <label class="field">
+        <span class="field-label">PASSWORD</span>
+        <input type="password" id="password" autocomplete="current-password">
+      </label>
+      <div class="actions">
+        <button class="btn primary" id="submit">SIGN IN &rarr;</button>
+      </div>
+      <div class="footer-note">// forgot your password? sign back in as another admin and reset from settings,<br>// or re-run setup with SAMO_BOOTSTRAP_PASSWORD set to override</div>
+    </section>
+  </main>
+  <script>__SAMO_PAGE_JS__</script>
+</body>
+</html>

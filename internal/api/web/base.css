@@ -1,15 +1,4 @@
-package api
 
-// samoBaseCSS is the shared design language across the setup wizard, login
-// screen, and dashboard: the SAMO SERVER console. One monospace face (Office
-// Code Pro), a strictly NEUTRAL black → grey → white ladder (no blue/steel
-// tint), hard 90-degree corners, and white used only as a hallmark (active
-// state, focus, the online dot). It is the terminal of the Samo family — it
-// shares the clients' structure and restraint, not their cool-grey palette.
-//
-// The font is embedded in the binary and served from /assets/fonts (see
-// fonts.go), so the UI is fully styled offline with no CDN round-trip.
-const samoBaseCSS = `
 @font-face {
   font-family: "OfficeCodePro";
   font-style: normal;
@@ -361,4 +350,3 @@ a:hover { color: var(--accent-strong); text-decoration: underline; }
   background-clip: padding-box;
 }
 *::-webkit-scrollbar-thumb:hover { background: var(--muted); }
-`

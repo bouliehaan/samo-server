@@ -1,0 +1,238 @@
+
+    .wizard {
+      display: grid;
+      gap: 28px;
+    }
+    .step-meta {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      flex-wrap: wrap;
+      font-family: var(--mono);
+      font-size: 0.72rem;
+      letter-spacing: 0.18em;
+      text-transform: uppercase;
+      color: var(--muted);
+    }
+    .step-meta .step-pill {
+      padding: 4px 10px;
+      border: 1px solid var(--line-strong);
+      border-radius: var(--r-sm);
+      color: var(--text-dim);
+    }
+    .step-meta .step-pill.active {
+      border-color: var(--accent);
+      color: var(--accent);
+      background: var(--accent-soft);
+    }
+    .step-meta .step-pill.done {
+      color: var(--muted);
+    }
+    .step-card h2 {
+      font-size: 1.4rem;
+      font-weight: 700;
+      margin: 0 0 8px;
+      letter-spacing: 0.03em;
+      text-transform: uppercase;
+    }
+    .step-card p.lede {
+      color: var(--muted);
+      margin: 0 0 20px;
+      max-width: 60ch;
+      line-height: 1.5;
+    }
+    .form-row-split {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 14px;
+    }
+    @media (max-width: 540px) {
+      .form-row-split { grid-template-columns: 1fr; }
+    }
+
+    /* Libraries step */
+    .libs-shell {
+      display: grid;
+      gap: 24px;
+    }
+    .libs-attached {
+      border: 1px solid var(--line);
+      border-radius: var(--r-md);
+      background: var(--surface);
+      overflow: hidden;
+    }
+    .libs-attached-head {
+      display: flex;
+      justify-content: space-between;
+      align-items: baseline;
+      padding: 14px 16px;
+      border-bottom: 1px solid var(--line);
+      font-family: var(--mono);
+      font-size: 0.7rem;
+      letter-spacing: 0.2em;
+      text-transform: uppercase;
+    }
+    .libs-attached-head .label { color: var(--text-dim); }
+    .libs-attached-head .count { color: var(--accent); }
+    .libs-empty {
+      padding: 22px 16px;
+      font-family: var(--mono);
+      font-size: 0.8rem;
+      color: var(--text-dim);
+    }
+    .lib-row {
+      display: grid;
+      grid-template-columns: 1fr auto;
+      gap: 12px;
+      align-items: center;
+      padding: 14px 16px;
+      border-bottom: 1px solid color-mix(in srgb, var(--line) 50%, transparent);
+    }
+    .lib-row:last-child { border-bottom: 0; }
+    .lib-row .lib-main { min-width: 0; }
+    .lib-row .lib-name {
+      font-family: var(--sans);
+      font-size: 1rem;
+      font-weight: 700;
+      letter-spacing: -0.01em;
+      color: var(--text);
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      flex-wrap: wrap;
+    }
+    .lib-row .kind-chip {
+      font-family: var(--mono);
+      font-size: 0.62rem;
+      letter-spacing: 0.16em;
+      padding: 2px 8px;
+      border: 1px solid var(--line-strong);
+      border-radius: var(--r-sm);
+      background: var(--surface-2);
+      color: var(--text-dim);
+      text-transform: uppercase;
+    }
+    .lib-row .lib-path {
+      font-family: var(--mono);
+      font-size: 0.78rem;
+      color: var(--text-dim);
+      margin-top: 4px;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+    .lib-row .btn-remove {
+      background: transparent;
+      color: var(--muted);
+      border: 1px solid var(--line-strong);
+      border-radius: var(--r-sm);
+      width: 32px;
+      height: 32px;
+      padding: 0;
+      cursor: pointer;
+      font-family: var(--mono);
+      font-size: 1rem;
+      line-height: 1;
+      transition: color 90ms, border-color 90ms;
+    }
+    .lib-row .btn-remove:hover { color: var(--danger); border-color: var(--danger); }
+
+    /* Add-folder form */
+    .libs-add {
+      border: 1px solid var(--line);
+      border-radius: var(--r-md);
+      background: var(--surface);
+      overflow: hidden;
+    }
+    .libs-add-head {
+      padding: 14px 16px;
+      border-bottom: 1px solid var(--line);
+      font-family: var(--mono);
+      font-size: 0.68rem;
+      letter-spacing: 0.18em;
+      text-transform: uppercase;
+      color: var(--text-dim);
+    }
+    .libs-add-body { padding: 16px; }
+
+    .browser-shell {
+      border: 1px solid var(--line);
+      border-radius: var(--r-sm);
+      background: var(--bg);
+      margin-bottom: 16px;
+      overflow: hidden;
+    }
+    .browser-head {
+      padding: 10px 14px;
+      border-bottom: 1px solid var(--line);
+      font-family: var(--mono);
+      font-size: 0.75rem;
+      letter-spacing: 0.06em;
+      color: var(--muted);
+      word-break: break-all;
+    }
+    .browser-head .label { color: var(--text-dim); margin-right: 6px; }
+    .browser-list {
+      max-height: 240px;
+      overflow: auto;
+      padding: 4px 0;
+    }
+    .browser-row {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 10px 14px;
+      font-family: var(--mono);
+      font-size: 0.85rem;
+      cursor: pointer;
+      border-bottom: 1px solid color-mix(in srgb, var(--line) 50%, transparent);
+    }
+    .browser-row:hover {
+      background: var(--surface-2);
+      color: var(--text);
+    }
+    .browser-row:last-child { border-bottom: 0; }
+    .browser-row .meta { color: var(--muted); font-size: 0.72rem; letter-spacing: 0.06em; text-transform: uppercase; }
+    .browser-row.is-parent { color: var(--text-dim); }
+
+    .kind-hint {
+      font-family: var(--mono);
+      font-size: 0.7rem;
+      letter-spacing: 0.1em;
+      color: var(--muted);
+      margin-top: -8px;
+      margin-bottom: 14px;
+    }
+
+    /* Scan output */
+    .scan-output {
+      border: 1px solid var(--line);
+      border-radius: var(--r-sm);
+      background: var(--bg);
+      padding: 14px;
+      font-family: var(--mono);
+      font-size: 0.78rem;
+      color: var(--text-dim);
+      white-space: pre-wrap;
+      word-break: break-all;
+      max-height: 240px;
+      overflow: auto;
+    }
+    .scan-output.success { border-color: var(--accent-line); color: var(--accent-strong); }
+
+    .continue-row {
+      display: flex;
+      justify-content: flex-end;
+      gap: 12px;
+      padding-top: 12px;
+    }
+    .help-text {
+      font-family: var(--mono);
+      font-size: 0.72rem;
+      letter-spacing: 0.06em;
+      color: var(--muted);
+      margin-top: -10px;
+      margin-bottom: 14px;
+      line-height: 1.5;
+    }
+  
