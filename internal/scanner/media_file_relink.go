@@ -2,7 +2,6 @@ package scanner
 
 import (
 	"context"
-	"fmt"
 	"log"
 	"path/filepath"
 	"strings"
@@ -13,42 +12,27 @@ import (
 // can leave stale track_id values; catalog then serves tracks with no
 // audioFiles and streaming returns "no audio files available".
 func (s *Scanner) reconcileMediaFileTrackLinks(ctx context.Context) (int, error) {
-	rows, err := s.db.QueryContext(ctx, `
-		SELECT id, library_id, track_id, track_pid
-		FROM media_files
-		WHERE TRIM(COALESCE(track_pid, '')) != ''`)
+	links, err := s.store.MediaFilesWithTrackPID(ctx)
 	if err != nil {
-		return 0, fmt.Errorf("list media files for track relink: %w", err)
+		return 0, err
 	}
-	defer rows.Close()
 
 	updated := 0
-	for rows.Next() {
-		var fileID, libraryID, trackID, trackPID string
-		if err := rows.Scan(&fileID, &libraryID, &trackID, &trackPID); err != nil {
+	for _, link := range links {
+		want := stableID("track", link.LibraryID, link.TrackPID)
+		// Nothing to do when the link is already right, and nothing safe to do
+		// when the track it implies does not exist — repointing at a missing
+		// track would only trade one broken link for another.
+		if want == strings.TrimSpace(link.TrackID) || !s.trackIDExists(ctx, want) {
+			continue
+		}
+		if err := s.store.SetMediaFileTrack(ctx, link.FileID, want); err != nil {
 			return updated, err
 		}
-		want := stableID("track", libraryID, trackPID)
-		if want == strings.TrimSpace(trackID) && s.trackIDExists(ctx, want) {
-			continue
-		}
-		if !s.trackIDExists(ctx, want) {
-			continue
-		}
-		if _, err := s.db.ExecContext(ctx, `
-			UPDATE media_files
-			SET track_id = ?,
-			    updated_at = CURRENT_TIMESTAMP
-			WHERE id = ?`, want, fileID); err != nil {
-			return updated, fmt.Errorf("relink media file %q to track %q: %w", fileID, want, err)
-		}
-		if old := strings.TrimSpace(trackID); old != "" && old != want {
+		if old := strings.TrimSpace(link.TrackID); old != "" && old != want {
 			s.noteTrackIDMigration(old, want)
 		}
 		updated++
-	}
-	if err := rows.Err(); err != nil {
-		return updated, err
 	}
 	if updated > 0 {
 		log.Printf("scanner: relinked track_id on %d media file(s)", updated)
@@ -77,38 +61,23 @@ func (s *Scanner) reconcileLongformMediaOwners(ctx context.Context) (int, error)
 }
 
 func (s *Scanner) reconcileAudiobookMediaOwners(ctx context.Context) (int, error) {
-	rows, err := s.db.QueryContext(ctx, `
-		SELECT mf.id, mf.library_id, mf.path, mf.audiobook_id, l.path
-		FROM media_files mf
-		JOIN libraries l ON l.id = mf.library_id
-		WHERE mf.audiobook_id IS NOT NULL
-		  AND TRIM(mf.audiobook_id) != ''
-		  AND NOT EXISTS (SELECT 1 FROM audiobooks a WHERE a.id = mf.audiobook_id)`)
+	orphans, err := s.store.OrphanAudiobookFiles(ctx)
 	if err != nil {
-		return 0, fmt.Errorf("list orphan audiobook media files: %w", err)
+		return 0, err
 	}
-	defer rows.Close()
 
 	updated := 0
-	for rows.Next() {
-		var fileID, libraryID, filePath, oldOwner, libraryRoot string
-		if err := rows.Scan(&fileID, &libraryID, &filePath, &oldOwner, &libraryRoot); err != nil {
-			return updated, err
-		}
-		want, ok := s.audiobookIDForMediaPath(ctx, libraryID, libraryRoot, filePath)
-		if !ok || want == oldOwner {
+	for _, orphan := range orphans {
+		want, ok := s.audiobookIDForMediaPath(ctx, orphan.LibraryID, orphan.LibraryRoot, orphan.Path)
+		if !ok || want == orphan.AudiobookID {
 			continue
 		}
-		if _, err := s.db.ExecContext(ctx, `
-			UPDATE media_files
-			SET audiobook_id = ?,
-			    updated_at = CURRENT_TIMESTAMP
-			WHERE id = ?`, want, fileID); err != nil {
-			return updated, fmt.Errorf("relink audiobook media file %q: %w", fileID, err)
+		if err := s.store.SetMediaFileAudiobook(ctx, orphan.FileID, want); err != nil {
+			return updated, err
 		}
 		updated++
 	}
-	return updated, rows.Err()
+	return updated, nil
 }
 
 func (s *Scanner) audiobookIDForMediaPath(ctx context.Context, libraryID, libraryRoot, filePath string) (string, bool) {
@@ -130,51 +99,30 @@ func (s *Scanner) audiobookIDExists(ctx context.Context, id string) bool {
 	if id == "" {
 		return false
 	}
-	var exists int
-	if err := s.db.QueryRowContext(ctx, `SELECT 1 FROM audiobooks WHERE id = ? LIMIT 1`, id).Scan(&exists); err != nil {
-		return false
-	}
-	return exists == 1
+	return s.store.AudiobookExists(ctx, id)
 }
 
 func (s *Scanner) reconcilePodcastMediaOwners(ctx context.Context) (int, error) {
-	rows, err := s.db.QueryContext(ctx, `
-		SELECT mf.id, mf.library_id, mf.path, mf.relative_path, mf.episode_id, mf.podcast_id, l.path
-		FROM media_files mf
-		JOIN libraries l ON l.id = mf.library_id
-		WHERE mf.episode_id IS NOT NULL
-		  AND TRIM(mf.episode_id) != ''
-		  AND NOT EXISTS (SELECT 1 FROM podcast_episodes e WHERE e.id = mf.episode_id)`)
+	orphans, err := s.store.OrphanPodcastFiles(ctx)
 	if err != nil {
-		return 0, fmt.Errorf("list orphan podcast media files: %w", err)
+		return 0, err
 	}
-	defer rows.Close()
 
 	updated := 0
-	for rows.Next() {
-		var fileID, libraryID, filePath, relPath, oldEpisode, oldPodcast, libraryRoot string
-		if err := rows.Scan(&fileID, &libraryID, &filePath, &relPath, &oldEpisode, &oldPodcast, &libraryRoot); err != nil {
-			return updated, err
-		}
-		wantEpisode, wantPodcast, ok := s.podcastOwnersForMediaPath(ctx, libraryID, libraryRoot, filePath, relPath)
+	for _, orphan := range orphans {
+		wantEpisode, wantPodcast, ok := s.podcastOwnersForMediaPath(ctx, orphan.LibraryID, orphan.LibraryRoot, orphan.Path, orphan.RelativePath)
 		if !ok {
 			continue
 		}
-		if wantEpisode == oldEpisode && wantPodcast == oldPodcast {
+		if wantEpisode == orphan.EpisodeID && wantPodcast == orphan.PodcastID {
 			continue
 		}
-		if _, err := s.db.ExecContext(ctx, `
-			UPDATE media_files
-			SET episode_id = ?,
-			    podcast_id = ?,
-			    updated_at = CURRENT_TIMESTAMP
-			WHERE id = ?`,
-			nullableString(wantEpisode), nullableString(wantPodcast), fileID); err != nil {
-			return updated, fmt.Errorf("relink podcast media file %q: %w", fileID, err)
+		if err := s.store.SetMediaFilePodcastOwners(ctx, orphan.FileID, wantEpisode, wantPodcast); err != nil {
+			return updated, err
 		}
 		updated++
 	}
-	return updated, rows.Err()
+	return updated, nil
 }
 
 func (s *Scanner) podcastOwnersForMediaPath(ctx context.Context, libraryID, libraryRoot, filePath, relPath string) (episodeID, podcastID string, ok bool) {
@@ -203,11 +151,7 @@ func (s *Scanner) episodeIDExists(ctx context.Context, id string) bool {
 	if id == "" {
 		return false
 	}
-	var exists int
-	if err := s.db.QueryRowContext(ctx, `SELECT 1 FROM podcast_episodes WHERE id = ? LIMIT 1`, id).Scan(&exists); err != nil {
-		return false
-	}
-	return exists == 1
+	return s.store.PodcastEpisodeExists(ctx, id)
 }
 
 func (s *Scanner) reconcileMediaFileOwners(ctx context.Context) error {

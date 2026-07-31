@@ -134,11 +134,7 @@ func (s *Scanner) trackIDExists(ctx context.Context, trackID string) bool {
 	if trackID == "" {
 		return false
 	}
-	var exists int
-	if err := s.db.QueryRowContext(ctx, `SELECT 1 FROM music_tracks WHERE id = ? LIMIT 1`, trackID).Scan(&exists); err != nil {
-		return false
-	}
-	return exists == 1
+	return s.store.MusicTrackExists(ctx, trackID)
 }
 
 func decodeTrackIDList(raw string) []string {
