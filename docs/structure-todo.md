@@ -86,11 +86,41 @@ Rollup bundles silently and which throws the first time that path runs. `make
 ui` lints before it builds. It caught 191 real errors on its first run — see
 `c91ea55` for the two ways a "purity" check gets this wrong.
 
-**59 of 190 functions are modularized** so far, the ones that touch no
-module-level binding at all. The remaining ~130 share 33 mutable bindings and
-38 consts (cached DOM handles, lookup maps), so they need state ownership
-decided per group — real work, not a mechanical move. Do it a group at a time,
-lint after each.
+**app.js is 3,123 lines across 13 modules**, down from 4,443 in one file.
+
+What unlocked it was `elements.js`: the 30 cached `getElementById` handles were
+the single biggest thing holding the file together (37 functions closed over
+`main` alone) and are not state at all. Moving them turned app.js from one
+state-connected blob into 85 components, 80 of them two functions or fewer.
+They export as plain consts, not accessors — an ES module import is a live
+binding, so every `main.innerHTML` kept working untouched.
+
+Then the state owners: `auth.js` (token, currentUser, `api()`), `stream.js`
+(stream token and every media URL built from one), `player.js`, `scan.js`,
+`identify.js`.
+
+### What is blocking the rest
+
+A **446-line delegated click handler** — one `if/else` chain on `data-action`
+covering every domain. It is why `musicMode`, `radioMode`, `podcastsMode`,
+`settingsMode`, `musicSort` and friends still live in app.js: nothing else
+writes them, so a `music.js` cannot own its own mode until the music actions
+move with it.
+
+Splitting that is a design change, not a move. The shape that works: an action
+registry each domain module contributes to (`registerActions({ "play-track":
+fn, ... })`), with the single listener doing lookup and dispatch. Do it one
+domain at a time — the registry can co-exist with the remaining `if/else` chain
+during the transition, so each step stays verifiable.
+
+Two things the tooling caught during the carve, worth keeping in mind:
+
+- A span detector that ends a function at the next `"  }"` line breaks on
+  one-liners, which have none, and silently swallows later code. `scripts/`
+  has no copy of this; the extractor asserted balanced braces and non-
+  overlapping spans before writing, which is what caught it.
+- `no-import-assign`: assigning to an imported binding throws at runtime in a
+  module. `playerTarget = null` had to become `clearPlayerTarget()`.
 
 `build/` is committed: `go:embed` is a compile-time dependency, so an absent
 build directory is a broken `go build`, not a stale UI. `make ui-check` fails
@@ -136,12 +166,12 @@ header rather than the query string.
 |---|---|---|
 | model/persistence split | catalog + scanner | everywhere |
 | SQL in service packages | 6 small packages, each isolating it in one file | none |
-| frontend | Vite build, 7 modules + a 3.7k-line core | React, built separately |
+| frontend | Vite build, 13 modules + a 3.1k-line core | React, built separately |
 | live updates | SSE | SSE |
 
-No row is now a missing capability. What remains on the frontend is continuing
-to carve up `app.js` — ordinary work, and safe to do incrementally now that
-`no-undef` catches a missed import at build time.
+No row is now a missing capability. What remains on the frontend is the action
+registry above, and then the domain modules it unblocks — safe to do
+incrementally now that `no-undef` catches a missed import at build time.
 
 Deliberately *not* copying: repository interfaces. Navidrome needs
 `model.DataStore` for mock-based unit tests and historical multi-backend
