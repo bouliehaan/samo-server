@@ -10,12 +10,15 @@ import "./app.css";
 import { api, currentUser, isAdmin, lastFMPendingStorageKey, legacyLastFMPendingKey, loginRedirect, setCurrentUser, token, tokenKey } from "./ui/auth.js";
 import { audiobookCoverURL, audiobookStreamURL, audiobookStreamURLAt, channelStreamURL, ensureStreamToken, musicCoverURL, musicPlaylistCoverURL, musicStreamURL, podcastCoverURL, podcastEpisodeStreamURL, podcastEpisodeStreamURLAt, radioCoverURL, refreshStreamToken } from "./ui/stream.js";
 
-import { activityBody, activityPanel, audio, identifyForm, identifyModal, identifyQuery, identifyResults, identifyTitle, main, nav, nowPlayingBtn, nowPlayingSub, playerDock, playerDurationEl, playerGlyph, playerSeek, playerSeekBar, playerSeekHead, playerStop, playerSub, playerTimeEl, playerTitle, playerToggle, refreshBtn, refreshRing, refreshSub, scanCancelBtn, scanPanel, scanPanelCurrent, scanPanelHistory } from "./ui/elements.js";
+import { activityBody, activityPanel, audio, identifyForm, identifyModal, identifyResults, main, nav, nowPlayingBtn, nowPlayingSub, playerDock, playerSeek, playerStop, playerSub, playerTitle, playerToggle, scanPanel } from "./ui/elements.js";
 
 import { connect as connectEvents } from "./ui/events.js";
+import { cancelActiveScan, closeScanPanel, configureScanUI, ensureScanAvailable, handleScanJobEvent, openScanPanel, rememberLibraries, triggerLibraryRepair, triggerLibraryScan, triggerScan, updateRefreshUI, watchScanJob } from "./ui/scan.js";
+import { applyStreamResumeSeek, clearPlayerTarget, flushPlaybackProgress, patchPlayback, playbackGlobalSeconds, playURL, playerTarget, refreshSeekUI, reportPlaybackProgress, resetProgressThrottle, seekFromPointer, setPlayerGlyph } from "./ui/player.js";
+import { closeIdentifyModal, identifyCandidates, identifyContext, openIdentifyModal, runIdentifySearch } from "./ui/identify.js";
 import { channelCard, channelNowPlayingBody, channelScheduleTimeline } from "./ui/channels.js";
 import { composerChannel, composerChannelSchedule, composerChannelSourceFile, composerChannelSourceInternet, composerChannelSourceLive, composerChannelSourcePodcast, composerClose, composerLibrary, composerMessage, composerPlaylist, composerPlaylistEdit, composerPlaylistImport, composerPodcastAttachFeed, composerPodcastFeed, composerRadioStation, fieldHTML, toggleComposer } from "./ui/composer.js";
-import { formatClock, formatDataSize, formatDate, formatDuration, formatUptime, minuteToHHMM, parseHHMM, weekdayMaskToLabel } from "./ui/format.js";
+import { formatDataSize, formatDate, formatDuration, formatUptime, minuteToHHMM, parseHHMM, weekdayMaskToLabel } from "./ui/format.js";
 import { attr, escapeHTML, progressBar, setMessage, setStatus, splitTags, tagsLine } from "./ui/html.js";
 import { audiobookSub, audiobookTitle, browseAlbums, browseResultCount, candidateFeedURL, isLibraryFolderPodcast, libraryKindLabel, musicPaginationFooter, nowPlayingLine, playlistCoverBlock, podcastHasLinkedFeed, podcastSub, podcastTitle, recentlyAddedKindLabel, scanPruneSummary } from "./ui/labels.js";
 import { globalScanActionsHTML, libraryKindScanActionsHTML, libraryScanActionsHTML, withButton } from "./ui/scan_actions.js";
@@ -23,9 +26,6 @@ import { globalScanActionsHTML, libraryKindScanActionsHTML, libraryScanActionsHT
 (function () {
 
   if (!token) { loginRedirect(); return; }
-
-  const GLYPH_PAUSE = "▌▌";
-  const GLYPH_PLAY = "▶";
 
   async function findPodcastLinkedFeed(podcastId) {
     const data = await api("/api/v1/podcasts/feeds?limit=500").catch(() => ({ items: [] }));
@@ -64,8 +64,6 @@ import { globalScanActionsHTML, libraryKindScanActionsHTML, libraryScanActionsHT
   let radioMode = "channels";
   let activeChannelID = "";
   let searchQuery = "";
-  let playerTarget = null;
-  let lastProgressSync = 0;
 
   function renderLoading() {
     main.innerHTML = "<div class=\"boot-line\">// loading...</div>";
@@ -105,48 +103,10 @@ import { globalScanActionsHTML, libraryKindScanActionsHTML, libraryScanActionsHT
     return raw === "true";
   }
 
-  /* ---- Header scan + activity -------------------------------------------
-   * REFRESH in the utility bar shows live scan progress and opens the
-   * detail panel on click. Resumes in-flight jobs on page load. */
-  let scanWatchJobID = "";
-  let scanLastFilesSeen = 0;
-  let scanLastLabel = "SCAN";
-  let scanLastText = "starting…";
-  let scanLastState = "idle";
-  let libraryNameById = {};
-
-  function rememberLibraries(libs) {
-    (libs || []).forEach((lib) => {
-      if (lib && lib.id) libraryNameById[lib.id] = lib.name || lib.id;
-    });
-  }
-
-  function scanJobScopeLabel(job) {
-    if (!job) return "scan";
-    const mode = job.scanMode ? String(job.scanMode).toUpperCase() : "";
-    if (job.scope === "subpaths") {
-      const name = libraryNameById[job.libraryId] || job.libraryId || "library";
-      return (mode ? mode + " · " : "") + "incremental · " + name;
-    }
-    if (job.scope === "library") {
-      const name = libraryNameById[job.libraryId] || job.libraryId || "library";
-      return (mode ? mode + " · " : "") + name;
-    }
-    return (mode ? mode + " · " : "") + "all libraries";
-  }
-
   async function loadLibraries() {
     const data = await api("/api/v1/libraries").catch(() => ({ items: [] }));
     rememberLibraries((data && data.items) || []);
     return (data && data.items) || [];
-  }
-
-  async function ensureScanAvailable() {
-    if (scanLastState === "running") {
-      await openScanPanel();
-      return false;
-    }
-    return true;
   }
 
   async function triggerGlobalScan(mode) {
@@ -154,128 +114,7 @@ import { globalScanActionsHTML, libraryKindScanActionsHTML, libraryScanActionsHT
     await triggerScan(() => api("/api/v1/scan", { method: "POST", body: { mode: mode } }));
   }
 
-  async function triggerLibraryScan(libraryID, mode, libraryName) {
-    libraryID = String(libraryID || "").trim();
-    mode = String(mode || "quick").trim() || "quick";
-    if (!libraryID) {
-      updateRefreshUI("error", "FAILED", "library not found");
-      return;
-    }
-    if (!(await ensureScanAvailable())) return;
-    const label = libraryName || libraryNameById[libraryID] || "library";
-    await triggerScan(async () => {
-      const result = await api("/api/v1/libraries/" + encodeURIComponent(libraryID) + "/scan", {
-        method: "POST",
-        body: { mode: mode },
-      });
-      const job = result && result.job;
-      if (job && job.scope === "library" && job.libraryId && job.libraryId !== libraryID) {
-        throw new Error("server attached scan to a different library");
-      }
-      scanLastLabel = label.toUpperCase();
-      return result;
-    });
-  }
-
-  async function triggerLibraryRepair(libraryID, libraryName) {
-    libraryID = String(libraryID || "").trim();
-    if (!libraryID) {
-      updateRefreshUI("error", "FAILED", "library not found");
-      return;
-    }
-    if (!(await ensureScanAvailable())) return;
-    const label = libraryName || libraryNameById[libraryID] || "library";
-    await triggerScan(async () => {
-      scanLastLabel = label.toUpperCase();
-      return api("/api/v1/libraries/" + encodeURIComponent(libraryID) + "/scan", { method: "POST", body: { mode: "repair" } });
-    });
-  }
-
-  function updateRefreshUI(state, label, text) {
-    scanLastState = state;
-    scanLastLabel = label || "SCAN";
-    scanLastText = text || "";
-    if (!refreshBtn || !refreshSub) return;
-    refreshBtn.classList.remove("running", "ok", "error");
-    if (state === "running") refreshBtn.classList.add("running");
-    if (state === "ok") refreshBtn.classList.add("ok");
-    if (state === "error") refreshBtn.classList.add("error");
-    if (refreshRing) refreshRing.hidden = state !== "running";
-    if (scanCancelBtn) scanCancelBtn.hidden = state !== "running" || !scanWatchJobID || scanLastLabel === "CANCEL";
-    if (state === "running") refreshSub.textContent = text || "SCANNING";
-    else if (state === "ok") refreshSub.textContent = text || "DONE";
-    else if (state === "error") refreshSub.textContent = text || "FAILED";
-    else refreshSub.textContent = "READY";
-    refreshScanPanelCurrent();
-  }
-
-  function closeScanPanel() { if (scanPanel) scanPanel.hidden = true; }
   function closeActivityPanel() { if (activityPanel) activityPanel.hidden = true; }
-
-  function renderScanJobRow(job, highlight) {
-    const seen = job.filesSeen || 0;
-    const total = job.filesTotal || 0;
-    let filesText = total > 0 ? (seen + " / " + total + " files") : (seen + " files indexed");
-    if (job.currentPath && (job.status === "running" || job.status === "pending")) {
-      filesText += " · " + job.currentPath;
-    } else if (seen === 0 && (job.status === "running" || job.status === "pending")) {
-      filesText = "enumerating library…";
-    }
-    const scope = scanJobScopeLabel(job);
-    return '<div class="scan-job-row' + (highlight ? " active" : "") + '">' +
-      '<div class="name">' + escapeHTML(String(job.status || "unknown").toUpperCase()) + " · " + escapeHTML(scope.toUpperCase()) + '</div>' +
-      '<div class="meta">' + escapeHTML(filesText) +
-        " · started " + formatDate(job.startedAt) +
-        escapeHTML(scanPruneSummary(job)) +
-        (job.error ? " · " + escapeHTML(job.error) : "") +
-      '</div></div>';
-  }
-
-  function refreshScanPanelCurrent() {
-    if (!scanPanel || scanPanel.hidden || !scanPanelCurrent) return;
-    if (scanWatchJobID && scanLastState === "running") {
-      const label = scanLastLabel === "CANCEL" ? "CANCELLING" : "RUNNING";
-      scanPanelCurrent.innerHTML = '<div class="scan-job-row active"><div class="name">' + label + ' · ' + escapeHTML(scanLastLabel === "CANCEL" ? "SCAN" : scanLastLabel) + '</div><div class="meta">' + escapeHTML(scanLastText) + '</div></div>';
-    }
-  }
-
-  async function openScanPanel() {
-    if (!scanPanel) return;
-    closeActivityPanel();
-    scanPanel.hidden = false;
-    if (scanPanelCurrent) scanPanelCurrent.innerHTML = '<div class="boot-line">// loading...</div>';
-    if (scanPanelHistory) scanPanelHistory.innerHTML = "";
-    try {
-      const [jobs, libraries] = await Promise.all([
-        api("/api/v1/scan/jobs?limit=12"),
-        api("/api/v1/libraries").catch(() => ({ items: [] })),
-      ]);
-      rememberLibraries((libraries && libraries.items) || []);
-      const items = (jobs && jobs.items) || [];
-      let active = scanWatchJobID ? items.find((job) => job.id === scanWatchJobID) : null;
-      if (!active) active = items.find((job) => job.status === "running" || job.status === "pending") || null;
-      if (scanPanelCurrent) {
-        if (active) scanPanelCurrent.innerHTML = renderScanJobRow(active, true);
-        else if (scanLastState === "running") {
-          scanPanelCurrent.innerHTML = '<div class="scan-job-row active"><div class="name">RUNNING</div><div class="meta">' + escapeHTML(scanLastText) + '</div></div>';
-        } else {
-          scanPanelCurrent.innerHTML = '<div class="empty-state">// no scan running</div>';
-        }
-      }
-      if (scanCancelBtn) {
-        scanCancelBtn.hidden = !(active && (active.status === "running" || active.status === "pending"));
-      }
-      if (scanPanelHistory) {
-        if (items.length) {
-          scanPanelHistory.innerHTML = '<div class="scan-history-head">// recent jobs</div>' + items.map((job) => renderScanJobRow(job, active && job.id === active.id)).join("");
-        } else {
-          scanPanelHistory.innerHTML = '<div class="empty-state">// no scan history yet</div>';
-        }
-      }
-    } catch (err) {
-      if (scanPanelCurrent) scanPanelCurrent.innerHTML = '<div class="empty-state">// ' + escapeHTML(err.message) + '</div>';
-    }
-  }
 
   async function openActivityPanel() {
     if (!activityPanel || !activityBody) return;
@@ -308,66 +147,6 @@ import { globalScanActionsHTML, libraryKindScanActionsHTML, libraryScanActionsHT
         (last && last.error ? '<div class="status-line bad">' + escapeHTML(last.error) + '</div>' : '');
     } catch (err) {
       activityBody.innerHTML = '<div class="empty-state">// ' + escapeHTML(err.message) + '</div>';
-    }
-  }
-
-  function applyScanJobStatus(job, jobID) {
-    scanLastFilesSeen = job.filesSeen || 0;
-    const total = job.filesTotal || 0;
-    if (job.status === "running" || job.status === "pending") {
-      if (scanLastLabel !== "CANCEL") {
-        let progress = total > 0 ? scanLastFilesSeen + " of " + total + " files" : scanLastFilesSeen + " files";
-        if (job.currentPath) {
-          progress += " · " + job.currentPath;
-        } else if (scanLastFilesSeen === 0) {
-          progress = "enumerating library…";
-        }
-        updateRefreshUI("running", "SCAN", scanJobScopeLabel(job) + " · " + progress);
-      }
-      return false;
-    }
-    if (scanWatchJobID === jobID) {
-      scanWatchJobID = "";
-    }
-    if (job.status === "completed") {
-      const parts = [scanLastFilesSeen + " files"];
-      if (job.filesPruned) parts.push(job.filesPruned + " stale files");
-      if (job.itemsPruned) parts.push(job.itemsPruned + " orphan items");
-      updateRefreshUI("ok", "DONE", parts.join(" · "));
-      setTimeout(() => updateRefreshUI("idle", "SCAN", "READY"), 5000);
-    } else if (job.status === "cancelled") {
-      const parts = [(scanLastFilesSeen || job.filesSeen || 0) + " files indexed"];
-      updateRefreshUI("idle", "CANCELLED", parts.join(" · "));
-      setTimeout(() => updateRefreshUI("idle", "SCAN", "READY"), 5000);
-    } else {
-      updateRefreshUI("error", "FAILED", job.error || "scan failed");
-    }
-    return true;
-  }
-
-  // Watching a scan is now just remembering which job we care about: progress
-  // arrives on the event stream. The one fetch here covers the gap between the
-  // job existing and its first published snapshot.
-  async function watchScanJob(jobID) {
-    if (!jobID) return;
-    scanWatchJobID = jobID;
-    scanLastFilesSeen = 0;
-    updateRefreshUI("running", "SCAN", "starting...");
-    try {
-      await handleScanJobEvent(await api("/api/v1/scan/jobs/" + encodeURIComponent(jobID)));
-    } catch (err) {
-      scanWatchJobID = "";
-      updateRefreshUI("error", "FAILED", err.message || "could not read scan job");
-    }
-  }
-
-  // Applies one scan-job snapshot, from the stream or from the initial fetch.
-  // Snapshots for a job we are not watching are ignored — a second dashboard
-  // can start a scan we never asked about.
-  async function handleScanJobEvent(job) {
-    if (!job || !job.id || job.id !== scanWatchJobID) return;
-    if (applyScanJobStatus(job, job.id) && activeTab && views[activeTab]) {
-      await views[activeTab]();
     }
   }
 
@@ -426,55 +205,6 @@ import { globalScanActionsHTML, libraryKindScanActionsHTML, libraryScanActionsHT
       if (job && (job.status === "running" || job.status === "pending")) watchArtistImageBackfill();
     } catch {
       // No backfill job to resume.
-    }
-  }
-
-  async function cancelActiveScan() {
-    const jobID = scanWatchJobID;
-    if (!jobID) return;
-    if (!confirm("Cancel the running scan? Files already indexed stay in your library.")) return;
-    updateRefreshUI("running", "CANCEL", "cancelling…");
-    if (scanCancelBtn) scanCancelBtn.hidden = true;
-    try {
-      await api("/api/v1/scan/jobs/" + encodeURIComponent(jobID) + "/cancel", { method: "POST" });
-    } catch (err) {
-      updateRefreshUI("error", "FAILED", err.message || "cancel failed");
-      if (scanCancelBtn) scanCancelBtn.hidden = false;
-      return;
-    }
-    const deadline = Date.now() + 60000;
-    while (Date.now() < deadline && scanWatchJobID === jobID) {
-      try {
-        const job = await api("/api/v1/scan/jobs/" + encodeURIComponent(jobID));
-        if (applyScanJobStatus(job, jobID)) {
-          if (activeTab && views[activeTab]) await views[activeTab]();
-          if (scanPanel && !scanPanel.hidden) await openScanPanel();
-          return;
-        }
-      } catch (err) {
-        scanWatchJobID = "";
-        updateRefreshUI("error", "FAILED", err.message || "could not read scan job");
-        return;
-      }
-      await new Promise((resolve) => setTimeout(resolve, 200));
-    }
-  }
-
-  async function triggerScan(kickoff) {
-    updateRefreshUI("running", "SCAN", "starting...");
-    try {
-      const result = await kickoff();
-      const jobID = result && result.job && result.job.id;
-      if (!jobID) { updateRefreshUI("error", "FAILED", "no job id returned"); return; }
-      watchScanJob(jobID);
-    } catch (err) {
-      const message = err.message || "scan failed";
-      if (message.toLowerCase().includes("already in progress")) {
-        updateRefreshUI("error", "BUSY", "another scan running");
-        await openScanPanel();
-        return;
-      }
-      updateRefreshUI("error", "FAILED", message);
     }
   }
 
@@ -551,16 +281,6 @@ import { globalScanActionsHTML, libraryKindScanActionsHTML, libraryScanActionsHT
     '</label>';
   }
 
-  /* ---- Identify modal ---------------------------------------------------
-   * Fronts /api/v1/metadata/search (OpenLibrary, Google Books, Apple
-   * Podcasts) and /api/v1/metadata/apply. The same modal serves both
-   * audiobooks (kind=audiobook → ApplyTargetAudiobook) and podcast shows
-   * (kind=podcast → ApplyTargetPodcast). Music tracks/albums could be
-   * wired in by adding a third button, but the user's complaint was
-   * specifically about audiobooks/podcasts. */
-  let identifyContext = null;
-  let identifyCandidates = [];
-
   identifyForm.addEventListener("submit", async (event) => {
     event.preventDefault();
     if (!identifyContext) return;
@@ -589,76 +309,6 @@ import { globalScanActionsHTML, libraryKindScanActionsHTML, libraryScanActionsHT
       else audio.pause();
     }
   });
-
-  async function openIdentifyModal(kind, id, title, author) {
-    identifyContext = { kind, id };
-    identifyCandidates = [];
-    identifyTitle.textContent = title || "Identify";
-    identifyQuery.value = [title, author].filter(Boolean).join(" ");
-    identifyResults.innerHTML = '<div class="boot-line">// type a query and search</div>';
-    identifyModal.hidden = false;
-    identifyQuery.focus();
-    if (identifyQuery.value.trim()) await runIdentifySearch();
-  }
-
-  function closeIdentifyModal() {
-    identifyModal.hidden = true;
-    identifyContext = null;
-    identifyCandidates = [];
-    identifyResults.innerHTML = "";
-  }
-
-  async function runIdentifySearch() {
-    if (!identifyContext) return;
-    const kind = identifyContext.kind === "podcast" ? "podcast" : "audiobook";
-    const q = identifyQuery.value.trim();
-    if (!q) return;
-    identifyResults.innerHTML = '<div class="boot-line">// searching providers...</div>';
-    try {
-      const response = await api("/api/v1/metadata/search?kind=" + encodeURIComponent(kind) + "&q=" + encodeURIComponent(q) + "&limit=10");
-      const candidates = (response && response.results) || [];
-      const providers = (response && response.providers) || [];
-      const providerErrors = (response && response.providerErrors) || [];
-      if (providers.length === 0) {
-        identifyCandidates = [];
-        identifyResults.innerHTML = '<div class="empty-state">// metadata providers are disabled · enable SAMO_METADATA_PROVIDERS=openlibrary,googlebooks,itunes,musicbrainz or use the default server config</div>';
-        return;
-      }
-      if (candidates.length === 0) {
-        identifyCandidates = [];
-        if (providerErrors.length > 0) {
-          identifyResults.innerHTML = '<div class="empty-state">// provider errors: ' + escapeHTML(providerErrors.map((item) => (item.provider || "provider") + ": " + (item.error || "failed")).join(" · ")) + '</div>';
-        } else {
-          identifyResults.innerHTML = '<div class="empty-state">// no matches across providers</div>';
-        }
-        return;
-      }
-      identifyCandidates = candidates;
-      identifyResults.innerHTML = candidates.map((candidate, idx) => identifyResultRow(candidate, idx)).join("");
-    } catch (err) {
-      identifyCandidates = [];
-      identifyResults.innerHTML = '<div class="empty-state">// ' + escapeHTML(err.message || "search failed") + '</div>';
-    }
-  }
-
-  function identifyResultRow(candidate, idx) {
-    const cover = (candidate.cover && candidate.cover.url) || "";
-    const coverStyle = cover ? 'style="background-image:url(&quot;' + attr(cover) + '&quot;)"' : "";
-    const authors = (candidate.authors || []).map((person) => person.name).join(", ");
-    const feedURL = identifyContext && identifyContext.kind === "podcast" ? candidateFeedURL(candidate) : "";
-    const metaParts = [candidate.provider || "", authors, candidate.publishedYear || candidate.publishedDate || ""].filter(Boolean);
-    if (feedURL) metaParts.push("RSS");
-    return '<div class="identify-result">' +
-      '<div class="cover" ' + coverStyle + '></div>' +
-      '<div><div class="title">' + escapeHTML(candidate.title || "Untitled") + '</div>' +
-        '<div class="meta">' + escapeHTML(metaParts.join(" · ")) + '</div>' +
-        (feedURL ? '<div class="meta">' + escapeHTML(feedURL) + '</div>' : "") +
-        '</div>' +
-      '<button class="btn primary btn-mini" data-action="identify-apply" data-kind="' + attr(identifyContext ? identifyContext.kind : "audiobook") + '" data-id="' + attr(identifyContext ? identifyContext.id : "") + '" data-idx="' + idx + '">' +
-        (feedURL && identifyContext && identifyContext.kind === "podcast" ? "APPLY + LINK RSS" : "APPLY") +
-      '</button>' +
-    '</div>';
-  }
 
   /* runBulkIdentify iterates every audiobook (or podcast) in the catalog
    * and calls metadata search + apply for each one. The top candidate
@@ -751,52 +401,6 @@ import { globalScanActionsHTML, libraryKindScanActionsHTML, libraryScanActionsHT
     }
   }
 
-  function patchPlayback(kind, id, patch) {
-    return api("/api/v1/playback/" + encodeURIComponent(kind) + "/" + encodeURIComponent(id), {
-      method: "PATCH",
-      body: patch,
-    });
-  }
-
-  function playbackGlobalSeconds(target) {
-    if (!target) return 0;
-    if (target.kind === "audiobook" || target.kind === "podcast-episode") {
-      return (target.globalBase || 0) + Math.floor(audio.currentTime || 0);
-    }
-    return Math.floor(audio.currentTime || 0);
-  }
-
-  function flushPlaybackProgress() {
-    if (!playerTarget) return;
-    const now = playbackGlobalSeconds(playerTarget);
-    if (now <= 0) return;
-    if (playerTarget.kind === "audiobook") {
-      patchPlayback("audiobook", playerTarget.id, { progressSeconds: now, touchLastPositionAt: true }).catch(() => {});
-    } else if (playerTarget.kind === "music-track" || playerTarget.kind === "podcast-episode") {
-      patchPlayback(playerTarget.kind, playerTarget.id, { progressSeconds: now, touchLastPositionAt: true }).catch(() => {});
-    }
-  }
-
-  function playURL(url, title, subtitle, target) {
-    flushPlaybackProgress();
-    playerTarget = target || null;
-    lastProgressSync = playerTarget ? (playerTarget.globalBase || 0) : 0;
-    playerTitle.textContent = title || "UNKNOWN";
-    playerSub.textContent = subtitle || "";
-    if (nowPlayingBtn && nowPlayingSub) {
-      nowPlayingBtn.hidden = false;
-      nowPlayingSub.textContent = (title || "PLAYING").toUpperCase();
-    }
-    playerDock.hidden = false;
-    setPlayerGlyph(false);
-    audio.src = url;
-    refreshSeekUI();
-    audio.play().catch((err) => {
-      setPlayerGlyph(true);
-      setStatus("PLAYER · " + (err.message || "blocked"));
-    });
-  }
-
   async function playTrack(id, title, subtitle, duration) {
     playURL(musicStreamURL(id), title || "Track", subtitle || "Music", { kind: "music-track", id: id, duration: duration || 0 });
     try {
@@ -844,71 +448,6 @@ import { globalScanActionsHTML, libraryKindScanActionsHTML, libraryScanActionsHT
     }
   }
 
-  function setPlayerGlyph(paused) {
-    if (!playerGlyph) return;
-    playerGlyph.textContent = paused ? GLYPH_PLAY : GLYPH_PAUSE;
-    if (playerToggle) playerToggle.setAttribute("aria-label", paused ? "Play" : "Pause");
-  }
-
-  function applyStreamResumeSeek() {
-    if (!playerTarget) return;
-    const base = playerTarget.globalBase || 0;
-    if (base <= 0) return;
-    const fileDur = isFinite(audio.duration) ? audio.duration : 0;
-    if (fileDur <= 0) return;
-    const total = playerTarget.duration || 0;
-    // Tail-only partial response: currentTime 0 already matches globalBase audibly.
-    if (total > 0 && fileDur < total * 0.85) return;
-    if (audio.currentTime >= 0.75) return;
-    const cap = total > 0 ? Math.min(base, total - 0.25) : base;
-    const target = Math.min(cap, fileDur - 0.05);
-    if (target > 0) {
-      audio.currentTime = target;
-      // Full file in the browser — position lives in currentTime only. Keeping
-      // globalBase would double-count on save (globalBase + currentTime).
-      playerTarget.globalBase = 0;
-      lastProgressSync = Math.floor(target);
-    }
-  }
-
-  function refreshSeekUI() {
-    if (!playerSeekBar || !playerSeekHead) return;
-    const fileDur = isFinite(audio.duration) ? audio.duration : 0;
-    const globalNow =
-      playerTarget && (playerTarget.kind === "audiobook" || playerTarget.kind === "podcast-episode")
-        ? playbackGlobalSeconds(playerTarget)
-        : Math.floor(audio.currentTime || 0);
-    const totalDur =
-      playerTarget &&
-      (playerTarget.kind === "audiobook" || playerTarget.kind === "podcast-episode") &&
-      playerTarget.duration > 0
-        ? playerTarget.duration
-        : fileDur;
-    const pct = totalDur > 0 ? Math.min(100, (globalNow / totalDur) * 100) : 0;
-    playerSeekBar.style.width = pct + "%";
-    playerSeekHead.style.left = pct + "%";
-    if (playerTimeEl) playerTimeEl.textContent = formatClock(globalNow);
-    if (playerDurationEl) playerDurationEl.textContent = formatClock(totalDur);
-    if (playerSeek) playerSeek.setAttribute("aria-valuenow", String(Math.round(pct)));
-  }
-
-  function seekFromPointer(event) {
-    if (!playerSeek) return;
-    const rect = playerSeek.getBoundingClientRect();
-    const x = Math.max(0, Math.min(rect.width, event.clientX - rect.left));
-    const fileDur = isFinite(audio.duration) ? audio.duration : 0;
-    if (fileDur <= 0) return;
-    if (playerTarget && (playerTarget.kind === "audiobook" || playerTarget.kind === "podcast-episode")) {
-      const total = playerTarget.duration || fileDur;
-      const globalTarget = (x / rect.width) * total;
-      const base = playerTarget.globalBase || 0;
-      audio.currentTime = Math.max(0, Math.min(fileDur - 0.05, globalTarget - base));
-    } else {
-      audio.currentTime = (x / rect.width) * fileDur;
-    }
-    refreshSeekUI();
-  }
-
   playerToggle.addEventListener("click", () => {
     if (!audio.src) return;
     if (audio.paused) {
@@ -932,7 +471,7 @@ import { globalScanActionsHTML, libraryKindScanActionsHTML, libraryScanActionsHT
       }
       setPlayerGlyph(true);
       refreshSeekUI();
-      playerTarget = null;
+      clearPlayerTarget();
     });
   }
 
@@ -983,19 +522,7 @@ import { globalScanActionsHTML, libraryKindScanActionsHTML, libraryScanActionsHT
   audio.addEventListener("canplay", applyStreamResumeSeek);
   audio.addEventListener("timeupdate", () => {
     refreshSeekUI();
-    if (!playerTarget) return;
-    if (playerTarget.kind === "audiobook" || playerTarget.kind === "podcast-episode") {
-      const globalNow = playbackGlobalSeconds(playerTarget);
-      if (globalNow <= 0 || globalNow - lastProgressSync < 20) return;
-      lastProgressSync = globalNow;
-      patchPlayback(playerTarget.kind, playerTarget.id, { progressSeconds: globalNow, touchLastPositionAt: true }).catch(() => {});
-      return;
-    }
-    if (playerTarget.kind !== "music-track") return;
-    const now = Math.floor(audio.currentTime || 0);
-    if (now <= 0 || now - lastProgressSync < 20) return;
-    lastProgressSync = now;
-    patchPlayback(playerTarget.kind, playerTarget.id, { progressSeconds: now, touchLastPositionAt: true }).catch(() => {});
+    reportPlaybackProgress();
   });
   audio.addEventListener("ended", () => {
     setPlayerGlyph(true);
@@ -1006,7 +533,7 @@ import { globalScanActionsHTML, libraryKindScanActionsHTML, libraryScanActionsHT
       const total = playerTarget.duration || 0;
       if (total > 0 && globalNow < total - 2) {
         playerTarget.globalBase = globalNow;
-        lastProgressSync = 0;
+        resetProgressThrottle();
         playURL(audiobookStreamURLAt(playerTarget.id, globalNow), playerTitle.textContent, playerSub.textContent, playerTarget);
         audio.play().catch((err) => {
           setPlayerGlyph(true);
@@ -3568,6 +3095,10 @@ import { globalScanActionsHTML, libraryKindScanActionsHTML, libraryScanActionsHT
       // Refresh the stream token well before its TTL so audio/img URLs
       // rendered later in the session keep working without flicker.
       setInterval(() => { refreshStreamToken().catch(() => {}); }, 20 * 60 * 1000);
+      configureScanUI({
+        refreshActiveView: async () => { if (activeTab && views[activeTab]) await views[activeTab](); },
+        closeOtherPanels: closeActivityPanel,
+      });
       setStatus("ONLINE · CATALOG READY");
       startEventStream();
       await resumeActiveScan();
