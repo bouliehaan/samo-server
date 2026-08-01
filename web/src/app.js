@@ -7,6 +7,11 @@
 // cascade — as a separate shared chunk its order would not be guaranteed.
 import "./app.css";
 
+import { api, currentUser, isAdmin, lastFMPendingStorageKey, legacyLastFMPendingKey, loginRedirect, setCurrentUser, token, tokenKey } from "./ui/auth.js";
+import { audiobookCoverURL, audiobookStreamURL, audiobookStreamURLAt, channelStreamURL, ensureStreamToken, musicCoverURL, musicPlaylistCoverURL, musicStreamURL, podcastCoverURL, podcastEpisodeStreamURL, podcastEpisodeStreamURLAt, radioCoverURL, refreshStreamToken } from "./ui/stream.js";
+
+import { activityBody, activityPanel, audio, identifyForm, identifyModal, identifyQuery, identifyResults, identifyTitle, main, nav, nowPlayingBtn, nowPlayingSub, playerDock, playerDurationEl, playerGlyph, playerSeek, playerSeekBar, playerSeekHead, playerStop, playerSub, playerTimeEl, playerTitle, playerToggle, refreshBtn, refreshRing, refreshSub, scanCancelBtn, scanPanel, scanPanelCurrent, scanPanelHistory } from "./ui/elements.js";
+
 import { connect as connectEvents } from "./ui/events.js";
 import { channelCard, channelNowPlayingBody, channelScheduleTimeline } from "./ui/channels.js";
 import { composerChannel, composerChannelSchedule, composerChannelSourceFile, composerChannelSourceInternet, composerChannelSourceLive, composerChannelSourcePodcast, composerClose, composerLibrary, composerMessage, composerPlaylist, composerPlaylistEdit, composerPlaylistImport, composerPodcastAttachFeed, composerPodcastFeed, composerRadioStation, fieldHTML, toggleComposer } from "./ui/composer.js";
@@ -16,42 +21,11 @@ import { audiobookSub, audiobookTitle, browseAlbums, browseResultCount, candidat
 import { globalScanActionsHTML, libraryKindScanActionsHTML, libraryScanActionsHTML, withButton } from "./ui/scan_actions.js";
 
 (function () {
-  const tokenKey = "samo-token";
-  const legacyLastFMPendingKey = "samo-lastfm-token";
 
-  function loginRedirect() {
-    // Preserve the deep-link the user was trying to reach so login can
-    // bounce them back to /app#audiobooks or wherever they came from.
-    const next = encodeURIComponent(window.location.pathname + window.location.hash);
-    window.location.href = "/login?next=" + next;
-  }
-
-  let token = localStorage.getItem(tokenKey) || "";
   if (!token) { loginRedirect(); return; }
-
-  const main = document.getElementById("appMain");
-  const nav = document.getElementById("appNav");
-  const playerDock = document.getElementById("playerDock");
-  const audio = document.getElementById("audioPlayer");
-  const playerTitle = document.getElementById("playerTitle");
-  const playerSub = document.getElementById("playerSub");
-  const playerToggle = document.getElementById("playerToggle");
-  const playerGlyph = document.getElementById("playerGlyph");
-  const playerStop = document.getElementById("playerStop");
-  const playerSeek = document.getElementById("playerSeek");
-  const playerSeekBar = document.getElementById("playerSeekBar");
-  const playerSeekHead = document.getElementById("playerSeekHead");
-  const playerTimeEl = document.getElementById("playerTime");
-  const playerDurationEl = document.getElementById("playerDuration");
 
   const GLYPH_PAUSE = "▌▌";
   const GLYPH_PLAY = "▶";
-
-  let currentUser = null;
-
-  function isAdmin() {
-    return currentUser && currentUser.role === "admin";
-  }
 
   async function findPodcastLinkedFeed(podcastId) {
     const data = await api("/api/v1/podcasts/feeds?limit=500").catch(() => ({ items: [] }));
@@ -93,31 +67,6 @@ import { globalScanActionsHTML, libraryKindScanActionsHTML, libraryScanActionsHT
   let playerTarget = null;
   let lastProgressSync = 0;
 
-  function lastFMPendingStorageKey() {
-    const userID = currentUser && currentUser.id ? currentUser.id : "anonymous";
-    return legacyLastFMPendingKey + ":" + userID;
-  }
-
-  async function api(path, options) {
-    options = options || {};
-    options.headers = options.headers || {};
-    if (token) options.headers["Authorization"] = "Bearer " + token;
-    if (options.body && typeof options.body !== "string") {
-      options.headers["Content-Type"] = "application/json";
-      options.body = JSON.stringify(options.body);
-    }
-    const res = await fetch(path, options);
-    if (res.status === 401) {
-      localStorage.removeItem(tokenKey);
-      loginRedirect();
-      throw new Error("unauthorized");
-    }
-    if (res.status === 204) return null;
-    const body = await res.json().catch(() => ({}));
-    if (!res.ok) throw new Error(body.error || ("request failed: " + res.status));
-    return body;
-  }
-
   function renderLoading() {
     main.innerHTML = "<div class=\"boot-line\">// loading...</div>";
   }
@@ -129,94 +78,6 @@ import { globalScanActionsHTML, libraryKindScanActionsHTML, libraryScanActionsHT
   function statCard(label, value, accent) {
     return '<div class="stat-card"><span class="label">' + label + '</span>' +
       '<span class="value' + (accent ? " accent" : "") + '">' + (value || 0) + '</span></div>';
-  }
-
-  /* Stream tokens are short-lived credentials minted by the server. They
-   * keep the bearer out of <audio src> / <img src> URLs (which can't carry
-   * custom headers and would otherwise leak via Referer / server log). */
-  let streamToken = "";
-  let streamTokenExpiresAt = 0;
-  let streamTokenPromise = null;
-
-  async function refreshStreamToken() {
-    const result = await api("/api/v1/auth/stream-token", { method: "POST" });
-    streamToken = result.token || "";
-    streamTokenExpiresAt = new Date(result.expiresAt || 0).getTime();
-    return streamToken;
-  }
-
-  async function ensureStreamToken() {
-    // 60s safety margin so requests in flight don't race expiry.
-    if (streamToken && Date.now() < streamTokenExpiresAt - 60000) return streamToken;
-    if (!streamTokenPromise) {
-      streamTokenPromise = refreshStreamToken().finally(() => { streamTokenPromise = null; });
-    }
-    return streamTokenPromise;
-  }
-
-  function streamQuery() {
-    return streamToken ? "?stream_token=" + encodeURIComponent(streamToken) : "";
-  }
-
-  function musicStreamURL(id) {
-    return "/api/v1/music/tracks/" + encodeURIComponent(id) + "/stream" + streamQuery();
-  }
-
-  function musicCoverURL(id) {
-    return "/api/v1/music/albums/" + encodeURIComponent(id) + "/cover" + streamQuery();
-  }
-
-  function musicPlaylistCoverURL(id, bust) {
-    let url = "/api/v1/music/playlists/" + encodeURIComponent(id) + "/cover" + streamQuery();
-    if (bust) url += (url.includes("?") ? "&" : "?") + "_=" + bust;
-    return url;
-  }
-
-  function audiobookStreamURL(id) {
-    return "/api/v1/audiobooks/" + encodeURIComponent(id) + "/stream" + streamQuery();
-  }
-
-  function audiobookStreamURLAt(id, atSeconds) {
-    const base = audiobookStreamURL(id);
-    const at = Math.max(0, Math.floor(atSeconds || 0));
-    if (at <= 0) return base;
-    return base + (base.includes("?") ? "&" : "?") + "at=" + at;
-  }
-
-  function audiobookCoverURL(id) {
-    return "/api/v1/audiobooks/" + encodeURIComponent(id) + "/cover" + streamQuery();
-  }
-
-  function podcastCoverURL(id, bust) {
-    let url = "/api/v1/podcasts/shows/" + encodeURIComponent(id) + "/cover" + streamQuery();
-    if (bust) url += (url.includes("?") ? "&" : "?") + "_=" + bust;
-    return url;
-  }
-
-  function radioCoverURL(station) {
-    if (!station) return "";
-    if (station.coverUrl) {
-      if (streamToken) {
-        const sep = station.coverUrl.includes("?") ? "&" : "?";
-        return station.coverUrl + sep + "stream_token=" + encodeURIComponent(streamToken);
-      }
-      return station.coverUrl;
-    }
-    if (station.coverId) {
-      return "/api/v1/media/covers/" + encodeURIComponent(station.coverId) + "/image" + streamQuery();
-    }
-    return station.imageUrl || "";
-  }
-
-  function podcastEpisodeStreamURL(id) {
-    return "/api/v1/podcasts/episodes/" + encodeURIComponent(id) + "/stream" + streamQuery();
-  }
-
-  function podcastEpisodeStreamURLAt(id, atSeconds) {
-    const base = podcastEpisodeStreamURL(id);
-    const at = Math.max(0, Math.floor(atSeconds || 0));
-    if (at <= 0) return base;
-    return base + (base.includes("?") ? "&" : "?") + "offsetSeconds=" + at;
   }
 
   function musicSortQuery() {
@@ -247,17 +108,6 @@ import { globalScanActionsHTML, libraryKindScanActionsHTML, libraryScanActionsHT
   /* ---- Header scan + activity -------------------------------------------
    * REFRESH in the utility bar shows live scan progress and opens the
    * detail panel on click. Resumes in-flight jobs on page load. */
-  const refreshBtn = document.getElementById("refreshBtn");
-  const refreshSub = document.getElementById("refreshSub");
-  const refreshRing = document.getElementById("refreshRing");
-  const nowPlayingBtn = document.getElementById("nowPlayingBtn");
-  const nowPlayingSub = document.getElementById("nowPlayingSub");
-  const activityPanel = document.getElementById("activityPanel");
-  const activityBody = document.getElementById("activityBody");
-  const scanPanel = document.getElementById("scanPanel");
-  const scanPanelCurrent = document.getElementById("scanPanelCurrent");
-  const scanPanelHistory = document.getElementById("scanPanelHistory");
-  const scanCancelBtn = document.getElementById("scanCancelBtn");
   let scanWatchJobID = "";
   let scanLastFilesSeen = 0;
   let scanLastLabel = "SCAN";
@@ -708,11 +558,6 @@ import { globalScanActionsHTML, libraryKindScanActionsHTML, libraryScanActionsHT
    * (kind=podcast → ApplyTargetPodcast). Music tracks/albums could be
    * wired in by adding a third button, but the user's complaint was
    * specifically about audiobooks/podcasts. */
-  const identifyModal = document.getElementById("identifyModal");
-  const identifyTitle = document.getElementById("identifyTitle");
-  const identifyQuery = document.getElementById("identifyQuery");
-  const identifyResults = document.getElementById("identifyResults");
-  const identifyForm = document.getElementById("identifyForm");
   let identifyContext = null;
   let identifyCandidates = [];
 
@@ -2187,10 +2032,6 @@ import { globalScanActionsHTML, libraryKindScanActionsHTML, libraryScanActionsHT
     )).join("") + '</div>';
   }
 
-  function channelStreamURL(channelID) {
-    return "/channels/" + encodeURIComponent(channelID) + "/stream" + streamQuery();
-  }
-
   function internetRadioAdminCard(station) {
     const now = station.nowPlaying || null;
     const liveText = now ? (now.raw || now.title || "") : "";
@@ -3075,7 +2916,7 @@ import { globalScanActionsHTML, libraryKindScanActionsHTML, libraryScanActionsHT
         const password = document.getElementById("newPassword").value;
         if (password) body.password = password;
         try {
-          currentUser = await api("/api/v1/users/me", { method: "PATCH", body: body });
+          setCurrentUser(await api("/api/v1/users/me", { method: "PATCH", body: body }));
           document.getElementById("authUser").textContent = (currentUser.username || "-").toUpperCase();
           setMessage("profileMessage", "profile saved", false);
         } catch (err) { setMessage("profileMessage", err.message, true); }
@@ -3721,7 +3562,7 @@ import { globalScanActionsHTML, libraryKindScanActionsHTML, libraryScanActionsHT
   /* -------- boot -------- */
   (async function boot() {
     try {
-      currentUser = await api("/api/v1/users/me");
+      setCurrentUser(await api("/api/v1/users/me"));
       document.getElementById("authUser").textContent = (currentUser.username || "-").toUpperCase();
       await ensureStreamToken();
       // Refresh the stream token well before its TTL so audio/img URLs
