@@ -5,6 +5,8 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"hash/fnv"
+	"log"
 	"math/rand"
 	"net/url"
 	"os"
@@ -21,6 +23,10 @@ import (
 // can supply a tiny stub instead of standing up the full service.
 type CatalogReader interface {
 	EpisodesForPodcast(podcastID string, page catalog.PageRequest) (catalog.Page[catalog.PodcastEpisode], error)
+	// MusicTracksForPlaylist backs the music-playlist source kind, so a
+	// channel can fall back to a playlist you already keep rather than making
+	// you re-point it at a folder.
+	MusicTracksForPlaylist(playlistID string) []catalog.MusicTrack
 }
 
 // EpisodeCacheLookup is the slice of internal/podcastcache.Service the
@@ -38,9 +44,7 @@ type InternetStationLookup interface {
 }
 
 // InternetStation is the minimum the scheduler needs from a sources
-// row to render a live cut-in. The full sources.InternetRadioStation
-// has many more fields but channels only cares about the playable URL
-// and the human-readable name.
+// row to render a live cut-in.
 type InternetStation struct {
 	ID        string
 	Name      string
@@ -64,18 +68,24 @@ type Dependencies struct {
 	Catalog          CatalogReader
 	Cache            EpisodeCacheLookup
 	InternetStations InternetStationLookup
-	Now              func() time.Time
+	// Listened reports how far listeners have already got through an
+	// episode, so a podcast source airs things nobody has heard yet.
+	Listened EpisodeProgressLookup
+	// Skips holds sources somebody has just skipped away from.
+	Skips *SkipRegistry
+	// DefaultLocation is the wall clock a channel's schedule is read in when
+	// the channel does not name its own. Nil means UTC.
+	DefaultLocation *time.Location
+	// DefaultTalkShare is the talk fraction used when deriving a plan for a
+	// channel that has never been given one.
+	DefaultTalkShare float64
+	// Logger reports why a decision went the way it did. Nil is fine.
+	Logger *log.Logger
+	Now    func() time.Time
 
-	// FillerLookahead is how far ahead the scheduler considers
-	// upcoming rules when picking rotation items. Defaults to
-	// 30 minutes. If the next rule is closer than the rotation
-	// item's duration, the scheduler tries to pick something
-	// shorter ("gap-fit") instead of overlapping the rule.
-	FillerLookahead time.Duration
-
-	// LookbackWindow is how far back the scheduler looks at the
-	// play log when suppressing repeats. Defaults to 4 hours.
-	LookbackWindow time.Duration
+	// CommercialGap is the minimum time between separator items.
+	// Defaults to 20 minutes; only applies when interstitial inventory exists.
+	CommercialGap time.Duration
 }
 
 func (d Dependencies) now() time.Time {
@@ -85,110 +95,243 @@ func (d Dependencies) now() time.Time {
 	return time.Now().UTC()
 }
 
-func (d Dependencies) lookback() time.Duration {
-	if d.LookbackWindow > 0 {
-		return d.LookbackWindow
+// location resolves the wall clock a channel's schedule is written in.
+//
+// Schedule times are a bare minute-of-day, so they only mean anything relative
+// to a zone. Matching them against UTC — which is what this once did — shifts
+// every show by the operator's offset, and in a container, where TZ is unset and
+// even the process's own clock is UTC, it can never accidentally be right.
+func (d Dependencies) location(channel Channel) *time.Location {
+	if zone := strings.TrimSpace(channel.Timezone); zone != "" {
+		if loc, err := time.LoadLocation(zone); err == nil {
+			return loc
+		}
 	}
-	return 4 * time.Hour
+	if d.DefaultLocation != nil {
+		return d.DefaultLocation
+	}
+	return time.UTC
 }
 
-func (d Dependencies) lookahead() time.Duration {
-	if d.FillerLookahead > 0 {
-		return d.FillerLookahead
+func (d Dependencies) logf(format string, args ...any) {
+	if d.Logger == nil {
+		return
 	}
-	return 30 * time.Minute
+	d.Logger.Printf(format, args...)
+}
+
+// commercialGap is the minimum time between separator items.
+func (d Dependencies) commercialGap() time.Duration {
+	if d.CommercialGap > 0 {
+		return d.CommercialGap
+	}
+	return 20 * time.Minute
+}
+
+// talkShare is the split a derived plan starts from.
+func (d Dependencies) talkShare(channel Channel) float64 {
+	if channel.TalkShare > 0 && channel.TalkShare < 1 {
+		return channel.TalkShare
+	}
+	if d.DefaultTalkShare > 0 && d.DefaultTalkShare < 1 {
+		return d.DefaultTalkShare
+	}
+	return DefaultTalkShare
+}
+
+// DefaultTalkShare is the starting balance for a derived plan: mostly spoken
+// word, with music threaded through it.
+const DefaultTalkShare = 0.75
+
+// EpisodeProgress is how far through an episode a listener already is.
+type EpisodeProgress struct {
+	Completed       bool
+	ProgressSeconds int
+}
+
+// EpisodeProgressLookup reports playback progress for podcast episodes across
+// every listener on the server.
+type EpisodeProgressLookup interface {
+	EpisodeProgress(ctx context.Context, episodeIDs []string) (map[string]EpisodeProgress, error)
+}
+
+// listenedFraction is how far through an episode counts as heard when it was
+// never explicitly marked complete. Podcast outros and trailing ads mean people
+// routinely stop before the file ends.
+const listenedFraction = 0.9
+
+// startedSeconds is the absolute fallback: this much of an episode means you
+// have engaged with it, whatever its length.
+//
+// It is the signal that actually works. `Completed` is never set by the server
+// — only a client can PATCH it, and none do — and a ratio needs a duration,
+// which feed-derived episodes routinely lack (DurationSeconds = 0). Relying on
+// either alone meant the filter could not return true for any real episode.
+const startedSeconds = 120
+
+func (p EpisodeProgress) listened(durationSeconds int) bool {
+	if p.Completed {
+		return true
+	}
+	if p.ProgressSeconds <= 0 {
+		return false
+	}
+	if durationSeconds > 0 && float64(p.ProgressSeconds) >= float64(durationSeconds)*listenedFraction {
+		return true
+	}
+	return p.ProgressSeconds >= startedSeconds
 }
 
 // Scheduler picks "what plays next" for a channel.
+//
+// It is a thin shell now. Everything that decides anything lives in Engine,
+// which knows nothing about databases — the whole point being that the same
+// code can be run forward for three days against an in-memory history without
+// putting a byte on the air. This type's job is to fetch the plan, the state
+// and the history, hand them over, and write back what came out.
 type Scheduler struct {
 	deps Dependencies
-	rng  *rand.Rand
 }
 
 func NewScheduler(deps Dependencies) *Scheduler {
-	return &Scheduler{
-		deps: deps,
-		// Seeded per-scheduler so unit tests can control determinism
-		// by re-creating their own scheduler. Real callers get fresh
-		// randomness from current time.
-		rng: rand.New(rand.NewSource(time.Now().UnixNano())),
-	}
+	return &Scheduler{deps: deps}
 }
 
-// NextItem returns the PlaybackItem the streamer should play next for
-// the channel, evaluated at `at`.
-//
-// Order of precedence:
-//  1. Active schedule rule (highest-priority rule whose window contains `at`)
-//  2. Rotation pool (sources with default_rotation = true)
-//  3. Any enabled source (fallback so the channel never dead-airs)
-//
-// When called from a long-running streamer loop, `at` should be the
-// current wall clock — the streamer re-asks after each item finishes.
+// NextItem returns the PlaybackItem the streamer should play next.
 func (s *Scheduler) NextItem(ctx context.Context, channelID string) (PlaybackItem, error) {
-	at := s.deps.now().UTC()
+	item, _, err := s.decide(ctx, channelID, true)
+	return item, err
+}
+
+// PeekItem answers "what would play right now" without changing anything.
+//
+// The preemption watchdog asks this every fifteen seconds and the preview
+// endpoint asks it on demand — neither is taking a turn. Committing state from
+// a speculative caller is how a listener's BACK button gets eaten four times a
+// minute by a watchdog.
+func (s *Scheduler) PeekItem(ctx context.Context, channelID string) (PlaybackItem, error) {
+	item, _, err := s.decide(ctx, channelID, false)
+	return item, err
+}
+
+// Explain returns what would play right now together with the full record of
+// how that answer was reached.
+func (s *Scheduler) Explain(ctx context.Context, channelID string) (Decision, error) {
+	_, decision, err := s.decide(ctx, channelID, false)
+	return decision, err
+}
+
+func (s *Scheduler) decide(ctx context.Context, channelID string, commit bool) (PlaybackItem, Decision, error) {
 	if s.deps.DB == nil {
-		return PlaybackItem{}, errors.New("scheduler has no database")
+		return PlaybackItem{}, Decision{}, errors.New("scheduler has no database")
+	}
+	engine, state, err := s.engineFor(ctx, channelID)
+	if err != nil {
+		return PlaybackItem{}, Decision{}, err
 	}
 
+	now := s.deps.now().In(engine.location())
+	engine.Rand = rand.New(rand.NewSource(decisionSeed(engine.Plan, channelID, now)))
+
+	item, decision, next, err := engine.Decide(ctx, now, state)
+	if commit {
+		if err := SaveProgramState(ctx, s.deps.DB, channelID, next); err != nil {
+			s.deps.logf("channel %s: could not save programme state: %v", channelID, err)
+		}
+		if err := SaveDecision(ctx, s.deps.DB, channelID, decision); err != nil {
+			s.deps.logf("channel %s: could not save the decision record: %v", channelID, err)
+		}
+		// BACK is spent once. Reading it without consuming it is what lets the
+		// watchdog peek without stealing the listener's instruction.
+		if s.deps.Skips.PreferredSource(channelID) != "" {
+			s.deps.Skips.ClearPreferredSource(channelID)
+		}
+	}
+	if err != nil {
+		return PlaybackItem{}, decision, err
+	}
+	return item, decision, nil
+}
+
+// engineFor assembles a channel's engine from the database.
+func (s *Scheduler) engineFor(ctx context.Context, channelID string) (*Engine, ProgramState, error) {
+	channel, err := LoadChannel(ctx, s.deps.DB, channelID)
+	if err != nil {
+		return nil, ProgramState{}, err
+	}
 	sources, err := ListChannelSources(ctx, s.deps.DB, channelID)
 	if err != nil {
-		return PlaybackItem{}, err
+		return nil, ProgramState{}, err
 	}
 	sources = filterEnabledSources(sources)
 	if len(sources) == 0 {
-		return PlaybackItem{}, errors.New("channel has no enabled sources")
+		return nil, ProgramState{}, errors.New("channel has no enabled sources")
 	}
-
-	rules, err := ListScheduleRules(ctx, s.deps.DB, channelID)
+	plan, err := s.PlanFor(ctx, channel, sources)
 	if err != nil {
-		return PlaybackItem{}, err
+		return nil, ProgramState{}, err
 	}
-
-	recent, err := RecentItemRefs(ctx, s.deps.DB, channelID, s.deps.lookback())
+	state, err := LoadProgramState(ctx, s.deps.DB, channelID)
 	if err != nil {
-		return PlaybackItem{}, err
+		state = ProgramState{}
 	}
+	return &Engine{
+		Plan:        plan,
+		Channel:     channel,
+		Sources:     sources,
+		History:     NewSQLHistory(s.deps.DB, channelID),
+		Obligations: NewSQLObligations(s.deps.DB, channelID),
+		Catalog:     s.deps.Catalog,
+		Cache:       s.deps.Cache,
+		Stations:    s.deps.InternetStations,
+		Listened:    s.deps.Listened,
+		Skips:       s.deps.Skips,
+		Location:    s.deps.location(channel),
+		Logger:      s.deps.Logger,
+	}, state, nil
+}
 
-	// Pass 1 — scheduled rule. If one matches, we honor it regardless
-	// of recent plays so live cut-ins never get blocked by suppression.
-	if rule, ok := pickActiveRule(rules, at); ok {
-		for _, src := range sources {
-			if src.ID == rule.SourceID {
-				item, err := s.resolveSource(ctx, channelID, src, recent, ruleWindowRemaining(rule, at))
-				if err == nil {
-					item.MaxDuration = ruleWindowRemaining(rule, at)
-					item.IsRuleDriven = true
-					item.RuleID = rule.ID
-					return item, nil
-				}
-				// If the scheduled source failed to resolve (no fresh
-				// episode, bad URL, etc.) fall through to rotation so
-				// the channel doesn't go silent.
-			}
-		}
+// PlanFor is the channel's stored plan, or the one its existing configuration
+// already describes.
+//
+// A channel nobody has given a plan is not a special case anywhere in the
+// engine — it just gets the plan its sources and booked slots add up to, which
+// is why the rebuild needed no migration and no flag day.
+func (s *Scheduler) PlanFor(ctx context.Context, channel Channel, sources []Source) (Plan, error) {
+	stored, ok, err := LoadPlan(ctx, s.deps.DB, channel.ID)
+	if err != nil {
+		// A stored plan that no longer validates — because a later version of
+		// the engine tightened a rule it was saved under — must not take the
+		// station off the air. Fall back to the plan its sources describe and
+		// say so loudly enough to be fixed.
+		s.deps.logf("channel %s: stored plan is not usable, falling back to the derived one: %v",
+			channel.ID, err)
 	}
+	if ok {
+		return stored, nil
+	}
+	rules, err := ListScheduleRules(ctx, s.deps.DB, channel.ID)
+	if err != nil {
+		return Plan{}, err
+	}
+	return DerivePlan(channel, sources, rules, s.deps.talkShare(channel)), nil
+}
 
-	// Pass 2 — rotation. Compute how long we have until the next rule
-	// starts so we can prefer items that fit.
-	rotationPool := rotationCandidates(sources)
-	if len(rotationPool) == 0 {
-		rotationPool = sources
+// decisionSeed makes a decision reproducible without making it predictable.
+//
+// Derived from the plan's seed, the channel and the SECOND the decision is
+// being made in. Two consequences, both wanted: a peek and the real pick at the
+// same instant agree, so the watchdog cannot change what the listener gets by
+// looking at it; and a test that fixes the clock gets the same station every
+// time, which is the only way any of this is testable at all.
+func decisionSeed(plan Plan, channelID string, now time.Time) int64 {
+	base := plan.Seed
+	if base == 0 {
+		hash := fnv.New64a()
+		_, _ = hash.Write([]byte(channelID))
+		base = int64(hash.Sum64() & 0x7fffffffffffffff)
 	}
-	gap := nextRuleStartGap(rules, at, s.deps.lookahead())
-
-	if item, err := s.pickFromRotation(ctx, channelID, rotationPool, recent, gap); err == nil {
-		return item, nil
-	}
-
-	// Pass 3 — fallback. Try every source in order; pick the first
-	// that resolves. Better than silence.
-	for _, src := range sources {
-		if item, err := s.resolveSource(ctx, channelID, src, recent, gap); err == nil {
-			return item, nil
-		}
-	}
-	return PlaybackItem{}, errors.New("no resolvable source for channel")
+	return base ^ now.Unix()
 }
 
 func filterEnabledSources(items []Source) []Source {
@@ -201,296 +344,14 @@ func filterEnabledSources(items []Source) []Source {
 	return out
 }
 
-func rotationCandidates(items []Source) []Source {
-	out := make([]Source, 0, len(items))
-	for _, src := range items {
-		if src.DefaultRotation {
-			out = append(out, src)
-		}
-	}
-	return out
-}
+// ----- resolving the items that need the outside world -----------------
 
-// pickActiveRule walks rules sorted by priority desc and returns the
-// first whose window contains `at` on the right weekday.
-func pickActiveRule(rules []ScheduleRule, at time.Time) (ScheduleRule, bool) {
-	at = at.UTC()
-	weekday := int(at.Weekday()) // 0=Sun..6=Sat
-	minute := at.Hour()*60 + at.Minute()
-	matches := make([]ScheduleRule, 0)
-	for _, rule := range rules {
-		if !rule.Enabled {
-			continue
-		}
-		if rule.WeekdayMask&(1<<weekday) == 0 {
-			continue
-		}
-		if minute < rule.StartMinute || minute >= rule.EndMinute {
-			continue
-		}
-		matches = append(matches, rule)
-	}
-	if len(matches) == 0 {
-		return ScheduleRule{}, false
-	}
-	sort.SliceStable(matches, func(i, j int) bool { return matches[i].Priority > matches[j].Priority })
-	return matches[0], true
-}
-
-// ruleWindowRemaining returns the time left in `rule`'s window after
-// `at`. Used to cap how long a live cut-in or scheduled show stays
-// glued to the same source.
-func ruleWindowRemaining(rule ScheduleRule, at time.Time) time.Duration {
-	at = at.UTC()
-	endMinute := rule.EndMinute
-	startOfDay := time.Date(at.Year(), at.Month(), at.Day(), 0, 0, 0, 0, at.Location())
-	end := startOfDay.Add(time.Duration(endMinute) * time.Minute)
-	remaining := end.Sub(at)
-	if remaining < 0 {
-		remaining = 0
-	}
-	return remaining
-}
-
-// nextRuleStartGap returns the time until the next enabled schedule
-// rule begins (capped at `cap`). When no rule starts within `cap`,
-// returns `cap` so the caller treats the slot as "open." When a rule
-// is currently active, returns 0.
-func nextRuleStartGap(rules []ScheduleRule, at time.Time, cap time.Duration) time.Duration {
-	if cap <= 0 {
-		cap = 30 * time.Minute
-	}
-	at = at.UTC()
-	weekday := int(at.Weekday())
-	minute := at.Hour()*60 + at.Minute()
-	best := cap
-	for _, rule := range rules {
-		if !rule.Enabled {
-			continue
-		}
-		if rule.WeekdayMask&(1<<weekday) == 0 {
-			continue
-		}
-		if rule.StartMinute <= minute && rule.EndMinute > minute {
-			return 0 // a rule is active right now
-		}
-		if rule.StartMinute <= minute {
-			continue
-		}
-		gap := time.Duration(rule.StartMinute-minute) * time.Minute
-		if gap < best {
-			best = gap
-		}
-	}
-	return best
-}
-
-// pickFromRotation does a weighted random selection across rotation
-// sources, biased away from recently-played items and toward items
-// that fit within `gap` when one is small.
-func (s *Scheduler) pickFromRotation(ctx context.Context, channelID string, sources []Source, recent map[string]time.Time, gap time.Duration) (PlaybackItem, error) {
-	if len(sources) == 0 {
-		return PlaybackItem{}, errors.New("rotation pool empty")
-	}
-	// Shuffle so equal-weight sources rotate fairly across calls.
-	indices := s.rng.Perm(len(sources))
-	type candidate struct {
-		item   PlaybackItem
-		weight int
-	}
-	candidates := make([]candidate, 0, len(sources))
-	for _, idx := range indices {
-		src := sources[idx]
-		item, err := s.resolveSource(ctx, channelID, src, recent, gap)
-		if err != nil {
-			continue
-		}
-		// If the slot is tight and this item runs past it, deweight
-		// instead of dropping — better to overflow a little than
-		// dead-air the channel.
-		w := src.Weight
-		if w <= 0 {
-			w = 1
-		}
-		if gap > 0 && item.DurationSeconds > 0 && time.Duration(item.DurationSeconds)*time.Second > gap {
-			w = w / 4
-			if w < 1 {
-				w = 1
-			}
-		}
-		candidates = append(candidates, candidate{item: item, weight: w})
-	}
-	if len(candidates) == 0 {
-		return PlaybackItem{}, errors.New("rotation pool yielded no playable items")
-	}
-	total := 0
-	for _, c := range candidates {
-		total += c.weight
-	}
-	roll := s.rng.Intn(total)
-	for _, c := range candidates {
-		if roll < c.weight {
-			return c.item, nil
-		}
-		roll -= c.weight
-	}
-	return candidates[len(candidates)-1].item, nil
-}
-
-// resolveSource turns a Source row into a concrete PlaybackItem the
-// streamer can play. Unknown kinds return an error so the caller can
-// fall through to another candidate.
-func (s *Scheduler) resolveSource(ctx context.Context, channelID string, src Source, recent map[string]time.Time, gap time.Duration) (PlaybackItem, error) {
-	switch src.Kind {
-	case SourceFilePool, SourceScheduledShow:
-		return s.resolveFilePool(src, recent)
-	case SourcePodcastSubscription:
-		return s.resolvePodcastSubscription(ctx, src, recent)
-	case SourceLiveStream:
-		return s.resolveLiveStream(src, gap)
-	case SourceInternetStation:
-		return s.resolveInternetStation(ctx, src)
-	default:
-		return PlaybackItem{}, fmt.Errorf("unknown source kind %q", src.Kind)
-	}
-}
-
-// resolveInternetStation looks up an existing internet radio station
-// by its catalog id and returns it as a live cut-in. Unlike
-// resolveLiveStream (which takes a raw URL in config), this kind
-// inherits the user-managed station metadata (name, url) from the
-// sources service so re-pointing the station URL doesn't require
-// editing every channel that uses it.
-func (s *Scheduler) resolveInternetStation(ctx context.Context, src Source) (PlaybackItem, error) {
-	if s.deps.InternetStations == nil {
-		return PlaybackItem{}, errors.New("internet station lookup not configured")
-	}
-	stationID := stringFromConfig(src.Config, "stationId")
-	if stationID == "" {
-		return PlaybackItem{}, errors.New("internet-station source missing stationId")
-	}
-	station, err := s.deps.InternetStations.GetInternetRadioStation(ctx, stationID)
-	if err != nil {
-		return PlaybackItem{}, err
-	}
-	streamURL := strings.TrimSpace(station.StreamURL)
-	if streamURL == "" {
-		return PlaybackItem{}, errors.New("internet station has no stream url")
-	}
-	return PlaybackItem{
-		URL:         streamURL,
-		Title:       firstNonEmpty(src.Label, station.Name, "Internet station"),
-		Kind:        SourceInternetStation,
-		SourceID:    src.ID,
-		SourceLabel: firstNonEmpty(src.Label, station.Name),
-		ItemRef:     "station:" + station.ID,
-		Live:        true,
-	}, nil
-}
-
-// resolveFilePool reads `config.paths` (a slice of absolute file paths,
-// directories, or globs), expands them, filters out recently played
-// items, and returns one at random.
-func (s *Scheduler) resolveFilePool(src Source, recent map[string]time.Time) (PlaybackItem, error) {
-	paths := stringSliceFromConfig(src.Config, "paths")
-	if len(paths) == 0 {
-		// Single-path convenience.
-		if p := stringFromConfig(src.Config, "path"); p != "" {
-			paths = []string{p}
-		}
-	}
-	if len(paths) == 0 {
-		return PlaybackItem{}, errors.New("file-pool source has no paths configured")
-	}
-	files, err := expandFilePaths(paths)
-	if err != nil {
-		return PlaybackItem{}, err
-	}
-	if len(files) == 0 {
-		return PlaybackItem{}, errors.New("file-pool source matched no files")
-	}
-	// Prefer files not played in the lookback window. If everything
-	// has been played, fall back to the oldest-played file so the
-	// loop is at least round-robin-ish.
-	fresh := make([]string, 0, len(files))
-	for _, f := range files {
-		if _, played := recent[f]; !played {
-			fresh = append(fresh, f)
-		}
-	}
-	pool := fresh
-	if len(pool) == 0 {
-		pool = files
-		sort.SliceStable(pool, func(i, j int) bool { return recent[pool[i]].Before(recent[pool[j]]) })
-	}
-	pick := pool[s.rng.Intn(len(pool))]
-	title := filepath.Base(pick)
-	return PlaybackItem{
-		URL:         pick,
-		Title:       title,
-		Kind:        src.Kind,
-		SourceID:    src.ID,
-		SourceLabel: src.Label,
-		ItemRef:     pick,
-		// Duration unknown without probing; let the streamer measure as
-		// ffmpeg consumes the file.
-	}, nil
-}
-
-// resolvePodcastSubscription pulls the newest episode (or one of the
-// newest N) for the configured podcast id. Honours maxAgeDays to
-// avoid resurfacing ancient back-catalog items the user probably
-// already heard.
-func (s *Scheduler) resolvePodcastSubscription(ctx context.Context, src Source, recent map[string]time.Time) (PlaybackItem, error) {
-	if s.deps.Catalog == nil {
-		return PlaybackItem{}, errors.New("catalog reader not configured")
-	}
-	podcastID := stringFromConfig(src.Config, "podcastId")
-	if podcastID == "" {
-		return PlaybackItem{}, errors.New("podcast-subscription source missing podcastId")
-	}
-	maxAgeDays := intFromConfig(src.Config, "maxAgeDays", 30)
-	page, err := s.deps.Catalog.EpisodesForPodcast(podcastID, catalog.PageRequest{Limit: 25})
-	if err != nil {
-		return PlaybackItem{}, err
-	}
-	if len(page.Items) == 0 {
-		return PlaybackItem{}, errors.New("podcast has no episodes")
-	}
-	cutoff := s.deps.now().Add(-time.Duration(maxAgeDays) * 24 * time.Hour)
-	for _, ep := range page.Items {
-		// Skip episodes older than maxAgeDays (when we know the date).
-		if ep.PublishedAt != nil && ep.PublishedAt.Before(cutoff) {
-			continue
-		}
-		ref := "episode:" + ep.ID
-		if _, played := recent[ref]; played {
-			continue
-		}
-		url, err := s.episodeURL(ctx, ep)
-		if err != nil {
-			continue
-		}
-		return PlaybackItem{
-			URL:             url,
-			Title:           ep.Title,
-			Artist:          src.Label,
-			Kind:            src.Kind,
-			SourceID:        src.ID,
-			SourceLabel:     src.Label,
-			ItemRef:         ref,
-			DurationSeconds: ep.DurationSeconds,
-		}, nil
-	}
-	return PlaybackItem{}, errors.New("no fresh, unplayed episodes for subscription")
-}
-
-func (s *Scheduler) episodeURL(ctx context.Context, ep catalog.PodcastEpisode) (string, error) {
+func (e *Engine) episodeURL(ctx context.Context, ep catalog.PodcastEpisode) (string, error) {
 	if len(ep.AudioFiles) > 0 && strings.TrimSpace(ep.AudioFiles[0].Path) != "" {
 		return ep.AudioFiles[0].Path, nil
 	}
-	if s.deps.Cache != nil {
-		if cached, ok, err := s.deps.Cache.Lookup(ctx, ep.ID, ep.EnclosureURL); err == nil && ok && strings.TrimSpace(cached.Path) != "" {
+	if e.Cache != nil {
+		if cached, ok, err := e.Cache.Lookup(ctx, ep.ID, ep.EnclosureURL); err == nil && ok && strings.TrimSpace(cached.Path) != "" {
 			return cached.Path, nil
 		}
 	}
@@ -501,9 +362,7 @@ func (s *Scheduler) episodeURL(ctx context.Context, ep catalog.PodcastEpisode) (
 }
 
 // resolveLiveStream returns the live URL configured for the source.
-// MaxDuration is the rule window (set by NextItem); here we just
-// return the URL and let the streamer cap the lifetime.
-func (s *Scheduler) resolveLiveStream(src Source, gap time.Duration) (PlaybackItem, error) {
+func (e *Engine) resolveLiveStream(src Source) (PlaybackItem, error) {
 	target := strings.TrimSpace(stringFromConfig(src.Config, "url"))
 	if target == "" {
 		return PlaybackItem{}, errors.New("live-stream source missing url")
@@ -519,6 +378,36 @@ func (s *Scheduler) resolveLiveStream(src Source, gap time.Duration) (PlaybackIt
 		SourceID:    src.ID,
 		SourceLabel: src.Label,
 		ItemRef:     "stream:" + target,
+		Live:        true,
+	}, nil
+}
+
+// resolveInternetStation looks up an existing internet radio station by its
+// catalog id, so re-pointing the station URL doesn't require editing every
+// channel that uses it.
+func (e *Engine) resolveInternetStation(ctx context.Context, src Source) (PlaybackItem, error) {
+	if e.Stations == nil {
+		return PlaybackItem{}, errors.New("internet station lookup not configured")
+	}
+	stationID := stringFromConfig(src.Config, "stationId")
+	if stationID == "" {
+		return PlaybackItem{}, errors.New("internet-station source missing stationId")
+	}
+	station, err := e.Stations.GetInternetRadioStation(ctx, stationID)
+	if err != nil {
+		return PlaybackItem{}, err
+	}
+	streamURL := strings.TrimSpace(station.StreamURL)
+	if streamURL == "" {
+		return PlaybackItem{}, errors.New("internet station has no stream url")
+	}
+	return PlaybackItem{
+		URL:         streamURL,
+		Title:       firstNonEmpty(src.Label, station.Name, "Internet station"),
+		Kind:        SourceInternetStation,
+		SourceID:    src.ID,
+		SourceLabel: firstNonEmpty(src.Label, station.Name),
+		ItemRef:     "station:" + station.ID,
 		Live:        true,
 	}, nil
 }
@@ -598,8 +487,7 @@ func stringSliceFromConfig(cfg map[string]any, key string) []string {
 
 // expandFilePaths takes user-supplied entries (file paths, directory
 // paths, glob patterns) and returns the concrete file list. Hidden
-// files are skipped. Directories are walked one level deep — deeper
-// nesting is rare for commercial/filler pools and keeps surprises out.
+// files are skipped. Directories are walked one level deep.
 func expandFilePaths(entries []string) ([]string, error) {
 	seen := map[string]struct{}{}
 	out := make([]string, 0)
@@ -608,7 +496,6 @@ func expandFilePaths(entries []string) ([]string, error) {
 		if entry == "" {
 			continue
 		}
-		// Glob support: anything with a wildcard goes through Glob.
 		if strings.ContainsAny(entry, "*?[") {
 			matches, err := filepath.Glob(entry)
 			if err != nil {
@@ -654,4 +541,30 @@ func addPath(seen map[string]struct{}, out *[]string, path string) {
 	}
 	seen[abs] = struct{}{}
 	*out = append(*out, abs)
+}
+
+// episodePageSize is how deep to look for something to play.
+//
+// The catalog neither sorts nor lets us ask for "the latest", so the page has
+// to be deep enough that a newly published episode is inside it before we sort.
+// A shallow page on a long-running show returns only its oldest episodes.
+const episodePageSize = 500
+
+// newestFirst orders episodes by publication date, newest first.
+//
+// Everything about "fresh" depends on this. The catalog hands back feed order —
+// oldest first for anything ingested chronologically — so without it, picking
+// the first eligible episode picks the oldest one in the show's history.
+func newestFirst(items []catalog.PodcastEpisode) []catalog.PodcastEpisode {
+	out := append([]catalog.PodcastEpisode(nil), items...)
+	sort.SliceStable(out, func(i, j int) bool {
+		left, right := out[i].PublishedAt, out[j].PublishedAt
+		if left == nil || right == nil {
+			// Undated episodes sink below dated ones rather than jumping the
+			// queue on a nil comparison.
+			return right == nil && left != nil
+		}
+		return left.After(*right)
+	})
+	return out
 }

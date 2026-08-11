@@ -13,12 +13,21 @@ import (
 	"github.com/bouliehaan/samo-server/internal/storage/storagetest"
 )
 
-// stubCatalog returns fixed episode pages for a single podcast id so
-// the scheduler's podcast-subscription path can be exercised without
-// dragging in the full catalog projection.
+// The database-backed half: a real schema, real rows, and the scheduler shell
+// that fetches a plan, decides, and writes back what it did. The decision logic
+// itself is tested without a database in engine_test.go.
+
+// stubCatalog returns fixed episode pages for a single podcast id so the
+// podcast path can be exercised without dragging in the full catalog
+// projection.
 type stubCatalog struct {
-	episodes map[string][]catalog.PodcastEpisode
-	err      error
+	episodes  map[string][]catalog.PodcastEpisode
+	playlists map[string][]catalog.MusicTrack
+	err       error
+}
+
+func (s *stubCatalog) MusicTracksForPlaylist(playlistID string) []catalog.MusicTrack {
+	return s.playlists[playlistID]
 }
 
 func (s *stubCatalog) EpisodesForPodcast(podcastID string, page catalog.PageRequest) (catalog.Page[catalog.PodcastEpisode], error) {
@@ -29,8 +38,23 @@ func (s *stubCatalog) EpisodesForPodcast(podcastID string, page catalog.PageRequ
 	return catalog.Page[catalog.PodcastEpisode]{Items: items, Total: len(items), Limit: page.Limit}, nil
 }
 
-// newTestDB hands back a real migrated database, so scheduler queries run
-// against the actual channels schema instead of a hand-rolled shadow copy.
+type stubInternetStations struct {
+	station InternetStation
+	err     error
+}
+
+func (s *stubInternetStations) GetInternetRadioStation(_ context.Context, stationID string) (InternetStation, error) {
+	if s.err != nil {
+		return InternetStation{}, s.err
+	}
+	if s.station.ID != stationID {
+		return InternetStation{}, errors.New("no such station")
+	}
+	return s.station, nil
+}
+
+// newTestDB hands back a real migrated database, so queries run against the
+// actual channels schema instead of a hand-rolled shadow copy.
 func newTestDB(t *testing.T) *sql.DB {
 	t.Helper()
 	return storagetest.Open(t)
@@ -46,6 +70,322 @@ func mustChannel(t *testing.T, db *sql.DB, id string) {
 	}
 }
 
+func boolPtr(b bool) *bool { return &b }
+
+func mustSource(t *testing.T, db *sql.DB, channelID string, input CreateSourceInput) Source {
+	t.Helper()
+	src, err := InsertSource(context.Background(), db, channelID, input)
+	if err != nil {
+		t.Fatalf("insert source: %v", err)
+	}
+	return src
+}
+
+// ---- resolving one item at a time --------------------------------------
+
+func TestFilePoolPlaysAFileFromTheFolder(t *testing.T) {
+	dir := t.TempDir()
+	for _, name := range []string{"one.mp3", "two.mp3", ".hidden.mp3"} {
+		if err := os.WriteFile(filepath.Join(dir, name), []byte("x"), 0o600); err != nil {
+			t.Fatalf("write %s: %v", name, err)
+		}
+	}
+	src := Source{
+		ID: "files", Kind: SourceFilePool, Label: "Idents", Enabled: true, Role: RoleMusic,
+		Config: map[string]any{"paths": []string{dir}},
+	}
+	engine := &Engine{Sources: []Source{src}, Location: time.UTC}
+	env := enumerationContext{now: time.Now(), searchDepth: 50, day: DefaultListeningDay}
+
+	candidates := engine.enumerateSource(context.Background(), src, env)
+	if len(candidates) != 2 {
+		t.Fatalf("expected two files (hidden ones skipped), got %d", len(candidates))
+	}
+	item, err := engine.Materialise(context.Background(), candidates[0])
+	if err != nil {
+		t.Fatalf("materialise: %v", err)
+	}
+	if filepath.Dir(item.URL) != dir {
+		t.Fatalf("item URL %q is not in the pool directory", item.URL)
+	}
+}
+
+func TestPodcastEnumerationOrdersNewestFirst(t *testing.T) {
+	now := time.Date(2026, 8, 10, 10, 0, 0, 0, time.UTC)
+	src := podcastSource("pod1", "Show", "p1")
+	engine := &Engine{
+		Sources:     []Source{src},
+		Location:    time.UTC,
+		Obligations: NewMemoryObligations(),
+		Catalog: &stubCatalog{episodes: map[string][]catalog.PodcastEpisode{"p1": {
+			// Feed order: oldest first, which is what an ingested feed gives us.
+			episode("old", "Old", now.Add(-400*24*time.Hour), 30),
+			episode("new", "New", now.Add(-2*time.Hour), 30),
+		}}},
+	}
+	env := enumerationContext{now: now, searchDepth: 50, day: DefaultListeningDay, heardInDay: map[string]int{}}
+	env.owed = engine.refreshObligations(context.Background(), now, env)
+
+	candidates := engine.enumerateSource(context.Background(), src, env)
+	if len(candidates) != 2 {
+		t.Fatalf("expected two episodes, got %d", len(candidates))
+	}
+	if candidates[0].Ref != "episode:new" {
+		t.Fatalf("newest should come first, got %q", candidates[0].Ref)
+	}
+	if !candidates[0].Owed {
+		t.Fatalf("an episode published two hours ago, inside the listening day, is owed")
+	}
+	if candidates[1].Owed {
+		t.Fatalf("a year-old episode is back catalogue")
+	}
+}
+
+func TestInternetStationResolvesViaLookup(t *testing.T) {
+	engine := &Engine{
+		Location: time.UTC,
+		Stations: &stubInternetStations{station: InternetStation{
+			ID: "st1", Name: "Public Radio", StreamURL: "http://example.test/live",
+		}},
+	}
+	src := Source{
+		ID: "s1", Kind: SourceInternetStation, Enabled: true, Role: RoleTalk,
+		Config: map[string]any{"stationId": "st1"},
+	}
+	item, err := engine.resolveInternetStation(context.Background(), src)
+	if err != nil {
+		t.Fatalf("resolve: %v", err)
+	}
+	if item.URL != "http://example.test/live" || !item.Live {
+		t.Fatalf("unexpected item %+v", item)
+	}
+	if item.ItemRef != "station:st1" {
+		t.Fatalf("item ref %q should namespace the station id", item.ItemRef)
+	}
+}
+
+func TestInternetStationErrorsWhenLookupMissing(t *testing.T) {
+	engine := &Engine{Location: time.UTC}
+	src := Source{ID: "s1", Kind: SourceInternetStation, Config: map[string]any{"stationId": "st1"}}
+	if _, err := engine.resolveInternetStation(context.Background(), src); err == nil {
+		t.Fatalf("expected an error when no station lookup is configured")
+	}
+}
+
+func TestLiveStreamResolvesURL(t *testing.T) {
+	engine := &Engine{Location: time.UTC}
+	src := Source{
+		ID: "s1", Kind: SourceLiveStream, Enabled: true, Role: RoleTalk,
+		Config: map[string]any{"url": "https://example.test/stream.mp3"},
+	}
+	item, err := engine.resolveLiveStream(src)
+	if err != nil {
+		t.Fatalf("resolve: %v", err)
+	}
+	if !item.Live || item.URL != "https://example.test/stream.mp3" {
+		t.Fatalf("unexpected item %+v", item)
+	}
+	bad := Source{ID: "s2", Kind: SourceLiveStream, Config: map[string]any{"url": "not a url"}}
+	if _, err := engine.resolveLiveStream(bad); err == nil {
+		t.Fatalf("expected an error for a URL with no scheme")
+	}
+}
+
+// A continuous source has no length of its own, so the ceiling has to be
+// applied to how long the station stays on it.
+func TestContinuousItemsGetAPlayWindow(t *testing.T) {
+	engine := &Engine{Location: time.UTC}
+	candidate := Candidate{
+		Traits: Traits{Continuous: true},
+		source: Source{ID: "s1", Kind: SourceLiveStream, Config: map[string]any{"playMinutes": 90}},
+	}
+	item := PlaybackItem{}
+	engine.applyDuration(&item, candidate, ProgrammingIntent{
+		Window: 30 * time.Minute, PlayCeiling: 30 * time.Minute,
+	}, Timeline{}, BlockDecision{})
+	if item.MaxDuration != 30*time.Minute {
+		t.Fatalf("the window before the next slot should win: got %s", item.MaxDuration)
+	}
+
+	item = PlaybackItem{}
+	engine.applyDuration(&item, candidate, ProgrammingIntent{}, Timeline{}, BlockDecision{})
+	if item.MaxDuration != 90*time.Minute {
+		t.Fatalf("with nothing booked ahead the source's own window applies: got %s", item.MaxDuration)
+	}
+}
+
+// ---- the shell: plan, decide, write back -------------------------------
+
+func TestNextItemUsesTheDerivedPlanAndRecordsState(t *testing.T) {
+	db := newTestDB(t)
+	ctx := context.Background()
+	mustChannel(t, db, "ch1")
+	mustSource(t, db, "ch1", CreateSourceInput{
+		Kind: SourcePodcastSubscription, Label: "Show", Role: RoleTalk,
+		Config: map[string]any{"podcastId": "p1"}, Enabled: boolPtr(true),
+	})
+
+	now := time.Date(2026, 8, 10, 10, 0, 0, 0, time.UTC)
+	sched := NewScheduler(Dependencies{
+		DB:  db,
+		Now: func() time.Time { return now },
+		Catalog: &stubCatalog{episodes: map[string][]catalog.PodcastEpisode{
+			"p1": {episode("e1", "An episode", now.Add(-3*time.Hour), 30)},
+		}},
+		Skips: NewSkipRegistry(func() time.Time { return now }),
+	})
+
+	item, err := sched.NextItem(ctx, "ch1")
+	if err != nil {
+		t.Fatalf("next item: %v", err)
+	}
+	if item.ItemRef != "episode:e1" {
+		t.Fatalf("expected the episode, got %q", item.ItemRef)
+	}
+	if item.BlockID == "" {
+		t.Fatalf("the item should record which block chose it")
+	}
+
+	state, err := LoadProgramState(ctx, db, "ch1")
+	if err != nil {
+		t.Fatalf("load state: %v", err)
+	}
+	if state.BlockID != item.BlockID {
+		t.Fatalf("programme state %q does not match the item's block %q", state.BlockID, item.BlockID)
+	}
+
+	// The whole state has to round-trip, not just the three columns it started
+	// with. The break flag in particular only matters BETWEEN decisions: without
+	// it, the rule that puts a break between two things re-fires on the break's
+	// own last item and the station plays nothing else. That failure is
+	// invisible until the state goes through the database.
+	full := ProgramState{
+		BlockID: "general", EnteredAt: now, ItemCount: 4, PatternIndex: 3,
+		LastWasBreak: true,
+		Queue:        []QueuedItem{{SourceID: "s1", Ref: "track:x", Position: 2, Of: 3, Reason: "stopset"}},
+	}
+	if err := SaveProgramState(ctx, db, "ch1", full); err != nil {
+		t.Fatalf("save state: %v", err)
+	}
+	reloaded, err := LoadProgramState(ctx, db, "ch1")
+	if err != nil {
+		t.Fatalf("reload state: %v", err)
+	}
+	if !reloaded.LastWasBreak {
+		t.Fatalf("the break flag did not survive the database")
+	}
+	if reloaded.PatternIndex != 3 {
+		t.Fatalf("cycle position did not survive: %d", reloaded.PatternIndex)
+	}
+	if len(reloaded.Queue) != 1 || reloaded.Queue[0].Ref != "track:x" || reloaded.Queue[0].Of != 3 {
+		t.Fatalf("the planned queue did not survive: %+v", reloaded.Queue)
+	}
+
+	decisions, err := RecentDecisions(ctx, db, "ch1", 5)
+	if err != nil {
+		t.Fatalf("recent decisions: %v", err)
+	}
+	if len(decisions) != 1 || decisions[0].Selected == nil {
+		t.Fatalf("the decision should have been recorded with its selection, got %+v", decisions)
+	}
+}
+
+// Peeking must not spend anything. The preemption watchdog asks four times a
+// minute, and a peek that consumed the listener's BACK instruction would eat it
+// before the listener heard the result.
+func TestPeekDoesNotWriteState(t *testing.T) {
+	db := newTestDB(t)
+	ctx := context.Background()
+	mustChannel(t, db, "ch1")
+	mustSource(t, db, "ch1", CreateSourceInput{
+		Kind: SourcePodcastSubscription, Label: "Show", Role: RoleTalk,
+		Config: map[string]any{"podcastId": "p1"}, Enabled: boolPtr(true),
+	})
+	now := time.Date(2026, 8, 10, 10, 0, 0, 0, time.UTC)
+	skips := NewSkipRegistry(func() time.Time { return now })
+	skips.PreferSource("ch1", "whatever")
+	sched := NewScheduler(Dependencies{
+		DB: db, Now: func() time.Time { return now }, Skips: skips,
+		Catalog: &stubCatalog{episodes: map[string][]catalog.PodcastEpisode{
+			"p1": {episode("e1", "An episode", now.Add(-3*time.Hour), 30)},
+		}},
+	})
+
+	if _, err := sched.PeekItem(ctx, "ch1"); err != nil {
+		t.Fatalf("peek: %v", err)
+	}
+	if skips.PreferredSource("ch1") == "" {
+		t.Fatalf("a peek consumed the BACK instruction")
+	}
+	state, _ := LoadProgramState(ctx, db, "ch1")
+	if state.BlockID != "" {
+		t.Fatalf("a peek wrote programme state: %+v", state)
+	}
+	if decisions, _ := RecentDecisions(ctx, db, "ch1", 5); len(decisions) != 0 {
+		t.Fatalf("a peek recorded a decision")
+	}
+}
+
+func TestNextItemErrsWhenNoSources(t *testing.T) {
+	db := newTestDB(t)
+	mustChannel(t, db, "ch1")
+	sched := NewScheduler(Dependencies{DB: db, Now: time.Now})
+	if _, err := sched.NextItem(context.Background(), "ch1"); err == nil {
+		t.Fatalf("expected an error for a channel with no sources")
+	}
+}
+
+// A booked slot beats the rotation, and the derived plan is what turns a stored
+// schedule rule into one.
+func TestABookedSlotBeatsTheRotation(t *testing.T) {
+	db := newTestDB(t)
+	ctx := context.Background()
+	mustChannel(t, db, "ch1")
+	rotation := mustSource(t, db, "ch1", CreateSourceInput{
+		Kind: SourcePodcastSubscription, Label: "Rotation", Role: RoleTalk,
+		Config: map[string]any{"podcastId": "p1"}, Enabled: boolPtr(true),
+	})
+	show := mustSource(t, db, "ch1", CreateSourceInput{
+		Kind: SourcePodcastSubscription, Label: "The Show", Role: RoleShow,
+		Config: map[string]any{"podcastId": "p2"}, Enabled: boolPtr(true),
+	})
+	if _, err := InsertScheduleRule(ctx, db, "ch1", CreateScheduleRuleInput{
+		SourceID: show.ID, Label: "The Show", WeekdayMask: 127,
+		StartMinute: 16 * 60, EndMinute: 17 * 60, Enabled: boolPtr(true),
+	}); err != nil {
+		t.Fatalf("insert rule: %v", err)
+	}
+
+	now := time.Date(2026, 8, 10, 16, 30, 0, 0, time.UTC)
+	sched := NewScheduler(Dependencies{
+		DB: db, Now: func() time.Time { return now },
+		Skips: NewSkipRegistry(func() time.Time { return now }),
+		Catalog: &stubCatalog{episodes: map[string][]catalog.PodcastEpisode{
+			"p1": {episode("rot", "Rotation item", now.Add(-40*24*time.Hour), 30)},
+			"p2": {episode("show", "Today's show", now.Add(-24*time.Hour), 45)},
+		}},
+	})
+
+	item, err := sched.NextItem(ctx, "ch1")
+	if err != nil {
+		t.Fatalf("next item: %v", err)
+	}
+	if item.SourceID != show.ID {
+		t.Fatalf("the booked show should be on air at 16:30, got %q (source %s, rotation is %s)",
+			item.Title, item.SourceID, rotation.ID)
+	}
+	if !item.IsRuleDriven {
+		t.Fatalf("an item from a booked slot should be marked as such")
+	}
+	// The old engine cut in on the minute; a derived plan keeps that so nothing
+	// changes for a channel nobody has re-planned.
+	if item.AnchorPolicy != StartImmediately {
+		t.Fatalf("a derived plan should preserve the old cut-in behaviour, got %q", item.AnchorPolicy)
+	}
+}
+
+// ---- clocks ------------------------------------------------------------
+
 func TestPickActiveRuleRespectsPriorityAndWindow(t *testing.T) {
 	at := time.Date(2026, 5, 25, 16, 30, 0, 0, time.UTC) // Monday 4:30pm
 	rules := []ScheduleRule{
@@ -59,333 +399,52 @@ func TestPickActiveRuleRespectsPriorityAndWindow(t *testing.T) {
 		t.Fatalf("expected a rule to match")
 	}
 	if rule.ID != "high" {
-		t.Fatalf("expected highest-priority enabled rule, got %s", rule.ID)
+		t.Fatalf("expected the highest-priority enabled rule for today, got %q", rule.ID)
 	}
 }
 
-func TestNextRuleStartGap(t *testing.T) {
-	at := time.Date(2026, 5, 25, 15, 0, 0, 0, time.UTC) // Monday 3:00pm
-	rules := []ScheduleRule{
-		{ID: "soon", Enabled: true, WeekdayMask: 127, StartMinute: 16 * 60, EndMinute: 17 * 60},
-		{ID: "later", Enabled: true, WeekdayMask: 127, StartMinute: 18 * 60, EndMinute: 19 * 60},
-	}
-	gap := nextRuleStartGap(rules, at, 2*time.Hour)
-	want := time.Hour
-	if gap != want {
-		t.Fatalf("expected %v, got %v", want, gap)
-	}
-
-	// Cap kicks in when next rule is past lookahead.
-	gap = nextRuleStartGap(rules, at, 30*time.Minute)
-	if gap != 30*time.Minute {
-		t.Fatalf("expected cap, got %v", gap)
-	}
-
-	// Active rule returns 0.
-	active := []ScheduleRule{{ID: "now", Enabled: true, WeekdayMask: 127, StartMinute: 14 * 60, EndMinute: 16 * 60}}
-	if got := nextRuleStartGap(active, at, time.Hour); got != 0 {
-		t.Fatalf("expected 0 for active rule, got %v", got)
-	}
-}
-
-func TestRuleWindowRemaining(t *testing.T) {
-	at := time.Date(2026, 5, 25, 16, 30, 0, 0, time.UTC)
-	rule := ScheduleRule{StartMinute: 16 * 60, EndMinute: 17 * 60}
-	got := ruleWindowRemaining(rule, at)
-	want := 30 * time.Minute
-	if got != want {
-		t.Fatalf("expected %v, got %v", want, got)
-	}
-}
-
-func TestFilePoolPicksAFile(t *testing.T) {
-	dir := t.TempDir()
-	for _, name := range []string{"a.mp3", "b.mp3", "c.mp3"} {
-		if err := os.WriteFile(filepath.Join(dir, name), []byte("x"), 0o644); err != nil {
-			t.Fatal(err)
-		}
-	}
-	deps := Dependencies{
-		DB:  newTestDB(t),
-		Now: func() time.Time { return time.Date(2026, 5, 25, 12, 0, 0, 0, time.UTC) },
-	}
-	sched := NewScheduler(deps)
-	src := Source{
-		ID:              "src-1",
-		Kind:            SourceFilePool,
-		Label:           "Commercials",
-		Config:          map[string]any{"paths": []any{dir}},
-		Enabled:         true,
-		DefaultRotation: true,
-		Weight:          1,
-	}
-	item, err := sched.resolveSource(context.Background(), "ch-1", src, nil, 0)
+// A schedule is a bare minute-of-day, so it only means anything relative to a
+// zone — and UTC shifts the WEEKDAY, not just the hour, which is how a Saturday
+// 23:00 slot looks "not booked today".
+func TestDependenciesLocationPrefersTheChannelThenTheDefault(t *testing.T) {
+	denver, err := time.LoadLocation("America/Denver")
 	if err != nil {
-		t.Fatalf("resolve: %v", err)
+		t.Skipf("no tzdata: %v", err)
 	}
-	if filepath.Dir(item.URL) != dir {
-		t.Fatalf("expected file under %s, got %s", dir, item.URL)
+	deps := Dependencies{DefaultLocation: denver}
+	if got := deps.location(Channel{}); got != denver {
+		t.Fatalf("with no channel zone the default should apply, got %v", got)
 	}
-	if item.SourceID != "src-1" || item.Kind != SourceFilePool {
-		t.Fatalf("unexpected item metadata: %+v", item)
+	if got := deps.location(Channel{Timezone: "UTC"}); got.String() != "UTC" {
+		t.Fatalf("the channel's own zone should win, got %v", got)
+	}
+	// An unknown zone falls back rather than taking the channel off the air.
+	if got := deps.location(Channel{Timezone: "Mars/Olympus"}); got != denver {
+		t.Fatalf("an unparseable zone should fall back to the default, got %v", got)
+	}
+	bare := Dependencies{}
+	if got := bare.location(Channel{}); got != time.UTC {
+		t.Fatalf("with nothing configured the clock is UTC, got %v", got)
 	}
 }
 
-func TestFilePoolFiltersRecentlyPlayed(t *testing.T) {
-	dir := t.TempDir()
-	a := filepath.Join(dir, "a.mp3")
-	b := filepath.Join(dir, "b.mp3")
-	os.WriteFile(a, []byte("x"), 0o644)
-	os.WriteFile(b, []byte("x"), 0o644)
-	deps := Dependencies{DB: newTestDB(t)}
-	sched := NewScheduler(deps)
-	src := Source{
-		ID:      "src",
-		Kind:    SourceFilePool,
-		Config:  map[string]any{"paths": []any{dir}},
-		Enabled: true,
+func TestNormalizeRole(t *testing.T) {
+	cases := []struct {
+		role, kind string
+		rotation   bool
+		want       string
+	}{
+		{"", SourcePodcastSubscription, true, RoleTalk},
+		{"", SourceMusicPlaylist, true, RoleMusic},
+		{"", SourceFilePool, false, RoleShow},
+		{"podcast", SourceFilePool, true, RoleTalk},
+		{"filler", SourceFilePool, true, RoleMusic},
+		{"COMMERCIAL", SourceFilePool, true, RoleCommercial},
+		{"show", SourceLiveStream, true, RoleShow},
 	}
-	// Mark `a` as recently played; we should only get back `b`.
-	recent := map[string]time.Time{a: time.Now()}
-	for i := 0; i < 10; i++ {
-		item, err := sched.resolveSource(context.Background(), "ch", src, recent, 0)
-		if err != nil {
-			t.Fatalf("iteration %d: %v", i, err)
-		}
-		if item.URL != b {
-			t.Fatalf("iteration %d picked recently-played %s", i, item.URL)
+	for _, tc := range cases {
+		if got := NormalizeRole(tc.role, tc.kind, tc.rotation); got != tc.want {
+			t.Fatalf("NormalizeRole(%q, %q, %v) = %q, want %q", tc.role, tc.kind, tc.rotation, got, tc.want)
 		}
 	}
 }
-
-func TestPodcastSubscriptionPicksFreshUnplayedEpisode(t *testing.T) {
-	at := time.Date(2026, 5, 25, 9, 0, 0, 0, time.UTC)
-	old := at.Add(-90 * 24 * time.Hour)
-	fresh := at.Add(-2 * 24 * time.Hour)
-	freshest := at.Add(-1 * time.Hour)
-	episodes := []catalog.PodcastEpisode{
-		{ID: "ep-freshest", Title: "Newest", PublishedAt: &freshest, EnclosureURL: "https://example.com/3.mp3"},
-		{ID: "ep-fresh", Title: "Fresh", PublishedAt: &fresh, EnclosureURL: "https://example.com/2.mp3"},
-		{ID: "ep-old", Title: "Old", PublishedAt: &old, EnclosureURL: "https://example.com/1.mp3"},
-	}
-	deps := Dependencies{
-		DB:      newTestDB(t),
-		Catalog: &stubCatalog{episodes: map[string][]catalog.PodcastEpisode{"pod-1": episodes}},
-		Now:     func() time.Time { return at },
-	}
-	sched := NewScheduler(deps)
-	src := Source{
-		ID:      "src",
-		Kind:    SourcePodcastSubscription,
-		Enabled: true,
-		Config:  map[string]any{"podcastId": "pod-1", "maxAgeDays": 30},
-	}
-
-	item, err := sched.resolveSource(context.Background(), "ch", src, nil, 0)
-	if err != nil {
-		t.Fatalf("resolve: %v", err)
-	}
-	if item.ItemRef != "episode:ep-freshest" {
-		t.Fatalf("expected freshest, got %s", item.ItemRef)
-	}
-
-	// Mark freshest as already played; should fall through to next-fresh.
-	recent := map[string]time.Time{"episode:ep-freshest": at}
-	item, err = sched.resolveSource(context.Background(), "ch", src, recent, 0)
-	if err != nil {
-		t.Fatalf("resolve fresh fallback: %v", err)
-	}
-	if item.ItemRef != "episode:ep-fresh" {
-		t.Fatalf("expected next-fresh fallback, got %s", item.ItemRef)
-	}
-}
-
-type stubInternetStations struct {
-	station InternetStation
-	err     error
-}
-
-func (s *stubInternetStations) GetInternetRadioStation(ctx context.Context, stationID string) (InternetStation, error) {
-	if s.err != nil {
-		return InternetStation{}, s.err
-	}
-	if stationID != s.station.ID {
-		return InternetStation{}, errors.New("not found")
-	}
-	return s.station, nil
-}
-
-func TestInternetStationResolvesViaLookup(t *testing.T) {
-	deps := Dependencies{
-		DB: newTestDB(t),
-		InternetStations: &stubInternetStations{station: InternetStation{
-			ID: "irs-1", Name: "WFMU", StreamURL: "https://wfmu.example.com/live.mp3",
-		}},
-	}
-	sched := NewScheduler(deps)
-	src := Source{
-		ID:      "src",
-		Kind:    SourceInternetStation,
-		Enabled: true,
-		Config:  map[string]any{"stationId": "irs-1"},
-	}
-	item, err := sched.resolveSource(context.Background(), "ch", src, nil, 0)
-	if err != nil {
-		t.Fatalf("resolve: %v", err)
-	}
-	if item.URL != "https://wfmu.example.com/live.mp3" || !item.Live {
-		t.Fatalf("unexpected item: %+v", item)
-	}
-	if item.Title != "WFMU" {
-		t.Fatalf("expected fallback to station name, got %q", item.Title)
-	}
-	if item.ItemRef != "station:irs-1" {
-		t.Fatalf("expected station ref, got %q", item.ItemRef)
-	}
-}
-
-func TestInternetStationErrorsWhenLookupMissing(t *testing.T) {
-	sched := NewScheduler(Dependencies{DB: newTestDB(t)})
-	src := Source{
-		Kind: SourceInternetStation, Enabled: true,
-		Config: map[string]any{"stationId": "irs-1"},
-	}
-	if _, err := sched.resolveSource(context.Background(), "ch", src, nil, 0); err == nil {
-		t.Fatalf("expected error when InternetStations lookup not configured")
-	}
-}
-
-func TestLiveStreamResolvesURL(t *testing.T) {
-	deps := Dependencies{DB: newTestDB(t)}
-	sched := NewScheduler(deps)
-	src := Source{
-		ID:      "live",
-		Kind:    SourceLiveStream,
-		Label:   "NPR",
-		Config:  map[string]any{"url": "https://npr.example.com/live.mp3"},
-		Enabled: true,
-	}
-	item, err := sched.resolveSource(context.Background(), "ch", src, nil, 30*time.Minute)
-	if err != nil {
-		t.Fatalf("resolve: %v", err)
-	}
-	if !item.Live {
-		t.Fatalf("expected Live=true")
-	}
-	if item.URL != "https://npr.example.com/live.mp3" {
-		t.Fatalf("unexpected url %s", item.URL)
-	}
-}
-
-func TestNextItemPrefersRuleOverRotation(t *testing.T) {
-	db := newTestDB(t)
-	ctx := context.Background()
-	mustChannel(t, db, "ch-1")
-
-	rotation, err := InsertSource(ctx, db, "ch-1", CreateSourceInput{
-		Kind: SourceLiveStream, Label: "Background", Config: map[string]any{"url": "https://bg.example.com/x.mp3"},
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	scheduled, err := InsertSource(ctx, db, "ch-1", CreateSourceInput{
-		Kind: SourceLiveStream, Label: "NPR Live", Config: map[string]any{"url": "https://npr.example.com/x.mp3"},
-		DefaultRotation: boolPtr(false),
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	enabled := true
-	if _, err := InsertScheduleRule(ctx, db, "ch-1", CreateScheduleRuleInput{
-		SourceID: scheduled.ID, StartMinute: 16 * 60, EndMinute: 17 * 60, Priority: 200, Enabled: &enabled, WeekdayMask: 127,
-	}); err != nil {
-		t.Fatal(err)
-	}
-
-	deps := Dependencies{
-		DB:  db,
-		Now: func() time.Time { return time.Date(2026, 5, 25, 16, 30, 0, 0, time.UTC) },
-	}
-	sched := NewScheduler(deps)
-	item, err := sched.NextItem(ctx, "ch-1")
-	if err != nil {
-		t.Fatalf("NextItem: %v", err)
-	}
-	if item.URL != "https://npr.example.com/x.mp3" {
-		t.Fatalf("expected NPR (scheduled), got %s (rotation=%s)", item.URL, rotation.ID)
-	}
-	if item.MaxDuration != 30*time.Minute {
-		t.Fatalf("expected MaxDuration to cap at rule window, got %v", item.MaxDuration)
-	}
-}
-
-func TestNextItemTagsRuleDriven(t *testing.T) {
-	db := newTestDB(t)
-	ctx := context.Background()
-	mustChannel(t, db, "ch-3")
-	scheduled, err := InsertSource(ctx, db, "ch-3", CreateSourceInput{
-		Kind: SourceLiveStream, Label: "Cut-in", Config: map[string]any{"url": "https://cut.example.com/x.mp3"},
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	enabled := true
-	rule, err := InsertScheduleRule(ctx, db, "ch-3", CreateScheduleRuleInput{
-		SourceID: scheduled.ID, StartMinute: 9 * 60, EndMinute: 10 * 60, Priority: 150, Enabled: &enabled, WeekdayMask: 127,
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	sched := NewScheduler(Dependencies{
-		DB:  db,
-		Now: func() time.Time { return time.Date(2026, 5, 25, 9, 30, 0, 0, time.UTC) },
-	})
-	item, err := sched.NextItem(ctx, "ch-3")
-	if err != nil {
-		t.Fatalf("NextItem: %v", err)
-	}
-	if !item.IsRuleDriven {
-		t.Fatalf("expected IsRuleDriven=true for active rule")
-	}
-	if item.RuleID != rule.ID {
-		t.Fatalf("expected RuleID=%s, got %s", rule.ID, item.RuleID)
-	}
-}
-
-func TestNextItemFallsBackToRotationWhenNoRule(t *testing.T) {
-	db := newTestDB(t)
-	ctx := context.Background()
-	mustChannel(t, db, "ch-2")
-	dir := t.TempDir()
-	a := filepath.Join(dir, "a.mp3")
-	os.WriteFile(a, []byte("x"), 0o644)
-	_, err := InsertSource(ctx, db, "ch-2", CreateSourceInput{
-		Kind: SourceFilePool, Label: "Music", Config: map[string]any{"paths": []any{dir}},
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	sched := NewScheduler(Dependencies{
-		DB:  db,
-		Now: func() time.Time { return time.Date(2026, 5, 25, 12, 0, 0, 0, time.UTC) },
-	})
-	item, err := sched.NextItem(ctx, "ch-2")
-	if err != nil {
-		t.Fatalf("NextItem: %v", err)
-	}
-	if item.URL != a {
-		t.Fatalf("expected file %s, got %s", a, item.URL)
-	}
-}
-
-func TestNextItemErrsWhenNoSources(t *testing.T) {
-	sched := NewScheduler(Dependencies{DB: newTestDB(t)})
-	if _, err := sched.NextItem(context.Background(), "empty"); err == nil {
-		t.Fatalf("expected error on empty channel")
-	} else if !errors.Is(err, errors.New("channel has no enabled sources")) && err.Error() != "channel has no enabled sources" {
-		// errors.Is doesn't work with sentinel string equals here; checking string is fine.
-		t.Logf("non-sentinel error (ok): %v", err)
-	}
-}
-
-func boolPtr(b bool) *bool { return &b }

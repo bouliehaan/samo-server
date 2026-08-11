@@ -25,12 +25,14 @@ import (
 	"github.com/bouliehaan/samo-server/internal/lastfm"
 	"github.com/bouliehaan/samo-server/internal/libraries"
 	"github.com/bouliehaan/samo-server/internal/log"
+	"github.com/bouliehaan/samo-server/internal/loudness"
 	"github.com/bouliehaan/samo-server/internal/metadata"
 	"github.com/bouliehaan/samo-server/internal/playback"
 	"github.com/bouliehaan/samo-server/internal/playlists"
 	"github.com/bouliehaan/samo-server/internal/podcastcache"
 	"github.com/bouliehaan/samo-server/internal/podcaststream"
 	"github.com/bouliehaan/samo-server/internal/radio"
+	"github.com/bouliehaan/samo-server/internal/samoradio"
 	"github.com/bouliehaan/samo-server/internal/search"
 	"github.com/bouliehaan/samo-server/internal/serverid"
 	"github.com/bouliehaan/samo-server/internal/sources"
@@ -61,6 +63,14 @@ type ServerOptions struct {
 	ArtistMeta    *artistmeta.Service
 	Users         *users.Service
 	Channels      *channels.Service
+	SamoRadio     *samoradio.Service
+	// Loudness levels items sent to a samo-radio device against each other,
+	// the same way the channel streamer levels its rotation.
+	Loudness *loudness.Service
+	// ListenAddr is what the server was bound to. It is how a samo-radio
+	// device on this same machine is told to reach Samo, which must not be
+	// derived from whatever host a client's request happened to arrive on.
+	ListenAddr    string
 	ReloadCatalog func(context.Context) error
 	// DisableInitialInternetRadioProbe turns off the fire-and-forget
 	// post-create probe. Useful for tests that close DB/tempdirs immediately.
@@ -99,6 +109,9 @@ type Server struct {
 	artistMeta                       *artistmeta.Service
 	users                            *users.Service
 	channels                         *channels.Service
+	samoRadio                        *samoradio.Service
+	loudness                         *loudness.Service
+	listenAddr                       string
 	events                           *events.Hub
 	reloadCatalog                    func(context.Context) error
 	disableInitialInternetRadioProbe bool
@@ -196,6 +209,9 @@ func NewServer(options ServerOptions) http.Handler {
 		artistMeta:                       options.ArtistMeta,
 		users:                            options.Users,
 		channels:                         options.Channels,
+		samoRadio:                        options.SamoRadio,
+		loudness:                         options.Loudness,
+		listenAddr:                       strings.TrimSpace(options.ListenAddr),
 		reloadCatalog:                    options.ReloadCatalog,
 		disableInitialInternetRadioProbe: options.DisableInitialInternetRadioProbe,
 		baseCtx:                          options.BaseContext,
@@ -474,13 +490,51 @@ func (s *Server) routes() {
 	s.handleAPI("DELETE /api/v1/channels/{id}/schedule/{ruleId}", s.deleteChannelScheduleRule)
 	s.handleAPI("GET /api/v1/channels/{id}/now", s.channelNowPlaying)
 	s.handleAPI("GET /api/v1/channels/{id}/recent", s.channelRecentPlays)
+	s.handleAPI("GET /api/v1/channels/{id}/schedule/status", s.channelScheduleStatus)
+	// The programming plan is the station-building surface: pools, blocks,
+	// anchors, categories and separation. The web editor is a client of these.
+	s.handleAPI("GET /api/v1/channels/{id}/plan", s.channelPlan)
+	s.handleAPI("PUT /api/v1/channels/{id}/plan", s.putChannelPlan)
+	s.handleAPI("DELETE /api/v1/channels/{id}/plan", s.deleteChannelPlan)
+	s.handleAPI("GET /api/v1/channels/{id}/why", s.channelWhy)
+	s.handleAPI("GET /api/v1/channels/{id}/obligations", s.channelObligations)
 	s.handleAPI("POST /api/v1/channels/{id}/preview", s.channelPreviewNext)
+	// Skipping is a listener action, not administration — anyone tuned in can
+	// decide they are not in the mood.
+	s.handleAPI("POST /api/v1/channels/{id}/skip", s.skipChannel)
+	s.handleAPI("POST /api/v1/channels/{id}/previous", s.previousChannel)
+	s.handleAPI("DELETE /api/v1/channels/{id}/skips", s.clearChannelSkips)
 	// Channel playlist and stream go through requireUser so a
 	// stream_token query param works for <audio src=...> in browsers
 	// without forcing every listener URL to carry a real Authorization
 	// header. Same pattern as /api/v1/music/tracks/{id}/stream.
 	s.mux.HandleFunc("GET /channels/{id}/playlist.m3u", s.requireUser(s.channelPlaylist))
 	s.mux.HandleFunc("GET /channels/{id}/stream", s.requireUser(s.channelStream))
+
+	// samo-radio: headless players wired into a physical audio output. Every
+	// client reaches a device through here rather than talking to it directly,
+	// so control works from anywhere Samo works and the daemon never needs its
+	// own accounts or TLS.
+	//
+	// Registration and configuration are admin-gated inside the handlers;
+	// listing, status and transport are open to any signed-in user, because
+	// "play this in the kitchen" is a normal thing for a household member to
+	// do and is no more privileged than playing it on their phone.
+	s.handleAPI("GET /api/v1/samo-radio/devices", s.listSamoRadioDevices)
+	s.handleAPI("POST /api/v1/samo-radio/devices", s.createSamoRadioDevice)
+	s.handleAPI("GET /api/v1/samo-radio/devices/{id}", s.getSamoRadioDevice)
+	s.handleAPI("PATCH /api/v1/samo-radio/devices/{id}", s.updateSamoRadioDevice)
+	s.handleAPI("DELETE /api/v1/samo-radio/devices/{id}", s.deleteSamoRadioDevice)
+	s.handleAPI("POST /api/v1/samo-radio/devices/{id}/pair", s.pairSamoRadioDevice)
+	s.handleAPI("GET /api/v1/samo-radio/devices/{id}/state", s.samoRadioDeviceState)
+	s.handleAPI("GET /api/v1/samo-radio/devices/{id}/outputs", s.samoRadioDeviceOutputs)
+	s.handleAPI("PATCH /api/v1/samo-radio/devices/{id}/settings", s.updateSamoRadioDeviceSettings)
+	s.handleAPI("POST /api/v1/samo-radio/devices/{id}/play", s.playToSamoRadioDevice)
+	s.handleAPI("POST /api/v1/samo-radio/devices/{id}/seek", s.seekSamoRadioDevice)
+	s.handleAPI("POST /api/v1/samo-radio/devices/{id}/volume", s.setSamoRadioDeviceVolume)
+	for _, action := range []string{"pause", "resume", "next", "next-kind", "previous", "stop", "standby"} {
+		s.handleAPI("POST /api/v1/samo-radio/devices/{id}/"+action, s.samoRadioDeviceCommand(action))
+	}
 
 	// Subsonic compatibility surface. Mounted last and entirely additive: it
 	// carries its own auth (the protocol's own scheme) and reuses the native

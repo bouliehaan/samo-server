@@ -34,6 +34,21 @@ func parseStoredTime(raw string) time.Time {
 	return time.Time{}
 }
 
+// clockOr resolves the caller's clock, falling back to the wall clock.
+//
+// Every read query the scheduler makes a decision from takes an explicit `now`,
+// because the scheduler's own clock is injectable and the store's was not — so
+// a test could set the time to 09:17, seed a night of talk radio, and have the
+// store measure that history against the real wall clock and see nothing. Every
+// rule about balance, freshness and repeats is a rule about time, and none of
+// them could be tested while the two halves disagreed about what time it was.
+func clockOr(now time.Time) time.Time {
+	if now.IsZero() {
+		return time.Now().UTC()
+	}
+	return now.UTC()
+}
+
 func newID(prefix string) (string, error) {
 	buf := make([]byte, 12)
 	if _, err := rand.Read(buf); err != nil {
@@ -112,6 +127,38 @@ func UpdateChannel(ctx context.Context, db *sql.DB, id string, input UpdateChann
 		}
 		args = append(args, val)
 	}
+	if input.TalkShare != nil {
+		share := *input.TalkShare
+		if share < 0 || share >= 1 {
+			return Channel{}, fmt.Errorf("%w: talk share must be between 0 and 1", ErrInvalidID)
+		}
+		sets = append(sets, "talk_share = ?")
+		args = append(args, share)
+	}
+	if input.DayStartMinute != nil {
+		if *input.DayStartMinute < 0 || *input.DayStartMinute > 1439 {
+			return Channel{}, fmt.Errorf("%w: day start must be a minute of day", ErrInvalidID)
+		}
+		sets = append(sets, "day_start_minute = ?")
+		args = append(args, *input.DayStartMinute)
+	}
+	if input.DayEndMinute != nil {
+		if *input.DayEndMinute < 0 || *input.DayEndMinute > 1439 {
+			return Channel{}, fmt.Errorf("%w: day end must be a minute of day", ErrInvalidID)
+		}
+		sets = append(sets, "day_end_minute = ?")
+		args = append(args, *input.DayEndMinute)
+	}
+	if input.Timezone != nil {
+		zone := strings.TrimSpace(*input.Timezone)
+		if zone != "" {
+			if _, err := time.LoadLocation(zone); err != nil {
+				return Channel{}, fmt.Errorf("%w: unknown timezone %q", ErrInvalidID, zone)
+			}
+		}
+		sets = append(sets, "timezone = ?")
+		args = append(args, zone)
+	}
 	args = append(args, id)
 	result, err := db.ExecContext(ctx, fmt.Sprintf("UPDATE channels SET %s WHERE id = ?", strings.Join(sets, ", ")), args...)
 	if err != nil {
@@ -149,9 +196,9 @@ func LoadChannel(ctx context.Context, db *sql.DB, id string) (Channel, error) {
 	var createdAt, updatedAt string
 	var enabled int
 	err := db.QueryRowContext(ctx, `
-		SELECT id, name, description, codec, bitrate_kbps, sample_rate_hz, enabled, created_at, updated_at
+		SELECT id, name, description, codec, bitrate_kbps, sample_rate_hz, enabled, timezone, talk_share, day_start_minute, day_end_minute, created_at, updated_at
 		FROM channels WHERE id = ?`, id).Scan(
-		&ch.ID, &ch.Name, &ch.Description, &ch.Codec, &ch.BitrateKbps, &ch.SampleRateHz, &enabled, &createdAt, &updatedAt,
+		&ch.ID, &ch.Name, &ch.Description, &ch.Codec, &ch.BitrateKbps, &ch.SampleRateHz, &enabled, &ch.Timezone, &ch.TalkShare, &ch.DayStartMinute, &ch.DayEndMinute, &createdAt, &updatedAt,
 	)
 	if errors.Is(err, sql.ErrNoRows) {
 		return Channel{}, ErrNotFound
@@ -167,7 +214,7 @@ func LoadChannel(ctx context.Context, db *sql.DB, id string) (Channel, error) {
 
 func ListChannels(ctx context.Context, db *sql.DB) ([]Channel, error) {
 	rows, err := db.QueryContext(ctx, `
-		SELECT id, name, description, codec, bitrate_kbps, sample_rate_hz, enabled, created_at, updated_at
+		SELECT id, name, description, codec, bitrate_kbps, sample_rate_hz, enabled, timezone, talk_share, day_start_minute, day_end_minute, created_at, updated_at
 		FROM channels ORDER BY name COLLATE NOCASE`)
 	if err != nil {
 		return nil, fmt.Errorf("list channels: %w", err)
@@ -178,7 +225,7 @@ func ListChannels(ctx context.Context, db *sql.DB) ([]Channel, error) {
 		var ch Channel
 		var createdAt, updatedAt string
 		var enabled int
-		if err := rows.Scan(&ch.ID, &ch.Name, &ch.Description, &ch.Codec, &ch.BitrateKbps, &ch.SampleRateHz, &enabled, &createdAt, &updatedAt); err != nil {
+		if err := rows.Scan(&ch.ID, &ch.Name, &ch.Description, &ch.Codec, &ch.BitrateKbps, &ch.SampleRateHz, &enabled, &ch.Timezone, &ch.TalkShare, &ch.DayStartMinute, &ch.DayEndMinute, &createdAt, &updatedAt); err != nil {
 			return nil, fmt.Errorf("scan channel: %w", err)
 		}
 		ch.Enabled = enabled == 1
@@ -226,9 +273,10 @@ func InsertSource(ctx context.Context, db *sql.DB, channelID string, input Creat
 	}
 	now := time.Now().UTC().Format(time.RFC3339)
 	_, err = db.ExecContext(ctx, `
-		INSERT INTO channel_sources (id, channel_id, kind, label, config_json, enabled, weight, default_rotation, created_at, updated_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		id, channelID, kind, strings.TrimSpace(input.Label), string(cfgJSON), enabled, weight, defaultRotation, now, now,
+		INSERT INTO channel_sources (id, channel_id, kind, label, config_json, enabled, weight, default_rotation, role, created_at, updated_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		id, channelID, kind, strings.TrimSpace(input.Label), string(cfgJSON), enabled, weight, defaultRotation,
+		NormalizeRole(input.Role, kind, defaultRotation == 1), now, now,
 	)
 	if err != nil {
 		return Source{}, fmt.Errorf("insert source: %w", err)
@@ -270,6 +318,13 @@ func UpdateSource(ctx context.Context, db *sql.DB, id string, input UpdateSource
 		}
 		sets = append(sets, "default_rotation = ?")
 		args = append(args, v)
+	}
+	if input.Role != nil {
+		// Kind and rotation only matter when the submitted role is blank, and
+		// a blank role on an update means "leave it derived" rather than
+		// "clear it", so the existing row's values are irrelevant here.
+		sets = append(sets, "role = ?")
+		args = append(args, NormalizeRole(*input.Role, "", true))
 	}
 	if input.Enabled != nil {
 		v := 0
@@ -313,7 +368,7 @@ func LoadSource(ctx context.Context, db *sql.DB, id string) (Source, error) {
 		return Source{}, ErrInvalidID
 	}
 	src, err := scanSource(db.QueryRowContext(ctx, `
-		SELECT id, channel_id, kind, label, config_json, enabled, weight, default_rotation, created_at, updated_at
+		SELECT id, channel_id, kind, label, config_json, enabled, weight, default_rotation, role, created_at, updated_at
 		FROM channel_sources WHERE id = ?`, id))
 	if errors.Is(err, sql.ErrNoRows) {
 		return Source{}, ErrNotFound
@@ -327,7 +382,7 @@ func ListChannelSources(ctx context.Context, db *sql.DB, channelID string) ([]So
 		return nil, ErrInvalidID
 	}
 	rows, err := db.QueryContext(ctx, `
-		SELECT id, channel_id, kind, label, config_json, enabled, weight, default_rotation, created_at, updated_at
+		SELECT id, channel_id, kind, label, config_json, enabled, weight, default_rotation, role, created_at, updated_at
 		FROM channel_sources WHERE channel_id = ?
 		ORDER BY created_at ASC`, channelID)
 	if err != nil {
@@ -351,13 +406,14 @@ type rowScanner interface {
 
 func scanSource(row rowScanner) (Source, error) {
 	var src Source
-	var configJSON, createdAt, updatedAt string
+	var configJSON, role, createdAt, updatedAt string
 	var enabled, defaultRotation int
-	if err := row.Scan(&src.ID, &src.ChannelID, &src.Kind, &src.Label, &configJSON, &enabled, &src.Weight, &defaultRotation, &createdAt, &updatedAt); err != nil {
+	if err := row.Scan(&src.ID, &src.ChannelID, &src.Kind, &src.Label, &configJSON, &enabled, &src.Weight, &defaultRotation, &role, &createdAt, &updatedAt); err != nil {
 		return Source{}, fmt.Errorf("scan source: %w", err)
 	}
 	src.Enabled = enabled == 1
 	src.DefaultRotation = defaultRotation == 1
+	src.Role = NormalizeRole(role, src.Kind, src.DefaultRotation)
 	src.CreatedAt = parseStoredTime(createdAt)
 	src.UpdatedAt = parseStoredTime(updatedAt)
 	src.Config = map[string]any{}
@@ -480,10 +536,15 @@ func RecordPlayStart(ctx context.Context, db *sql.DB, channelID string, item Pla
 		return "", err
 	}
 	now := time.Now().UTC().Format(time.RFC3339)
+	// Stored verbatim. The category is whatever the station's own plan calls
+	// this kind of programming, and the row is a record of what actually aired
+	// — re-labelling a source tomorrow must not rewrite what last night sounded
+	// like.
+	category := item.Category
 	_, err = db.ExecContext(ctx, `
-		INSERT INTO channel_play_log (id, channel_id, source_id, item_ref, title, artist, kind, started_at, duration_seconds)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		id, channelID, item.SourceID, item.ItemRef, item.Title, item.Artist, item.Kind, now, item.DurationSeconds,
+		INSERT INTO channel_play_log (id, channel_id, source_id, item_ref, title, artist, kind, category, started_at, duration_seconds)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		id, channelID, item.SourceID, item.ItemRef, item.Title, item.Artist, item.Kind, string(category), now, item.DurationSeconds,
 	)
 	if err != nil {
 		return "", fmt.Errorf("record play start: %w", err)
@@ -537,7 +598,7 @@ func RecentPlayLog(ctx context.Context, db *sql.DB, channelID string, limit int)
 // same episode/file back-to-back. Empty refs are skipped so that file
 // pools (which often share the same path naming convention) still rotate
 // fairly.
-func RecentItemRefs(ctx context.Context, db *sql.DB, channelID string, lookback time.Duration) (map[string]time.Time, error) {
+func RecentItemRefs(ctx context.Context, db *sql.DB, channelID string, lookback time.Duration, now time.Time) (map[string]time.Time, error) {
 	channelID = strings.TrimSpace(channelID)
 	if channelID == "" {
 		return nil, ErrInvalidID
@@ -545,7 +606,7 @@ func RecentItemRefs(ctx context.Context, db *sql.DB, channelID string, lookback 
 	if lookback <= 0 {
 		lookback = 4 * time.Hour
 	}
-	cutoff := time.Now().UTC().Add(-lookback).Format(time.RFC3339)
+	cutoff := clockOr(now).Add(-lookback).Format(time.RFC3339)
 	rows, err := db.QueryContext(ctx, `
 		SELECT item_ref, started_at FROM channel_play_log
 		WHERE channel_id = ? AND item_ref <> '' AND started_at > ?`,
@@ -567,4 +628,408 @@ func RecentItemRefs(ctx context.Context, db *sql.DB, channelID string, lookback 
 		}
 	}
 	return out, rows.Err()
+}
+
+// LastAiredByRef reports when this channel last aired each item, over an
+// arbitrarily long window.
+//
+// The twin of RecentItemRefs, which asks the same table a much shorter
+// question ("did I already play this in the last few hours"). Reruns need the
+// long view: an episode nobody has listened to never changes its listened
+// state, so without a record of what the CHANNEL aired, "the oldest unheard
+// episode" is the same episode forever and the rerun tier loops on one item.
+func LastAiredByRef(ctx context.Context, db *sql.DB, channelID string, window time.Duration, now time.Time) (map[string]time.Time, error) {
+	channelID = strings.TrimSpace(channelID)
+	if channelID == "" {
+		return nil, ErrInvalidID
+	}
+	if window <= 0 {
+		window = 90 * 24 * time.Hour
+	}
+	cutoff := clockOr(now).Add(-window).Format(time.RFC3339)
+	rows, err := db.QueryContext(ctx, `
+		SELECT item_ref, MAX(started_at) FROM channel_play_log
+		WHERE channel_id = ? AND item_ref <> '' AND started_at > ?
+		GROUP BY item_ref`,
+		channelID, cutoff,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("query last aired by ref: %w", err)
+	}
+	defer rows.Close()
+	out := map[string]time.Time{}
+	for rows.Next() {
+		var ref, startedAt string
+		if err := rows.Scan(&ref, &startedAt); err != nil {
+			return nil, fmt.Errorf("scan last aired: %w", err)
+		}
+		out[ref] = parseStoredTime(startedAt)
+	}
+	return out, rows.Err()
+}
+
+// LastAiredBySource reports when this channel last aired anything from each
+// source. It is what rotates the ladder across shows rather than draining one:
+// pick the source heard least recently, then the item within it.
+func LastAiredBySource(ctx context.Context, db *sql.DB, channelID string, window time.Duration, now time.Time) (map[string]time.Time, error) {
+	channelID = strings.TrimSpace(channelID)
+	if channelID == "" {
+		return nil, ErrInvalidID
+	}
+	if window <= 0 {
+		window = 90 * 24 * time.Hour
+	}
+	cutoff := clockOr(now).Add(-window).Format(time.RFC3339)
+	rows, err := db.QueryContext(ctx, `
+		SELECT source_id, MAX(started_at) FROM channel_play_log
+		WHERE channel_id = ? AND source_id <> '' AND started_at > ?
+		GROUP BY source_id`,
+		channelID, cutoff,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("query last aired by source: %w", err)
+	}
+	defer rows.Close()
+	out := map[string]time.Time{}
+	for rows.Next() {
+		var sourceID, startedAt string
+		if err := rows.Scan(&sourceID, &startedAt); err != nil {
+			return nil, fmt.Errorf("scan last aired source: %w", err)
+		}
+		out[sourceID] = parseStoredTime(startedAt)
+	}
+	return out, rows.Err()
+}
+
+// PlayTailEntry is one row of the channel's recent history, newest first.
+type PlayTailEntry struct {
+	SourceID string
+	ItemRef  string
+	// Artist is the item-level attribution as it aired. Separation asks about
+	// the person, and for music the person is per track rather than per source
+	// — a playlist is one source and four hundred artists.
+	Artist    string
+	Category  CategoryID
+	StartedAt time.Time
+	// Aired is how long this row actually occupied the air, so a run of talk
+	// can be measured in hours rather than counted in items. Ten five-minute
+	// news bulletins and one five-hour podcast are both "ten items" and are not
+	// remotely the same amount of somebody talking.
+	Aired time.Duration
+}
+
+// PlayLogTail returns the channel's most recent plays in reverse order.
+//
+// The ladder's other play-log queries ask aggregate questions ("when did this
+// source last air"). This one needs the sequence, because a music set is a run
+// of consecutive plays from one source and you cannot see a run in a MAX().
+// Keeping it a plain ordered read means the run-detection itself is ordinary
+// Go, and testable without a database.
+func PlayLogTail(ctx context.Context, db *sql.DB, channelID string, window time.Duration, limit int, now time.Time) ([]PlayTailEntry, error) {
+	channelID = strings.TrimSpace(channelID)
+	if channelID == "" {
+		return nil, ErrInvalidID
+	}
+	if window <= 0 {
+		window = time.Hour
+	}
+	if limit <= 0 {
+		limit = 50
+	}
+	now = clockOr(now)
+	cutoff := now.Add(-window)
+	// Overlapping rather than started-inside, for the same reason as the
+	// airtime query: the talk run is measured in hours and the block that puts
+	// it over the line is usually the one that started before the window did.
+	since := cutoff.Format(time.RFC3339)
+	rows, err := db.QueryContext(ctx, `
+		SELECT source_id, item_ref, artist, category, started_at, ended_at, duration_seconds FROM channel_play_log
+		WHERE channel_id = ? AND source_id <> ''
+		  AND (started_at > ? OR ended_at = '' OR ended_at > ?)
+		ORDER BY started_at DESC
+		LIMIT ?`,
+		channelID, since, since, limit,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("query play log tail: %w", err)
+	}
+	defer rows.Close()
+	out := make([]PlayTailEntry, 0, limit)
+	for rows.Next() {
+		var sourceID, itemRef, artist, category, startedAt, endedAt string
+		var durationSeconds int64
+		if err := rows.Scan(&sourceID, &itemRef, &artist, &category, &startedAt, &endedAt, &durationSeconds); err != nil {
+			return nil, fmt.Errorf("scan play log tail: %w", err)
+		}
+		began := parseStoredTime(startedAt)
+		out = append(out, PlayTailEntry{
+			SourceID:  sourceID,
+			ItemRef:   itemRef,
+			Artist:    artist,
+			Category:  storedCategory(category),
+			StartedAt: began,
+			Aired:     airedDuration(began, parseStoredTime(endedAt), durationSeconds, cutoff, now),
+		})
+	}
+	return out, rows.Err()
+}
+
+// airedDuration is how much of the window a play-log row actually filled.
+//
+// One definition, used by every query that asks the question, because they must
+// agree: the talk-run governor and the balance reading the same row differently
+// is a bug that only ever shows up as strange programming at 3am.
+//
+// A row still playing (no ended_at) counts up to now, so a long item in progress
+// pushes the balance immediately rather than only once it finishes — which is
+// the difference between noticing you are two hours into a podcast and noticing
+// it afterwards.
+func airedDuration(began, ended time.Time, durationSeconds int64, windowStart, now time.Time) time.Duration {
+	if began.IsZero() {
+		return 0
+	}
+	if began.Before(windowStart) {
+		began = windowStart
+	}
+	if ended.IsZero() || ended.After(now) {
+		ended = now
+	}
+	aired := ended.Sub(began)
+	// A row whose clock says nothing useful falls back to the recorded
+	// duration, then to a nominal slot, so it still counts for something.
+	if aired <= 0 {
+		aired = time.Duration(durationSeconds) * time.Second
+	}
+	if aired <= 0 {
+		aired = time.Minute
+	}
+	return aired
+}
+
+// DiscardPlayLog removes a play-log row entirely.
+//
+// Used when an item was skipped almost immediately. The log is what the
+// scheduler treats as "this channel has aired that" — freshness suppression
+// reads it, and rerun ordering sorts by it — so leaving a row behind for
+// something nobody actually heard burns the episode: it stops being fresh and
+// goes to the back of a thirty-day queue, on the strength of three seconds of
+// audio. Skipping should cost you the next few minutes, not the episode.
+func DiscardPlayLog(ctx context.Context, db *sql.DB, playLogID string) error {
+	playLogID = strings.TrimSpace(playLogID)
+	if playLogID == "" {
+		return nil
+	}
+	if _, err := db.ExecContext(ctx, `DELETE FROM channel_play_log WHERE id = ?`, playLogID); err != nil {
+		return fmt.Errorf("discard play log: %w", err)
+	}
+	return nil
+}
+
+// SourceAirtime is how long a source has been on air in a window.
+type SourceAirtime struct {
+	SourceID string
+	Aired    time.Duration
+	Plays    int
+	// ByCategory is this source's airtime split by the category each airing was
+	// RECORDED under, which is not always the one it would be recorded under
+	// today. Re-labelling a source must not make last night's airtime
+	// unsubtractable from the bucket it actually went into.
+	ByCategory map[CategoryID]time.Duration
+}
+
+// AirtimeWindow is what the station has actually been doing lately.
+type AirtimeWindow struct {
+	BySource map[string]SourceAirtime
+	// ByCategory is the aggregate the balance is actually about. Choosing
+	// between individual sources cannot answer "have we had too much spoken
+	// word", because every source's slice is small and every source can be
+	// behind its own slice while its whole category is hours over.
+	ByCategory map[CategoryID]time.Duration
+	Total      time.Duration
+}
+
+// storedCategory reads a play-log row's category.
+//
+// Rows written before categories existed carry an empty string. They are
+// spoken word — that is what migration 0017 backfilled everything else to, and
+// a station that has since renamed its categories would rather see one stale
+// bucket than have last week's history silently vanish from the balance.
+func storedCategory(raw string) CategoryID {
+	if raw == "" {
+		return LegacyCategoryTalk
+	}
+	return CategoryID(raw)
+}
+
+// AirtimeBySource measures how much of the window each source and each category
+// actually filled.
+//
+// Airtime, not play count, is the unit that matters: three minutes of music and
+// three hours of Joe Rogan are one play each, and treating them as equal is how
+// a station ends up 90% spoken word while believing it is balanced.
+//
+// Scheduled shows are counted like everything else, deliberately. An hour of
+// booked public radio is an hour of somebody talking whether or not a rule
+// picked it, so it has to push the programming either side of it toward music —
+// otherwise the schedule and the rotation each behave sensibly on their own and
+// the day adds up to nonsense.
+func AirtimeBySource(ctx context.Context, db *sql.DB, channelID string, window time.Duration, now time.Time) (AirtimeWindow, error) {
+	out := AirtimeWindow{
+		BySource:   map[string]SourceAirtime{},
+		ByCategory: map[CategoryID]time.Duration{},
+	}
+	channelID = strings.TrimSpace(channelID)
+	if channelID == "" {
+		return out, ErrInvalidID
+	}
+	if window <= 0 {
+		window = 24 * time.Hour
+	}
+	now = clockOr(now)
+	start := now.Add(-window)
+	// Rows that OVERLAP the window, not rows that started inside it.
+	//
+	// `started_at > cutoff` alone loses exactly the items that matter most: an
+	// eight-hour talk block that began nine hours ago is still five hours of
+	// this six-hour window, but its start has slid out and the row vanishes —
+	// so the balance reads "no talk lately" at the precise moment the station
+	// has been doing nothing else. An empty ended_at is something still on air,
+	// which always overlaps.
+	cutoff := start.Format(time.RFC3339)
+	rows, err := db.QueryContext(ctx, `
+		SELECT source_id, category, started_at, ended_at, duration_seconds
+		FROM channel_play_log
+		WHERE channel_id = ? AND source_id <> ''
+		  AND (started_at > ? OR ended_at = '' OR ended_at > ?)`,
+		channelID, cutoff, cutoff,
+	)
+	if err != nil {
+		return out, fmt.Errorf("query airtime: %w", err)
+	}
+	defer rows.Close()
+
+	for rows.Next() {
+		var sourceID, category, startedAt, endedAt string
+		var durationSeconds int64
+		if err := rows.Scan(&sourceID, &category, &startedAt, &endedAt, &durationSeconds); err != nil {
+			return out, fmt.Errorf("scan airtime: %w", err)
+		}
+		began := parseStoredTime(startedAt)
+		if began.IsZero() {
+			continue
+		}
+		aired := airedDuration(began, parseStoredTime(endedAt), durationSeconds, start, now)
+		if aired <= 0 {
+			continue
+		}
+
+		entry := out.BySource[sourceID]
+		entry.SourceID = sourceID
+		entry.Aired += aired
+		entry.Plays++
+		if entry.ByCategory == nil {
+			entry.ByCategory = map[CategoryID]time.Duration{}
+		}
+		entry.ByCategory[storedCategory(category)] += aired
+		out.BySource[sourceID] = entry
+		out.ByCategory[storedCategory(category)] += aired
+		out.Total += aired
+	}
+	return out, rows.Err()
+}
+
+// AiredInListeningDay reports which items have aired while somebody could
+// plausibly have been listening, and when they last did.
+//
+// The twin of ItemAirings, asking the question that actually decides whether an
+// episode is still new: not "has this been on air" but "has this reached
+// anyone". A channel is on twenty-four hours; airing an overnight drop at 03:00
+// is not the same event as airing it at 09:30, and counting them the same is
+// precisely how a new episode gets spent on a dark room and greets the listener
+// as back catalogue.
+//
+// Filtered in Go rather than SQL because the window is wall-clock in the
+// channel's own timezone and started_at is stored UTC — the same mismatch that
+// made every scheduled slot fire at the wrong hour.
+func AiredInListeningDay(
+	ctx context.Context,
+	db *sql.DB,
+	channelID string,
+	window time.Duration,
+	day ListeningDay,
+	loc *time.Location,
+	now time.Time,
+) (map[string]int, map[string]time.Time, error) {
+	channelID = strings.TrimSpace(channelID)
+	if channelID == "" {
+		return nil, nil, ErrInvalidID
+	}
+	if window <= 0 {
+		window = 24 * time.Hour
+	}
+	if loc == nil {
+		loc = time.UTC
+	}
+	cutoff := clockOr(now).Add(-window).Format(time.RFC3339)
+	rows, err := db.QueryContext(ctx, `
+		SELECT item_ref, started_at FROM channel_play_log
+		WHERE channel_id = ? AND item_ref <> '' AND started_at > ?`,
+		channelID, cutoff,
+	)
+	if err != nil {
+		return nil, nil, fmt.Errorf("query daytime airings: %w", err)
+	}
+	defer rows.Close()
+	counts := map[string]int{}
+	last := map[string]time.Time{}
+	for rows.Next() {
+		var ref, startedAt string
+		if err := rows.Scan(&ref, &startedAt); err != nil {
+			return nil, nil, fmt.Errorf("scan daytime airing: %w", err)
+		}
+		began := parseStoredTime(startedAt)
+		if began.IsZero() || !day.Contains(began.In(loc)) {
+			continue
+		}
+		counts[ref]++
+		if existing, ok := last[ref]; !ok || began.After(existing) {
+			last[ref] = began
+		}
+	}
+	return counts, last, rows.Err()
+}
+
+// ItemAirings counts how many times each item ref aired in a window, and when
+// it last did. Backs the per-episode repeat caps.
+func ItemAirings(ctx context.Context, db *sql.DB, channelID string, window time.Duration, now time.Time) (map[string]int, map[string]time.Time, error) {
+	channelID = strings.TrimSpace(channelID)
+	if channelID == "" {
+		return nil, nil, ErrInvalidID
+	}
+	if window <= 0 {
+		window = 24 * time.Hour
+	}
+	cutoff := clockOr(now).Add(-window).Format(time.RFC3339)
+	rows, err := db.QueryContext(ctx, `
+		SELECT item_ref, COUNT(*), MAX(started_at) FROM channel_play_log
+		WHERE channel_id = ? AND item_ref <> '' AND started_at > ?
+		GROUP BY item_ref`,
+		channelID, cutoff,
+	)
+	if err != nil {
+		return nil, nil, fmt.Errorf("query item airings: %w", err)
+	}
+	defer rows.Close()
+	counts := map[string]int{}
+	last := map[string]time.Time{}
+	for rows.Next() {
+		var ref, startedAt string
+		var count int
+		if err := rows.Scan(&ref, &count, &startedAt); err != nil {
+			return nil, nil, fmt.Errorf("scan item airings: %w", err)
+		}
+		counts[ref] = count
+		last[ref] = parseStoredTime(startedAt)
+	}
+	return counts, last, rows.Err()
 }
