@@ -1,0 +1,11 @@
+-- Channels get a timezone, because a radio schedule is wall-clock local.
+--
+-- Schedule rules store a plain minute-of-day — "16:00" — with no zone attached,
+-- and the scheduler matched it against UTC. Every operator types local wall
+-- clock, so every rule fired at the wrong time by the UTC offset, and in a
+-- container (where TZ is unset and even time.Now() is UTC) it could not
+-- accidentally be right. A rule set for 10:00 in Colorado fired at 03:00.
+--
+-- Empty means "use the server default" (SAMO_TIMEZONE, else the process's own
+-- zone, else UTC), so nothing has to be filled in for a single-timezone setup.
+ALTER TABLE channels ADD COLUMN IF NOT EXISTS timezone TEXT NOT NULL DEFAULT '';

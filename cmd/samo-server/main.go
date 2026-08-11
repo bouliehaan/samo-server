@@ -1,6 +1,11 @@
 package main
 
 import (
+	// The runtime image is debian-slim with no /usr/share/zoneinfo, so the tz
+	// database is compiled in. Without it LoadLocation fails and every channel
+	// schedule silently falls back to UTC — the bug this whole change fixes.
+	_ "time/tzdata"
+
 	"context"
 	"fmt"
 	"net"
@@ -8,6 +13,8 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strconv"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
@@ -28,6 +35,7 @@ import (
 	"github.com/bouliehaan/samo-server/internal/lastfm"
 	"github.com/bouliehaan/samo-server/internal/libraries"
 	"github.com/bouliehaan/samo-server/internal/log"
+	"github.com/bouliehaan/samo-server/internal/loudness"
 	"github.com/bouliehaan/samo-server/internal/metadata"
 	"github.com/bouliehaan/samo-server/internal/playback"
 	"github.com/bouliehaan/samo-server/internal/playlists"
@@ -35,6 +43,7 @@ import (
 	"github.com/bouliehaan/samo-server/internal/podcaststream"
 	"github.com/bouliehaan/samo-server/internal/radio"
 	"github.com/bouliehaan/samo-server/internal/safego"
+	"github.com/bouliehaan/samo-server/internal/samoradio"
 	"github.com/bouliehaan/samo-server/internal/scanner"
 	"github.com/bouliehaan/samo-server/internal/search"
 	"github.com/bouliehaan/samo-server/internal/serverid"
@@ -71,6 +80,12 @@ func main() {
 	if payload := scanner.PayloadPathFromArgs(os.Args[1:]); payload != "" {
 		runScanSubprocess(ctx, payload)
 		return
+	}
+
+	// Run a channel's programming forward without broadcasting it. Reads the
+	// real plan and catalog, writes nothing.
+	if len(os.Args) > 1 && os.Args[1] == "radio-sim" {
+		os.Exit(runRadioSim(ctx, os.Args[2:]))
 	}
 
 	if len(os.Args) > 1 && os.Args[1] == "chapters-inspect" {
@@ -492,15 +507,72 @@ func main() {
 			log.Infof("startup scan did not start (server continues): %v", err)
 		}
 	}
+	// Where a channel's schedule is read, unless the channel names its own.
+	// SAMO_TIMEZONE first, then the process zone — which in a container is
+	// UTC, so anyone outside UTC has to set one for schedules to mean
+	// anything.
+	scheduleLocation := time.Local
+	if zone := strings.TrimSpace(os.Getenv("SAMO_TIMEZONE")); zone != "" {
+		if loc, err := time.LoadLocation(zone); err == nil {
+			scheduleLocation = loc
+		} else {
+			log.Warnf("SAMO_TIMEZONE %q is not a known zone; channel schedules fall back to %s", zone, scheduleLocation)
+		}
+	}
+	log.Infof("channel schedules are read in %s", scheduleLocation)
+
+	// Loudness levelling, shared by the channel streamer and the samo-radio
+	// queue resolver so both sides of the radio agree on how loud things are.
+	// One EBU R128 measurement per file, cached; playback applies a constant
+	// gain and nothing else. See internal/loudness.
+	loudnessTarget, loudnessOn := envLoudnessTarget()
+	var loudnessService *loudness.Service
+	if loudnessOn {
+		loudnessService = loudness.NewService(loudness.ServiceOptions{
+			DB:         db,
+			FFmpegPath: tools.FFmpeg,
+			Target:     loudnessTarget,
+			// Info, not debug. The channel streamer logs at debug because its
+			// output is ffmpeg stderr — per-item noise. This is the opposite:
+			// a handful of lines saying how far the library sweep has got and
+			// what level a newly-measured item came in at. Those are the only
+			// evidence levelling is working at all, and hiding them behind a
+			// log level nobody runs is how you end up guessing.
+			Logger:      log.StdLogger(log.LevelInfo),
+			BaseContext: ctx,
+		})
+		log.Infof("radio loudness levelling on, target %.1f LUFS with %.1f dBTP headroom",
+			loudnessTarget.LUFS, loudnessTarget.CeilingDBTP)
+		// Measure the library in the background so the first airing of
+		// anything is already levelled. Deliberately slow; see Backfill.
+		safego.Go("loudness backfill", func() {
+			loudness.Backfill{Service: loudnessService}.Run(ctx)
+		})
+	} else {
+		log.Infof("radio loudness levelling off (SAMO_LOUDNESS_TARGET=off)")
+	}
+
 	channelsService := channels.NewService(channels.ServiceOptions{
 		DB:               db,
 		Catalog:          catalogService,
 		Cache:            podcastCacheAdapter{service: podcastCacheService},
 		InternetStations: internetStationAdapter{service: sourceService},
+		Listened:         channelListenedAdapter{service: playbackService},
+		DefaultLocation:  scheduleLocation,
+		DefaultTalkShare: envTalkShare(),
 		FFmpegPath:       tools.FFmpeg,
 		// Channel ffmpeg stderr is per-item detail, not an event.
 		Logger:      log.StdLogger(log.LevelDebug),
 		BaseContext: ctx,
+		Loudness:    loudnessPlanner(loudnessService),
+	})
+
+	// samo-radio devices: headless players on a machine with a sound card.
+	// The token minter lets the service hand a device a durable Samo
+	// credential without knowing anything about how accounts work.
+	samoRadioService := samoradio.NewService(samoradio.ServiceOptions{
+		DB:     db,
+		Tokens: api.SamoRadioTokenMinter{Users: userService},
 	})
 
 	// One hub, shared by the services that report progress and the SSE
@@ -534,6 +606,9 @@ func main() {
 		ArtistMeta:    artistMetaService,
 		Users:         userService,
 		Channels:      channelsService,
+		SamoRadio:     samoRadioService,
+		Loudness:      loudnessService,
+		ListenAddr:    cfg.Addr,
 		ReloadCatalog: reloadCatalog,
 		StartedAt:     time.Now(),
 		BaseContext:   ctx,
@@ -744,6 +819,87 @@ func (a podcastCacheAdapter) Lookup(ctx context.Context, episodeID, enclosureURL
 // through the channels.InternetStationLookup interface. Same pattern as
 // podcastCacheAdapter — keeps internal/channels free of a sources
 // import and lets channels.InternetStation stay a minimal struct.
+// envTalkShare reads SAMO_TALK_SHARE as a percentage (0-100). Zero leaves the
+// package default of 75% spoken word.
+func envTalkShare() float64 {
+	raw := strings.TrimSpace(os.Getenv("SAMO_TALK_SHARE"))
+	if raw == "" {
+		return 0
+	}
+	percent, err := strconv.ParseFloat(raw, 64)
+	if err != nil || percent <= 0 || percent >= 100 {
+		log.Warnf("SAMO_TALK_SHARE %q is not a percentage between 1 and 99; using the default", raw)
+		return 0
+	}
+	return percent / 100
+}
+
+// envLoudnessTarget reads SAMO_LOUDNESS_TARGET, the level the radio aims every
+// item at, in LUFS. "off" disables levelling entirely and goes back to playing
+// everything at whatever level it was mastered at.
+//
+// The default of -16 LUFS is the streaming and podcast convention. Lower is
+// quieter and leaves more headroom for dynamic material; higher is louder and
+// makes the peak limiter work harder, which is the one part of this that can
+// actually be heard. Outside -30..-8 there is no sensible reading, so a value
+// out of range is refused rather than obeyed.
+func envLoudnessTarget() (loudness.Target, bool) {
+	target := loudness.DefaultTarget
+	raw := strings.TrimSpace(os.Getenv("SAMO_LOUDNESS_TARGET"))
+	if strings.EqualFold(raw, "off") || strings.EqualFold(raw, "false") {
+		return target, false
+	}
+	if raw == "" {
+		return target, true
+	}
+	lufs, err := strconv.ParseFloat(strings.TrimSuffix(strings.ToUpper(raw), " LUFS"), 64)
+	if err != nil || lufs < -30 || lufs > -8 {
+		log.Warnf("SAMO_LOUDNESS_TARGET %q is not a level between -30 and -8 LUFS; using %.0f",
+			raw, target.LUFS)
+		return target, true
+	}
+	target.LUFS = lufs
+	return target, true
+}
+
+// loudnessPlanner adapts the service to the interface internal/channels wants,
+// returning a genuinely nil interface when levelling is off. Assigning a typed
+// nil pointer straight into an interface field produces a non-nil interface
+// holding nothing, and every `if x != nil` guard downstream then lies.
+func loudnessPlanner(service *loudness.Service) channels.LoudnessPlanner {
+	if service == nil {
+		return nil
+	}
+	return service
+}
+
+// channelListenedAdapter lets the channel scheduler ask "has anyone here
+// already heard this episode" without importing the playback package's shape.
+type channelListenedAdapter struct {
+	service *playback.Service
+}
+
+func (a channelListenedAdapter) EpisodeProgress(
+	ctx context.Context,
+	episodeIDs []string,
+) (map[string]channels.EpisodeProgress, error) {
+	if a.service == nil {
+		return nil, nil
+	}
+	states, err := a.service.AnyListenerByIDs(ctx, playback.TargetPodcastEpisode, episodeIDs)
+	if err != nil {
+		return nil, err
+	}
+	out := make(map[string]channels.EpisodeProgress, len(states))
+	for id, state := range states {
+		out[id] = channels.EpisodeProgress{
+			Completed:       state.Completed,
+			ProgressSeconds: state.ProgressSeconds,
+		}
+	}
+	return out, nil
+}
+
 type internetStationAdapter struct {
 	service *sources.Service
 }

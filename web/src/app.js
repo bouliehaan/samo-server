@@ -16,8 +16,10 @@ import { connect as connectEvents } from "./ui/events.js";
 import { cancelActiveScan, closeScanPanel, configureScanUI, ensureScanAvailable, handleScanJobEvent, openScanPanel, rememberLibraries, triggerLibraryRepair, triggerLibraryScan, triggerScan, updateRefreshUI, watchScanJob } from "./ui/scan.js";
 import { applyStreamResumeSeek, clearPlayerTarget, flushPlaybackProgress, patchPlayback, playbackGlobalSeconds, playURL, playerTarget, refreshSeekUI, reportPlaybackProgress, resetProgressThrottle, seekFromPointer, setPlayerGlyph } from "./ui/player.js";
 import { closeIdentifyModal, identifyCandidates, identifyContext, openIdentifyModal, runIdentifySearch } from "./ui/identify.js";
-import { channelCard, channelNowPlayingBody, channelScheduleTimeline } from "./ui/channels.js";
-import { composerChannel, composerChannelSchedule, composerChannelSourceFile, composerChannelSourceInternet, composerChannelSourceLive, composerChannelSourcePodcast, composerClose, composerLibrary, composerMessage, composerPlaylist, composerPlaylistEdit, composerPlaylistImport, composerPodcastAttachFeed, composerPodcastFeed, composerRadioStation, fieldHTML, toggleComposer } from "./ui/composer.js";
+import { channelCard, channelNowPlayingBody, channelScheduleStatusBody, channelScheduleTimeline } from "./ui/channels.js";
+import { owedPanel, planPanel, sourceComposer, whyPanel } from "./ui/plan.js";
+import { composerSamoRadioDevice, samoRadioDeviceCard, samoRadioSendBar } from "./ui/samo_radio.js";
+import { composerChannel, composerChannelContent, composerChannelSchedule, composerChannelShow, composerClose, roleForKind, composerLibrary, composerMessage, composerPlaylist, composerPlaylistEdit, composerPlaylistImport, composerPodcastAttachFeed, composerPodcastFeed, composerRadioStation, fieldHTML, toggleComposer } from "./ui/composer.js";
 import { formatDataSize, formatDate, formatDuration, formatUptime, minuteToHHMM, parseHHMM, weekdayMaskToLabel } from "./ui/format.js";
 import { attr, escapeHTML, progressBar, setMessage, setStatus, splitTags, tagsLine } from "./ui/html.js";
 import { audiobookSub, audiobookTitle, browseAlbums, browseResultCount, candidateFeedURL, isLibraryFolderPodcast, libraryKindLabel, musicPaginationFooter, nowPlayingLine, playlistCoverBlock, podcastHasLinkedFeed, podcastSub, podcastTitle, recentlyAddedKindLabel, scanPruneSummary } from "./ui/labels.js";
@@ -62,7 +64,22 @@ import { globalScanActionsHTML, libraryKindScanActionsHTML, libraryScanActionsHT
   // Default RADIO sub-mode is CHANNELS — personal programmed streams.
   // INTERNET is for live stream bookmarks.
   let radioMode = "channels";
+  // The plan currently on screen, plus which row an editor is editing. Held
+  // here rather than re-fetched per keystroke: the editors mutate this object
+  // and PUT the whole document, so the server validates one coherent plan
+  // instead of a stream of half-applied edits.
+  let activePlan = null;
+  let activePlanSources = [];
+  let planEditIndex = { block: -1, pool: -1, category: -1 };
+  let planEditSourceID = "";
+  let whyLimit = 1;
   let activeChannelID = "";
+  // Which samo-radio device has its settings drawer open, and the device list
+  // itself — cached between polls so the "play to" buttons on detail views do
+  // not each cost a round trip.
+  let samoRadioExpandedID = "";
+  let samoRadioDevices = [];
+  let samoRadioDevicesPrimed = false;
   let searchQuery = "";
 
   function renderLoading() {
@@ -993,6 +1010,7 @@ import { globalScanActionsHTML, libraryKindScanActionsHTML, libraryScanActionsHT
             tagsLine(album.genres || album.tags || []) +
           '</div>' +
         '</div>' +
+        samoRadioSendBar(primeSamoRadioDevices(), { type: "track", ids: tracks.map((track) => track.id) }) +
         '<div class="section-row"><div class="section-label">// tracks</div>' + trackList(tracks) + '</div>' +
       '</section>';
       main.innerHTML = html;
@@ -1354,6 +1372,7 @@ import { globalScanActionsHTML, libraryKindScanActionsHTML, libraryScanActionsHT
     return '<div class="pill-bar">' +
       '<button class="pill ' + (radioMode === "channels" ? "active" : "") + '" data-action="radio-mode" data-mode="channels">CHANNELS</button>' +
       '<button class="pill ' + (radioMode === "internet" ? "active" : "") + '" data-action="radio-mode" data-mode="internet">INTERNET</button>' +
+      '<button class="pill ' + (radioMode === "samo-radio" ? "active" : "") + '" data-action="radio-mode" data-mode="samo-radio">SAMO-RADIO</button>' +
     '</div>';
   }
 
@@ -1362,6 +1381,10 @@ import { globalScanActionsHTML, libraryKindScanActionsHTML, libraryScanActionsHT
     try {
       if (activeChannelID) {
         await renderChannelDetail(activeChannelID, isRefresh);
+        return;
+      }
+      if (radioMode === "samo-radio") {
+        await renderSamoRadio(isRefresh);
         return;
       }
       if (radioMode === "channels") {
@@ -1394,6 +1417,196 @@ import { globalScanActionsHTML, libraryKindScanActionsHTML, libraryScanActionsHT
     if (activeTab === "radio") scheduleRadioPoll();
   }
 
+  /* -------- SAMO-RADIO (the server's own audio output) -------- */
+
+  // The device list is the expensive part of this view: Samo asks every device
+  // for its live state, in parallel, with a short deadline. Outputs and the
+  // channel list are only fetched for the one device whose settings drawer is
+  // open, because enumerating sound cards shells out to aplay on the far end.
+  async function renderSamoRadio(isRefresh) {
+    const data = await api("/api/v1/samo-radio/devices").catch(() => ({ items: [] }));
+    const devices = (data && data.items) || [];
+    samoRadioDevices = devices;
+    samoRadioDevicesPrimed = true;
+
+    let outputs = null;
+    let channels = [];
+    let stations = [];
+    if (samoRadioExpandedID && devices.some((device) => device.id === samoRadioExpandedID)) {
+      // A station is anything the device can sit on: a programmed channel or
+      // an internet stream. Both are offered as the fallback.
+      const [outputsResult, channelsResult, stationsResult] = await Promise.all([
+        api("/api/v1/samo-radio/devices/" + encodeURIComponent(samoRadioExpandedID) + "/outputs").catch(() => null),
+        api("/api/v1/channels").catch(() => ({ items: [] })),
+        api("/api/v1/internet-radio/stations?limit=200").catch(() => ({ items: [] })),
+      ]);
+      outputs = outputsResult;
+      channels = (channelsResult && channelsResult.items) || [];
+      stations = ((stationsResult && stationsResult.items) || []).filter((station) => station.enabled !== false);
+    }
+
+    let html = '<section class="view">' +
+      '<div class="view-head"><h1>RADIO</h1><div class="view-actions">' +
+        '<button class="btn primary btn-small" data-action="composer-toggle" data-composer="samo-radio-device">+ ADD DEVICE</button>' +
+      '</div></div>' +
+      radioSubPills() +
+      composerSamoRadioDevice();
+
+    html += '<div class="section-row"><div class="section-label">// audio outputs</div>';
+    if (devices.length === 0) {
+      html += '<div class="empty-state">// no devices — install samo-radio on the machine with the sound card, then ADD DEVICE with the control token it printed</div>';
+    } else {
+      devices.forEach((device) => {
+        html += samoRadioDeviceCard(device, {
+          expanded: device.id === samoRadioExpandedID,
+          outputs: device.id === samoRadioExpandedID ? outputs : null,
+          channels: channels,
+          stations: stations,
+        });
+      });
+    }
+    html += '</div></section>';
+    main.innerHTML = html;
+    if (activeTab === "radio") scheduleRadioPoll();
+  }
+
+  // sendToSamoRadio is the whole "play to" gesture: resolve nothing on the
+  // client, just name the catalog items and let the server build the URLs the
+  // device will fetch.
+  async function sendToSamoRadio(deviceID, type, ids, options) {
+    options = options || {};
+    if (type === "channel") {
+      await api("/api/v1/samo-radio/devices/" + encodeURIComponent(deviceID) + "/play", {
+        method: "POST",
+        body: { mode: "channel", channelId: ids[0] },
+      });
+      return;
+    }
+    const items = (ids || []).filter(Boolean).map((id) => ({ type: type, id: id }));
+    if (items.length === 0) return;
+    await api("/api/v1/samo-radio/devices/" + encodeURIComponent(deviceID) + "/play", {
+      method: "POST",
+      body: { mode: "queue", items: items, append: Boolean(options.append) },
+    });
+  }
+
+  // readContentPicker turns the shared picker into a source payload.
+  // Throws with a human message rather than returning a half-built body, so a
+  // missing field surfaces in the composer's own status line.
+  function readContentPicker(prefix) {
+    const kind = document.getElementById(prefix + "Kind").value;
+    const labelInput = document.getElementById(prefix + "Label");
+    const typed = labelInput ? labelInput.value.trim() : "";
+
+    // Leaving the label blank promises "use its own name", so the name is
+    // resolved here rather than stored empty and rendered as the raw kind
+    // ("PODCAST-SUBSCRIPTION") everywhere it appears afterwards.
+    const chosen = (id) => {
+      const select = document.getElementById(prefix + id);
+      const option = select.options[select.selectedIndex];
+      return { name: option ? option.text.trim() : "", value: select.value };
+    };
+    const built = (config, name) => ({ config: config, kind: kind, label: typed || name });
+
+    if (kind === "podcast-subscription") {
+      const pick = chosen("Podcast");
+      if (!pick.value) throw new Error("pick a podcast");
+      return built({ maxAgeDays: 30, podcastId: pick.value }, pick.name);
+    }
+    if (kind === "internet-station") {
+      const pick = chosen("Station");
+      if (!pick.value) throw new Error("pick a station");
+      return built({ stationId: pick.value }, pick.name);
+    }
+    if (kind === "music-playlist") {
+      const pick = chosen("Playlist");
+      if (!pick.value) throw new Error("pick a playlist");
+      return built({ playlistId: pick.value }, pick.name);
+    }
+    if (kind === "file-pool") {
+      const paths = document.getElementById(prefix + "Paths").value
+        .split("\n").map((line) => line.trim()).filter(Boolean);
+      if (paths.length === 0) throw new Error("add at least one path or folder");
+      return built({ paths: paths }, folderName(paths[0]));
+    }
+    const url = document.getElementById(prefix + "Url").value.trim();
+    if (!url) throw new Error("a stream URL is required");
+    return built({ url: url }, hostName(url));
+  }
+
+  // A folder's own name is the last meaningful path segment, so
+  // /mnt/data2tb/commercials becomes "commercials" rather than the raw kind.
+  // A glob is skipped over — "oldies" is a name, "*.mp3" is not.
+  function folderName(path) {
+    const parts = String(path || "").split("/").filter(Boolean);
+    while (parts.length > 0 && /[*?[\]]/.test(parts[parts.length - 1])) {
+      parts.pop();
+    }
+    return parts.length > 0 ? parts[parts.length - 1] : "";
+  }
+
+  function hostName(url) {
+    try {
+      return new URL(url).host;
+    } catch {
+      return "";
+    }
+  }
+
+  // scheduleWindows splits a booking into the windows the engine can store.
+  //
+  // Rule windows are minute-of-day and cannot wrap, so "lofi from 22:00 to
+  // 06:00" is physically two rows. Making the user work that out was a papercut
+  // on the one kind of programming people most want (overnight).
+  function scheduleWindows(startMinute, endMinute) {
+    if (endMinute > startMinute) {
+      return [{ endMinute: endMinute, startMinute: startMinute }];
+    }
+    // Ending exactly at midnight wraps to a zero-length second window, which
+    // would store a rule that can never match. Drop empties.
+    return [
+      { endMinute: 1440, startMinute: startMinute },
+      { endMinute: endMinute, startMinute: 0 },
+    ].filter((window) => window.endMinute > window.startMinute);
+  }
+
+  // "<kind>:<id>" is how the station selects encode their two id spaces.
+  function parseStationValue(value) {
+    const raw = String(value || "");
+    const split = raw.indexOf(":");
+    if (split < 0) return null;
+    const kind = raw.slice(0, split);
+    const id = raw.slice(split + 1);
+    if (!id || (kind !== "channel" && kind !== "station")) return null;
+    return { kind: kind, id: id };
+  }
+
+  function stationPlayBody(picked) {
+    return picked.kind === "station"
+      ? { mode: "station", stationId: picked.id }
+      : { mode: "channel", channelId: picked.id };
+  }
+
+  // Devices are needed by any view that offers a "play to" button. Cached for
+  // the render, refreshed lazily — a stale entry costs one failed command, and
+  // asking on every album page would cost every device a state fetch.
+  // Devices for the "play to" bars, read from cache and refreshed in the
+  // background — never awaited on a render path.
+  //
+  // Listing devices makes the server probe each one for live state with a
+  // 3-second deadline, which is fine on the SAMO-RADIO tab and completely
+  // unacceptable on an album page: one unplugged device would stall every
+  // album open by three seconds. An empty first answer costs at most a missing
+  // send bar until the next navigation; a blocked render costs the page.
+  function primeSamoRadioDevices() {
+    if (samoRadioDevicesPrimed) return samoRadioDevices;
+    samoRadioDevicesPrimed = true;
+    api("/api/v1/samo-radio/devices")
+      .then((data) => { samoRadioDevices = (data && data.items) || []; })
+      .catch(() => { samoRadioDevices = []; });
+    return samoRadioDevices;
+  }
+
   /* -------- CHANNELS (24/7 programmed radio) -------- */
 
   async function renderChannelsList(isRefresh) {
@@ -1420,7 +1633,7 @@ import { globalScanActionsHTML, libraryKindScanActionsHTML, libraryScanActionsHT
   }
 
   async function renderChannelDetail(channelID, isRefresh) {
-    const [ch, sources, schedule, now, recent, podcasts, internet] = await Promise.all([
+    const [ch, sources, schedule, now, recent, podcasts, internet, playlists, scheduleStatus, plan, why, owed] = await Promise.all([
       api("/api/v1/channels/" + encodeURIComponent(channelID)).catch(() => null),
       api("/api/v1/channels/" + encodeURIComponent(channelID) + "/sources").catch(() => ({ items: [] })),
       api("/api/v1/channels/" + encodeURIComponent(channelID) + "/schedule").catch(() => ({ items: [] })),
@@ -1428,6 +1641,11 @@ import { globalScanActionsHTML, libraryKindScanActionsHTML, libraryScanActionsHT
       api("/api/v1/channels/" + encodeURIComponent(channelID) + "/recent?limit=8").catch(() => ({ items: [] })),
       api("/api/v1/podcasts?limit=200").catch(() => ({ items: [] })),
       api("/api/v1/internet-radio/stations?limit=200").catch(() => ({ items: [] })),
+      api("/api/v1/music/playlists?limit=200").catch(() => ({ items: [] })),
+      api("/api/v1/channels/" + encodeURIComponent(channelID) + "/schedule/status").catch(() => null),
+      api("/api/v1/channels/" + encodeURIComponent(channelID) + "/plan").catch(() => null),
+      api("/api/v1/channels/" + encodeURIComponent(channelID) + "/why?limit=" + whyLimit).catch(() => ({ items: [] })),
+      api("/api/v1/channels/" + encodeURIComponent(channelID) + "/obligations").catch(() => ({ items: [], pending: 0 })),
     ]);
     if (!ch) { renderError("channel not found"); return; }
     const sourceItems = (sources && sources.items) || [];
@@ -1435,8 +1653,27 @@ import { globalScanActionsHTML, libraryKindScanActionsHTML, libraryScanActionsHT
     const recentItems = (recent && recent.items) || [];
     const podcastItems = (podcasts && podcasts.items) || [];
     const internetItems = (internet && internet.items) || [];
+    const playlistItems = (playlists && playlists.items) || [];
+    const pickerOptions = { playlists: playlistItems, podcasts: podcastItems, stations: internetItems };
     const sourceLookup = {};
     sourceItems.forEach((s) => { sourceLookup[s.id] = s; });
+    // Deep-copied so the editors can mutate freely and a cancelled edit leaves
+    // nothing behind — the only plan that exists is the one that was saved.
+    const planView = plan || { plan: { categories: [], pools: [], blocks: [] }, custom: false };
+    activePlan = JSON.parse(JSON.stringify(planView.plan || {}));
+    const planIsCustom = !!planView.custom;
+    // Targets are relative, so show them normalised — that is how the engine
+    // reads them, and "100 and 0" should not display as "100% and 0%" of
+    // something that adds up to 100.
+    const planCategories = (activePlan.categories || []).filter((c) => (c.target || 0) > 0);
+    const planTotal = planCategories.reduce((sum, c) => sum + (c.target || 0), 0);
+    const planShares = planTotal > 0
+      ? planCategories
+          .map((c) => Math.round(((c.target || 0) / planTotal) * 100) + '% ' + (c.label || c.id))
+          .join(', ')
+      : '';
+    activePlanSources = sourceItems;
+    planEditIndex = { block: -1, pool: -1, category: -1 };
 
     let html = '<section class="view">' +
       '<div class="view-head"><h1>' + escapeHTML(ch.name) + '</h1><div class="view-actions">' +
@@ -1445,37 +1682,84 @@ import { globalScanActionsHTML, libraryKindScanActionsHTML, libraryScanActionsHT
         '<button class="btn danger btn-small" data-action="channel-delete" data-id="' + attr(ch.id) + '" data-name="' + attr(ch.name) + '">DELETE</button>' +
       '</div></div>';
 
-    // Now playing
+    html += samoRadioSendBar(primeSamoRadioDevices(), { type: "channel", ids: [ch.id] });
+
+    // Now playing, with the two skips a listener actually reaches for.
     html += '<div class="panel panel-wide channel-now">' +
-      '<div class="panel-head"><span>// NOW PLAYING</span><span>' + escapeHTML(ch.id) + '</span></div>' +
+      '<div class="panel-head"><span>// NOW PLAYING</span>' +
+      '<span>' +
+        '<button class="btn ghost btn-mini" data-action="channel-previous" data-id="' + attr(ch.id) + '">&#8592; BACK</button> ' +
+        '<button class="btn ghost btn-mini" data-action="channel-skip" data-id="' + attr(ch.id) + '" data-scope="item">SKIP &#8594;</button> ' +
+        '<button class="btn ghost btn-mini" data-action="channel-skip" data-id="' + attr(ch.id) + '" data-scope="kind">NEXT MEDIA TYPE</button>' +
+      '</span></div>' +
       channelNowPlayingBody(now) +
     '</div>';
 
     // Sources
+    // THE MIX — everything the channel falls back on, in role order. The
+    // running order is the engine's; this panel only says what each thing is.
     html += '<div class="panel panel-wide">' +
-      '<div class="panel-head"><span>// SOURCES</span>' +
-      '<span>' +
-        '<button class="btn ghost btn-mini" data-action="composer-toggle" data-composer="channel-source-file">+ FILE POOL</button> ' +
-        '<button class="btn ghost btn-mini" data-action="composer-toggle" data-composer="channel-source-podcast">+ PODCAST</button> ' +
-        '<button class="btn ghost btn-mini" data-action="composer-toggle" data-composer="channel-source-internet">+ INTERNET STATION</button> ' +
-        '<button class="btn ghost btn-mini" data-action="composer-toggle" data-composer="channel-source-live">+ LIVE URL</button>' +
-      '</span></div>' +
-      composerChannelSourceFile(channelID) +
-      composerChannelSourcePodcast(channelID, podcastItems) +
-      composerChannelSourceInternet(channelID, internetItems) +
-      composerChannelSourceLive(channelID) +
-      channelSourcesBody(sourceItems, podcastItems, internetItems) +
+      '<div class="panel-head"><span>// THE MIX</span>' +
+      '<button class="btn ghost btn-mini" data-action="composer-toggle" data-composer="channel-content">+ ADD CONTENT</button>' +
+      '</div>' +
+      // A channel running its own plan gets its shares FROM that plan.
+      //
+      // This used to read ch.talkShare — the column a derived plan is built
+      // from — so a station whose plan said 100% talk was described as 75%, and
+      // the CHANGE MIX button next to it wrote a value the scheduler no longer
+      // reads. A control that does nothing is worse than no control: it is a
+      // screen telling you that you have changed something you have not.
+      '<div class="panel-sub">' +
+        (planIsCustom
+          ? 'Each CATEGORY has a share of airtime, and whichever is further behind goes next. ' +
+            'This channel runs its own plan, so the shares come from CATEGORIES below' +
+            (planShares ? ' — currently <strong>' + planShares + '</strong>.' : '.')
+          : 'Talk and music each get a share of airtime, and whichever CATEGORY is further behind goes next — ' +
+            'so a long stretch of one is corrected by the other rather than continued. ' +
+            'Currently <strong>' + Math.round((ch.talkShare || 0.75) * 100) + '% talk</strong>. ' +
+            '<button class="btn ghost btn-mini" data-action="channel-talk-share" data-id="' + attr(ch.id) + '" data-share="' + (ch.talkShare || 0.75) + '">CHANGE MIX</button>') +
+      '</div>' +
+      '<div class="panel-sub">' +
+        'Listening day <strong>' + escapeHTML(minuteToHHMM(ch.dayStartMinute ?? 480)) + '–' +
+        escapeHTML(minuteToHHMM(ch.dayEndMinute ?? 1380)) + '</strong>. ' +
+        'A new episode aired outside these hours has not reached you, so it stays new until it airs inside them — ' +
+        'that is what stops overnight releases being spent at 3am. ' +
+        '<button class="btn ghost btn-mini" data-action="channel-listening-day" data-id="' + attr(ch.id) +
+          '" data-start="' + (ch.dayStartMinute ?? 480) + '" data-end="' + (ch.dayEndMinute ?? 1380) + '">CHANGE HOURS</button>' +
+      '</div>' +
+      composerChannelContent(channelID, pickerOptions) +
+      sourceComposer(activePlan.categories || []) +
+      channelSourcesBody(sourceItems.filter((src) => src.role !== "show"), podcastItems, internetItems) +
     '</div>';
 
     // Schedule rules
     html += '<div class="panel panel-wide">' +
-      '<div class="panel-head"><span>// SCHEDULE</span>' +
-      '<button class="btn ghost btn-mini" data-action="composer-toggle" data-composer="channel-schedule">+ NEW RULE</button>' +
+      '<div class="panel-head"><span>// PROGRAMME</span>' +
+      '<span>' +
+        '<button class="btn ghost btn-mini" data-action="composer-toggle" data-composer="channel-show">+ ADD SHOW</button> ' +
+        '<button class="btn ghost btn-mini" data-action="composer-toggle" data-composer="channel-schedule">+ SLOT FOR EXISTING</button>' +
+      '</span></div>' +
+      '<div class="panel-sub">Booked slots, in ' + escapeHTML(ch.effectiveTimezone || "UTC") + ' — ' +
+        'a show only airs in its window, and beats everything in the mix. ' +
+        '<button class="btn ghost btn-mini" data-action="channel-timezone" data-id="' + attr(ch.id) + '" data-tz="' + attr(ch.timezone || "") + '" data-effective="' + attr(ch.effectiveTimezone || "UTC") + '">CHANGE CLOCK</button>' +
       '</div>' +
+      channelScheduleStatusBody(scheduleStatus, channelID) +
+      composerChannelShow(channelID, pickerOptions) +
       composerChannelSchedule(channelID, sourceItems) +
       channelScheduleTimeline(ruleItems, sourceLookup) +
       channelScheduleBody(ruleItems, sourceLookup) +
     '</div>';
+
+    // The station plan: pools, blocks, categories. This is the whole
+    // station-building surface, and it edits exactly the concepts the
+    // scheduler runs on.
+    html += planPanel({ plan: activePlan, custom: planView.custom }, sourceItems, channelID,
+      (scheduleStatus && scheduleStatus.programming && scheduleStatus.programming.unreachable) || []);
+
+    // What the station owes you, and the answer to "why the hell did it play
+    // that" — neither of which should require an SSH session.
+    html += owedPanel((owed && owed.items) || [], owed && owed.pending);
+    html += whyPanel((why && why.items) || []);
 
     // Recent
     html += '<div class="panel panel-wide">' +
@@ -1514,11 +1798,28 @@ import { globalScanActionsHTML, libraryKindScanActionsHTML, libraryScanActionsHT
         const paths = cfg.paths || (cfg.path ? [cfg.path] : []);
         detail = (paths.length > 0 ? paths[0] : '') + (paths.length > 1 ? " · +" + (paths.length - 1) + " more" : "");
       }
+      // The role IS the running order, so it leads the row. WEIGHT is gone
+      // from the summary: it only breaks ties inside a tier now, and showing
+      // it here is what made people read it as priority.
+      const role = (src.role || "talk").toUpperCase();
+      const roleTag = { TALK: "TALK", MUSIC: "MUS", SHOW: "SHOW", COMMERCIAL: "AD" }[role] || "TALK";
+      // What the scheduler will actually do with this, spelled out: the tier
+      // orders what it owes you, the creator is what it keeps apart.
+      const scheduling = [
+        cfg.category ? "category " + cfg.category : "",
+        cfg.tier ? "tier " + String(cfg.tier).toUpperCase() : "",
+        cfg.creator ? "by " + cfg.creator : "",
+        cfg.family ? "family " + cfg.family : "",
+      ].filter(Boolean).join(" · ");
+      // Rows created before the label was auto-filled still exist, so the
+      // resolved content name is the fallback ahead of the raw kind.
       return '<div class="list-row">' +
-        '<div class="num">' + (src.defaultRotation ? "ROT" : "PIN") + '</div>' +
-        '<div class="main"><div class="name">' + escapeHTML(src.label || kindLabel) + '</div>' +
-        '<div class="meta">' + escapeHTML(kindLabel) + (detail ? ' · ' + escapeHTML(detail) : '') + ' · WEIGHT ' + (src.weight || 1) + ' · ' + (src.enabled ? 'ENABLED' : 'DISABLED') + '</div></div>' +
+        '<div class="num">' + roleTag + '</div>' +
+        '<div class="main"><div class="name">' + escapeHTML(src.label || detail || kindLabel) + '</div>' +
+        '<div class="meta">' + escapeHTML(role) + ' · ' + escapeHTML(kindLabel) + (detail ? ' · ' + escapeHTML(detail) : '') + ' · ' + (src.enabled ? 'ENABLED' : 'DISABLED') +
+          (scheduling ? '<br>' + escapeHTML(scheduling) : '') + '</div></div>' +
         '<div class="actions">' +
+          '<button class="btn ghost btn-mini" data-action="plan-source-edit" data-id="' + attr(src.id) + '">SETTINGS</button>' +
           '<button class="btn ghost btn-mini" data-action="channel-source-toggle" data-id="' + attr(src.id) + '" data-enabled="' + (!src.enabled) + '">' + (src.enabled ? 'DISABLE' : 'ENABLE') + '</button>' +
           '<button class="btn danger btn-mini" data-action="channel-source-delete" data-id="' + attr(src.id) + '" data-name="' + attr(src.label || kindLabel) + '">DELETE</button>' +
         '</div>' +
@@ -1528,13 +1829,13 @@ import { globalScanActionsHTML, libraryKindScanActionsHTML, libraryScanActionsHT
 
   function channelScheduleBody(rules, sourceLookup) {
     if (!rules || rules.length === 0) {
-      return '<div class="empty-state">// no schedule rules — without rules the channel runs pure rotation</div>';
+      return '<div class="empty-state">// no schedule rules — the channel plays new episodes, then reruns and music</div>';
     }
     return '<div class="list">' + rules.map((rule) => {
       const src = sourceLookup[rule.sourceId];
       const days = weekdayMaskToLabel(rule.weekdayMask);
       const window = minuteToHHMM(rule.startMinute) + " → " + minuteToHHMM(rule.endMinute);
-      const label = rule.label || (src ? src.label : "Rule");
+      const label = rule.label || (src ? src.label || src.kind : "Rule");
       return '<div class="list-row">' +
         '<div class="num">P' + (rule.priority || 100) + '</div>' +
         '<div class="main"><div class="name">' + escapeHTML(label) + '</div>' +
@@ -1557,6 +1858,245 @@ import { globalScanActionsHTML, libraryKindScanActionsHTML, libraryScanActionsHT
         '<div class="meta">' + escapeHTML(entry.kind || '') + ' · ' + formatDate(entry.startedAt) + (entry.durationSeconds ? ' · ' + formatDuration(entry.durationSeconds) : '') + '</div></div>' +
       '</div>'
     )).join("") + '</div>';
+  }
+
+  /* -------- STATION PLAN EDITING -------- */
+
+  // The editors mutate `activePlan` and then PUT the whole document. Saving a
+  // plan a piece at a time would mean the server validating half-applied
+  // states — a block referring to a pool that has not been added yet — and the
+  // validation is the entire point of the endpoint.
+  async function savePlan() {
+    if (!activeChannelID || !activePlan) return;
+    try {
+      await api("/api/v1/channels/" + encodeURIComponent(activeChannelID) + "/plan", {
+        method: "PUT",
+        body: activePlan,
+      });
+    } catch (err) {
+      alert("That plan was rejected:\n\n" + (err.message || "unknown error"));
+      return;
+    }
+    await viewRadio();
+  }
+
+  function planField(id) {
+    const el = document.getElementById(id);
+    return el ? el.value.trim() : "";
+  }
+
+  function planChecked(id) {
+    const el = document.getElementById(id);
+    return Boolean(el && el.checked);
+  }
+
+  function planNumber(id) {
+    const raw = planField(id);
+    if (raw === "") return null;
+    const value = Number(raw);
+    return Number.isFinite(value) ? value : null;
+  }
+
+  function setPlanField(id, value) {
+    const el = document.getElementById(id);
+    if (el) el.value = value == null ? "" : String(value);
+  }
+
+  function setPlanChecked(id, value) {
+    const el = document.getElementById(id);
+    if (el) el.checked = Boolean(value);
+  }
+
+  function planCategories() { return (activePlan && activePlan.categories) || []; }
+  function planPools() { return (activePlan && activePlan.pools) || []; }
+  function planBlocks() { return (activePlan && activePlan.blocks) || []; }
+
+  // Load a block into the editor. Every field is written, including the empty
+  // ones — a form that keeps the last block's values is how you accidentally
+  // give two blocks the same exit time.
+  function fillBlockForm(block) {
+    const enter = (block && block.enter) || {};
+    const exit = (block && block.exit) || {};
+    setPlanField("planBlockID", block ? block.id : "");
+    setPlanField("planBlockLabel", block ? block.label : "");
+    setPlanChecked("planBlockDefault", block ? block.default : false);
+    setPlanField("planBlockAt", enter.at);
+    setPlanField("planBlockDays", enter.days || "*");
+    setPlanChecked("planBlockHard", enter.hard);
+    setPlanField("planBlockStart", enter.start || "makeNext");
+    setPlanField("planBlockGrace", enter.grace);
+    setPlanField("planBlockAfter", enter.after || "");
+    setPlanField("planBlockWhen", enter.when);
+    setPlanField("planBlockExitAt", exit.at);
+    setPlanField("planBlockExitDuration", exit.duration);
+    setPlanField("planBlockExitTolerance", exit.tolerance);
+    setPlanField("planBlockExitCount", exit.count || "");
+    setPlanField("planBlockExitWhen", exit.when);
+    setPlanChecked("planBlockExitAnchor", exit.atNextAnchor);
+    setPlanField("planBlockNext", block ? (block.next || "") : "");
+
+    const refs = {};
+    ((block && block.pools) || []).forEach((ref) => { refs[ref.pool] = ref.weight || 1; });
+    planPools().forEach((pool, index) => {
+      setPlanChecked("planBlockPool" + index, refs[pool.id] != null);
+      setPlanField("planBlockPoolWeight" + index, refs[pool.id] != null ? refs[pool.id] : 1);
+    });
+
+    setPlanField("planBlockExposure", block && block.exposure != null ? String(block.exposure) : "");
+
+    const pattern = (block && block.pattern) || [];
+    for (let index = 0; index < 4; index++) {
+      setPlanField("planBlockPattern" + index, pattern[index] ? pattern[index].want : "");
+    }
+
+    const breaks = (block && block.breaks) || null;
+    const target = (breaks && breaks.target) || {};
+    const accept = (breaks && breaks.accept) || {};
+    setPlanField("planBlockBreakTargetDuration", target.duration);
+    setPlanField("planBlockBreakAcceptMin", (accept.duration || [])[0]);
+    setPlanField("planBlockBreakAcceptMax", (accept.duration || [])[1]);
+    setPlanField("planBlockBreakMinGap", breaks ? breaks.minGap : "");
+    setPlanField("planBlockBreakBetween", ((breaks && breaks.between) || []).join(", "));
+    const elements = {};
+    ((breaks && breaks.elements) || []).forEach((element) => { elements[element.pool] = element; });
+    planPools().forEach((pool, index) => {
+      const element = elements[pool.id];
+      const count = (element && element.count) || [0, 0];
+      setPlanField("planBlockBreakMin" + index, element ? count[0] : 0);
+      setPlanField("planBlockBreakMax" + index, element ? count[1] : 0);
+      setPlanChecked("planBlockBreakFill" + index, Boolean(element && element.fill));
+    });
+
+    const balance = (block && block.balance) || {};
+    const limits = (block && block.limits) || {};
+    const maxByCategory = {};
+    (limits.maxUnbroken || []).forEach((limit) => { maxByCategory[limit.category] = limit; });
+    const minByCategory = {};
+    (limits.minUnbroken || []).forEach((run) => { minByCategory[run.category] = run; });
+    planCategories().forEach((category, index) => {
+      const share = balance[category.id];
+      setPlanField("planBlockBalance" + index, share == null ? "" : Math.round(share * 100));
+      const max = maxByCategory[category.id] || {};
+      const min = minByCategory[category.id] || {};
+      setPlanField("planBlockMinRun" + index, min.min || "");
+      setPlanField("planBlockMaxRun" + index, max.max || "");
+      setPlanField("planBlockResetAfter" + index, max.resetAfter || min.resetAfter || "");
+      setPlanField("planBlockMinItem" + index, max.minItem || "");
+    });
+  }
+
+  function readBlockForm() {
+    const id = planField("planBlockID");
+    if (!id) {
+      alert("A block needs an id.");
+      return null;
+    }
+    const block = { id: id, label: planField("planBlockLabel"), enter: {}, exit: {}, pools: [] };
+    if (planChecked("planBlockDefault")) block.default = true;
+
+    const at = planField("planBlockAt");
+    if (at) {
+      block.enter.at = at;
+      block.enter.days = planField("planBlockDays") || "*";
+      if (planChecked("planBlockHard")) {
+        block.enter.hard = true;
+        block.enter.start = planField("planBlockStart") || "makeNext";
+        const grace = planField("planBlockGrace");
+        if (grace) block.enter.grace = grace;
+      }
+    }
+    const after = planField("planBlockAfter");
+    if (after) block.enter.after = after;
+    const when = planField("planBlockWhen");
+    if (when) block.enter.when = when;
+
+    const exitAt = planField("planBlockExitAt");
+    if (exitAt) block.exit.at = exitAt;
+    const duration = planField("planBlockExitDuration");
+    if (duration) block.exit.duration = duration;
+    const tolerance = planField("planBlockExitTolerance");
+    if (tolerance) block.exit.tolerance = tolerance;
+    const count = planNumber("planBlockExitCount");
+    if (count) block.exit.count = count;
+    const exitWhen = planField("planBlockExitWhen");
+    if (exitWhen) block.exit.when = exitWhen;
+    if (planChecked("planBlockExitAnchor")) block.exit.atNextAnchor = true;
+
+    const next = planField("planBlockNext");
+    if (next && next !== id) block.next = next;
+
+    planPools().forEach((pool, index) => {
+      if (!planChecked("planBlockPool" + index)) return;
+      const weight = planNumber("planBlockPoolWeight" + index);
+      block.pools.push({ pool: pool.id, weight: weight && weight > 0 ? weight : 1 });
+    });
+
+    const balance = {};
+    const maxUnbroken = [];
+    const minUnbroken = [];
+    planCategories().forEach((category, index) => {
+      const share = planNumber("planBlockBalance" + index);
+      if (share != null) balance[category.id] = share / 100;
+      const max = planField("planBlockMaxRun" + index);
+      const reset = planField("planBlockResetAfter" + index);
+      const minItem = planField("planBlockMinItem" + index);
+      if (max) {
+        const limit = { category: category.id, max: max };
+        if (reset) limit.resetAfter = reset;
+        if (minItem) limit.minItem = minItem;
+        maxUnbroken.push(limit);
+      }
+      const minRun = planField("planBlockMinRun" + index);
+      if (minRun) {
+        const run = { category: category.id, min: minRun };
+        if (reset) run.resetAfter = reset;
+        minUnbroken.push(run);
+      }
+    });
+    if (Object.keys(balance).length > 0) block.balance = balance;
+    if (maxUnbroken.length > 0 || minUnbroken.length > 0) {
+      block.limits = {};
+      if (maxUnbroken.length > 0) block.limits.maxUnbroken = maxUnbroken;
+      if (minUnbroken.length > 0) block.limits.minUnbroken = minUnbroken;
+    }
+
+    const exposure = planField("planBlockExposure");
+    if (exposure !== "") block.exposure = Number(exposure);
+
+    const pattern = [];
+    for (let index = 0; index < 4; index++) {
+      const want = planField("planBlockPattern" + index);
+      if (want) pattern.push({ want: want });
+    }
+    if (pattern.length > 0) block.pattern = pattern;
+
+    // A break policy only exists if some element can actually contribute an
+    // item. An empty policy is not "breaks off", it is a plan the validator
+    // would refuse.
+    const elements = [];
+    planPools().forEach((pool, index) => {
+      const min = planNumber("planBlockBreakMin" + index) || 0;
+      const max = planNumber("planBlockBreakMax" + index) || 0;
+      if (max <= 0) return;
+      const element = { pool: pool.id, count: [min, max] };
+      if (planChecked("planBlockBreakFill" + index)) element.fill = true;
+      elements.push(element);
+    });
+    if (elements.length > 0) {
+      const breaks = { elements: elements, target: {}, accept: {} };
+      const targetDuration = planField("planBlockBreakTargetDuration");
+      if (targetDuration) breaks.target.duration = targetDuration;
+      const low = planField("planBlockBreakAcceptMin");
+      const high = planField("planBlockBreakAcceptMax");
+      if (low && high) breaks.accept.duration = [low, high];
+      const minGap = planField("planBlockBreakMinGap");
+      if (minGap) breaks.minGap = minGap;
+      const between = planField("planBlockBreakBetween")
+        .split(",").map((value) => value.trim()).filter(Boolean);
+      if (between.length > 0) breaks.between = between;
+      block.breaks = breaks;
+    }
+    return block;
   }
 
   function internetRadioAdminCard(station) {
@@ -2080,7 +2620,34 @@ import { globalScanActionsHTML, libraryKindScanActionsHTML, libraryScanActionsHT
   }
 
   async function composerSubmit(name) {
-    if (name === "radio-station") {
+    if (name === "samo-radio-device") {
+      const deviceName = document.getElementById("composerRadioDeviceName").value.trim();
+      const baseURL = document.getElementById("composerRadioDeviceURL").value.trim();
+      if (!deviceName) return composerMessage(name, "name is required", true);
+      if (!baseURL) return composerMessage(name, "control URL is required", true);
+      const device = await api("/api/v1/samo-radio/devices", {
+        method: "POST",
+        body: {
+          name: deviceName,
+          baseUrl: baseURL,
+          controlToken: document.getElementById("composerRadioDeviceToken").value.trim(),
+        },
+      });
+      // Pair immediately: a registered-but-unpaired device cannot do anything,
+      // so making it a second click would only create a state to get stuck in.
+      // A failure here leaves the device registered and re-pairable.
+      if (device && device.id) {
+        try {
+          await api("/api/v1/samo-radio/devices/" + encodeURIComponent(device.id) + "/pair", { method: "POST" });
+        } catch (pairErr) {
+          composerMessage(name, "added, but pairing failed: " + (pairErr.message || "unknown error"), true);
+        }
+      }
+      composerClose(name);
+      radioMode = "samo-radio";
+      samoRadioDevices = [];
+      await viewRadio();
+    } else if (name === "radio-station") {
       const stream = document.getElementById("composerRadioStream").value.trim();
       const stationName = document.getElementById("composerRadioName").value.trim();
       if (!stream) return composerMessage(name, "stream URL is required", true);
@@ -2185,55 +2752,50 @@ import { globalScanActionsHTML, libraryKindScanActionsHTML, libraryScanActionsHT
       composerClose(name);
       activeChannelID = created.id;
       await viewRadio();
-    } else if (name === "channel-source-file") {
-      const channelID = document.querySelector('[data-composer="channel-source-file"][data-action="composer-submit"]').dataset.channelId;
-      const label = document.getElementById("composerSrcFileLabel").value.trim();
-      const pathsRaw = document.getElementById("composerSrcFilePaths").value;
-      const paths = pathsRaw.split("\n").map((s) => s.trim()).filter(Boolean);
-      if (paths.length === 0) return composerMessage(name, "add at least one path or folder", true);
-      const weight = parseInt(document.getElementById("composerSrcFileWeight").value || "1", 10) || 1;
+    } else if (name === "channel-content") {
+      const channelID = document.querySelector('[data-composer="channel-content"][data-action="composer-submit"]').dataset.channelId;
+      let picked;
+      try { picked = readContentPicker("composerContent"); }
+      catch (pickError) { return composerMessage(name, pickError.message, true); }
+      const role = document.getElementById("composerContentRole").value;
       await api("/api/v1/channels/" + encodeURIComponent(channelID) + "/sources", {
         method: "POST",
-        body: { kind: "file-pool", label: label, config: { paths: paths }, weight: weight, defaultRotation: true, enabled: true },
+        body: {
+          config: picked.config, enabled: true, kind: picked.kind, label: picked.label,
+          defaultRotation: role !== "show", role: role,
+        },
       });
       composerClose(name);
       await viewRadio();
-    } else if (name === "channel-source-podcast") {
-      const channelID = document.querySelector('[data-composer="channel-source-podcast"][data-action="composer-submit"]').dataset.channelId;
-      const podcastSelect = document.getElementById("composerSrcPodID");
-      const podcastId = podcastSelect ? podcastSelect.value : "";
-      if (!podcastId) return composerMessage(name, "pick a podcast", true);
-      const label = document.getElementById("composerSrcPodLabel").value.trim();
-      const maxAge = parseInt(document.getElementById("composerSrcPodMaxAge").value || "30", 10) || 30;
-      const weight = parseInt(document.getElementById("composerSrcPodWeight").value || "1", 10) || 1;
-      await api("/api/v1/channels/" + encodeURIComponent(channelID) + "/sources", {
+    } else if (name === "channel-show") {
+      const channelID = document.querySelector('[data-composer="channel-show"][data-action="composer-submit"]').dataset.channelId;
+      let picked;
+      try { picked = readContentPicker("composerShow"); }
+      catch (pickError) { return composerMessage(name, pickError.message, true); }
+      const startMin = parseHHMM(document.getElementById("composerShowStart").value);
+      const endMin = parseHHMM(document.getElementById("composerShowEnd").value);
+      if (startMin < 0 || endMin < 0) return composerMessage(name, "start and end must be HH:MM, e.g. 16:00", true);
+      if (startMin === endMin) return composerMessage(name, "start and end cannot be the same time", true);
+      const mask = parseInt(document.getElementById("composerShowDays").value || "127", 10) || 127;
+      // The content and its slot are created together: a show is one thing,
+      // so a half-made show (a source with no window) is never left behind.
+      const source = await api("/api/v1/channels/" + encodeURIComponent(channelID) + "/sources", {
         method: "POST",
-        body: { kind: "podcast-subscription", label: label, config: { podcastId: podcastId, maxAgeDays: maxAge }, weight: weight, defaultRotation: true, enabled: true },
+        body: {
+          config: picked.config, enabled: true, kind: picked.kind, label: picked.label,
+          defaultRotation: false, role: "show",
+        },
       });
-      composerClose(name);
-      await viewRadio();
-    } else if (name === "channel-source-internet") {
-      const channelID = document.querySelector('[data-composer="channel-source-internet"][data-action="composer-submit"]').dataset.channelId;
-      const stationID = document.getElementById("composerSrcInetID").value;
-      if (!stationID) return composerMessage(name, "pick a station", true);
-      const label = document.getElementById("composerSrcInetLabel").value.trim();
-      const rotation = document.getElementById("composerSrcInetRotation").checked;
-      await api("/api/v1/channels/" + encodeURIComponent(channelID) + "/sources", {
-        method: "POST",
-        body: { kind: "internet-station", label: label, config: { stationId: stationID }, defaultRotation: rotation, enabled: true },
-      });
-      composerClose(name);
-      await viewRadio();
-    } else if (name === "channel-source-live") {
-      const channelID = document.querySelector('[data-composer="channel-source-live"][data-action="composer-submit"]').dataset.channelId;
-      const label = document.getElementById("composerSrcLiveLabel").value.trim();
-      const url = document.getElementById("composerSrcLiveURL").value.trim();
-      if (!url) return composerMessage(name, "stream URL is required", true);
-      const rotation = document.getElementById("composerSrcLiveRotation").checked;
-      await api("/api/v1/channels/" + encodeURIComponent(channelID) + "/sources", {
-        method: "POST",
-        body: { kind: "live-stream", label: label, config: { url: url }, defaultRotation: rotation, enabled: true },
-      });
+      for (const window of scheduleWindows(startMin, endMin)) {
+        await api("/api/v1/channels/" + encodeURIComponent(channelID) + "/schedule", {
+          method: "POST",
+          body: {
+            enabled: true, endMinute: window.endMinute, label: picked.label,
+            priority: 200, sourceId: source.id, startMinute: window.startMinute,
+            weekdayMask: mask,
+          },
+        });
+      }
       composerClose(name);
       await viewRadio();
     } else if (name === "channel-schedule") {
@@ -2531,6 +3093,79 @@ import { globalScanActionsHTML, libraryKindScanActionsHTML, libraryScanActionsHT
     }
   });
 
+  // samo-radio's controls are selects and a slider, so they arrive as change
+  // events rather than clicks. "change" rather than "input" on the volume
+  // slider on purpose: it fires once on release instead of on every pixel of
+  // the drag, which would be one HTTP round trip per pixel.
+  document.addEventListener("change", async (event) => {
+    const el = event.target;
+    if (!el || !el.dataset || !el.dataset.action) return;
+    const action = el.dataset.action;
+    // The content picker renders every kind's fields and hides all but one.
+    // Swapping visibility beats re-rendering the form, which would throw away
+    // anything already typed into the fields that are staying.
+    if (action === "composer-kind") {
+      const prefix = el.dataset.prefix;
+      ["podcast-subscription", "internet-station", "music-playlist", "file-pool", "live-stream"]
+        .forEach((kind) => {
+          const group = document.getElementById(prefix + "Fields-" + kind);
+          if (group) group.hidden = kind !== el.value;
+        });
+      // Follow the kind with the role, until somebody chooses one themselves.
+      const role = document.getElementById(prefix + "Role");
+      if (role && role.dataset.roleAuto === "1") {
+        role.value = roleForKind(el.value);
+      }
+      return;
+    }
+    if (action === "composer-role") {
+      el.dataset.roleAuto = "0";
+      return;
+    }
+    if (action.indexOf("samoradio-") !== 0) return;
+    const deviceID = el.dataset.id;
+    if (!deviceID) return;
+    const base = "/api/v1/samo-radio/devices/" + encodeURIComponent(deviceID);
+    try {
+      if (action === "samoradio-volume") {
+        await api(base + "/volume", { method: "POST", body: { volume: Number(el.value) / 100 } });
+        const readout = el.parentElement && el.parentElement.querySelector(".samoradio-volume-value");
+        if (readout) readout.textContent = String(Math.round(Number(el.value)));
+      } else if (action === "samoradio-output") {
+        await api(base + "/settings", { method: "PATCH", body: { output: { device: el.value } } });
+        await renderRadio(true);
+      } else if (action === "samoradio-backend") {
+        await api(base + "/settings", { method: "PATCH", body: { output: { backend: el.value } } });
+        await renderRadio(true);
+      } else if (action === "samoradio-default-station") {
+        // Setting the station should also put it on air. Persisting it alone
+        // leaves the speaker silent until the next daemon restart, which reads
+        // as "I set the station and nothing happened" — the exact opposite of
+        // what picking a station means. The one thing not to interrupt is an
+        // ad-hoc queue somebody is listening to right now.
+        const picked = parseStationValue(el.value);
+        const target = samoRadioDevices.find((entry) => entry.id === el.dataset.id);
+        const tuneNow = Boolean(picked) && (!target || !target.state || target.state.mode !== "queue");
+        await api(base + "/settings", {
+          method: "PATCH",
+          body: {
+            defaultStation: picked || { kind: "channel", id: "" },
+            tuneNow: tuneNow,
+          },
+        });
+        await renderRadio(true);
+      } else if (action === "samoradio-tune") {
+        const picked = parseStationValue(el.value);
+        if (!picked) return;
+        await api(base + "/play", { method: "POST", body: stationPlayBody(picked) });
+        el.value = "";
+        await renderRadio(true);
+      }
+    } catch (err) {
+      alert(err.message || "samo-radio command failed");
+    }
+  });
+
   document.addEventListener("click", async (event) => {
     const el = event.target.closest("[data-action]");
     if (!el) return;
@@ -2718,10 +3353,364 @@ import { globalScanActionsHTML, libraryKindScanActionsHTML, libraryScanActionsHT
         if (!confirm("Remove missing file entry for " + (el.dataset.label || "this track") + "? This deletes the catalog row for the missing file.")) return;
         await api("/api/v1/missing-files/" + encodeURIComponent(el.dataset.id), { method: "DELETE" });
         await viewSettings();
+      } else if (action === "samoradio-configure") {
+        samoRadioExpandedID = samoRadioExpandedID === el.dataset.id ? "" : (el.dataset.id || "");
+        await viewRadio();
+      } else if (action === "samoradio-pair") {
+        await api("/api/v1/samo-radio/devices/" + encodeURIComponent(el.dataset.id) + "/pair", { method: "POST" });
+        samoRadioDevices = [];
+        await viewRadio();
+      } else if (action === "samoradio-delete") {
+        if (!confirm("Remove " + (el.dataset.name || "this device") + "? Its Samo token is revoked.")) return;
+        await api("/api/v1/samo-radio/devices/" + encodeURIComponent(el.dataset.id), { method: "DELETE" });
+        samoRadioDevices = [];
+        if (samoRadioExpandedID === el.dataset.id) samoRadioExpandedID = "";
+        await viewRadio();
+      } else if (action === "samoradio-previous") {
+        await api("/api/v1/samo-radio/devices/" + encodeURIComponent(el.dataset.id) + "/previous", { method: "POST" });
+        setTimeout(() => { void renderRadio(true); }, 1200);
+      } else if (action === "samoradio-skip") {
+        // Sent to the DEVICE, not to the channel, even though the channel is
+        // what decides what plays next. The device forwards the skip to the
+        // channel and then throws away the several seconds of audio it has
+        // already pulled down the pipe. Calling the channel endpoint from here
+        // does only the first half, so the thing you skipped keeps playing for
+        // a while afterwards and the button feels broken.
+        await api(
+          "/api/v1/samo-radio/devices/" + encodeURIComponent(el.dataset.id) +
+            (el.dataset.scope === "kind" ? "/next-kind" : "/next"),
+          { method: "POST" },
+        );
+        setTimeout(() => { void renderRadio(true); }, 1200);
+      } else if (action === "samoradio-cmd") {
+        await api("/api/v1/samo-radio/devices/" + encodeURIComponent(el.dataset.id) + "/" + el.dataset.cmd, { method: "POST" });
+        await renderRadio(true);
+      } else if (action === "samoradio-send") {
+        const ids = (el.dataset.ids || "").split(",").filter(Boolean);
+        const label = el.textContent;
+        await sendToSamoRadio(el.dataset.id, el.dataset.type, ids, {});
+        // The view does not re-render on send, so the button itself is the
+        // only place feedback can land.
+        el.textContent = "SENT →";
+        setTimeout(() => { el.textContent = label; }, 1600);
       } else if (action === "radio-mode") {
-        radioMode = el.dataset.mode === "internet" ? "internet" : "channels";
+        const mode = el.dataset.mode;
+        radioMode = (mode === "internet" || mode === "samo-radio") ? mode : "channels";
         activeChannelID = "";
         await viewRadio();
+      } else if (action === "channel-skip") {
+        // "skip the track" vs "skip this show for a while" — not liking one
+        // episode and not being in the mood for the podcast are different
+        // things, and only the second should change what comes next.
+        const scope = el.dataset.scope === "kind" ? "kind" : "item";
+        const result = await api(
+          "/api/v1/channels/" + encodeURIComponent(el.dataset.id) + "/skip?scope=" + scope,
+          { method: "POST" },
+        );
+        if (result && result.skipped === false) {
+          alert("Nothing is playing on this channel right now — it starts when something tunes in.");
+          return;
+        }
+        // The streamer needs a moment to pick and start the next item.
+        setTimeout(() => { void renderRadio(true); }, 1200);
+      } else if (action === "channel-use-browser-zone") {
+        await api("/api/v1/channels/" + encodeURIComponent(el.dataset.id), {
+          method: "PATCH",
+          body: { timezone: el.dataset.zone },
+        });
+        await viewRadio();
+      } else if (action === "plan-block-new") {
+        planEditIndex.block = -1;
+        fillBlockForm(null);
+        toggleComposer("plan-block");
+      } else if (action === "plan-block-edit") {
+        planEditIndex.block = Number(el.dataset.index);
+        fillBlockForm(planBlocks()[planEditIndex.block]);
+        const panel = document.getElementById("composer-plan-block");
+        if (panel && panel.hidden) toggleComposer("plan-block");
+      } else if (action === "plan-block-save") {
+        const block = readBlockForm();
+        if (!block) return;
+        const blocks = planBlocks();
+        // There can be only one default block: it is the thing every other
+        // block ultimately falls back to, so two of them is not a preference,
+        // it is an ambiguity the station cannot resolve at 3am.
+        if (block.default) blocks.forEach((other) => { delete other.default; });
+        if (planEditIndex.block >= 0) blocks[planEditIndex.block] = block;
+        else blocks.push(block);
+        activePlan.blocks = blocks;
+        await savePlan();
+      } else if (action === "plan-block-delete") {
+        const blocks = planBlocks();
+        const block = blocks[Number(el.dataset.index)];
+        if (!block) return;
+        if (!confirm("Remove the block " + (block.label || block.id) + "?")) return;
+        blocks.splice(Number(el.dataset.index), 1);
+        activePlan.blocks = blocks;
+        await savePlan();
+      } else if (action === "plan-block-move") {
+        const blocks = planBlocks();
+        const index = Number(el.dataset.index);
+        const target = el.dataset.dir === "up" ? index - 1 : index + 1;
+        if (target < 0 || target >= blocks.length) return;
+        const moved = blocks[index];
+        blocks[index] = blocks[target];
+        blocks[target] = moved;
+        activePlan.blocks = blocks;
+        await savePlan();
+      } else if (action === "plan-pool-new" || action === "plan-pool-edit") {
+        planEditIndex.pool = action === "plan-pool-edit" ? Number(el.dataset.index) : -1;
+        const pool = planEditIndex.pool >= 0 ? planPools()[planEditIndex.pool] : null;
+        setPlanField("planPoolID", pool ? pool.id : "");
+        setPlanField("planPoolLabel", pool ? pool.label : "");
+        const members = {};
+        ((pool && pool.sourceIds) || []).forEach((id) => { members[id] = true; });
+        activePlanSources.forEach((src, index) => {
+          setPlanChecked("planPoolSource" + index, Boolean(members[src.id]));
+        });
+        const panel = document.getElementById("composer-plan-pool");
+        if (panel && panel.hidden) toggleComposer("plan-pool");
+      } else if (action === "plan-pool-save") {
+        const id = planField("planPoolID");
+        if (!id) { alert("A pool needs an id."); return; }
+        const sourceIds = [];
+        activePlanSources.forEach((src, index) => {
+          if (planChecked("planPoolSource" + index)) sourceIds.push(src.id);
+        });
+        const pool = { id: id, label: planField("planPoolLabel"), sourceIds: sourceIds };
+        const pools = planPools();
+        if (planEditIndex.pool >= 0) pools[planEditIndex.pool] = pool;
+        else pools.push(pool);
+        activePlan.pools = pools;
+        await savePlan();
+      } else if (action === "plan-pool-delete") {
+        const pools = planPools();
+        const pool = pools[Number(el.dataset.index)];
+        if (!pool) return;
+        if (!confirm("Remove the pool " + (pool.label || pool.id) + "? Any block using it will need editing too.")) return;
+        pools.splice(Number(el.dataset.index), 1);
+        activePlan.pools = pools;
+        await savePlan();
+      } else if (action === "plan-category-new" || action === "plan-category-edit") {
+        planEditIndex.category = action === "plan-category-edit" ? Number(el.dataset.index) : -1;
+        const category = planEditIndex.category >= 0 ? planCategories()[planEditIndex.category] : null;
+        setPlanField("planCategoryID", category ? category.id : "");
+        setPlanField("planCategoryLabel", category ? category.label : "");
+        setPlanField("planCategoryTarget", category ? Math.round((Number(category.target) || 0) * 100) : "");
+        const panel = document.getElementById("composer-plan-category");
+        if (panel && panel.hidden) toggleComposer("plan-category");
+      } else if (action === "plan-category-save") {
+        const id = planField("planCategoryID");
+        if (!id) { alert("A category needs an id."); return; }
+        const target = planNumber("planCategoryTarget");
+        const category = { id: id, label: planField("planCategoryLabel"), target: (target || 0) / 100 };
+        const categories = planCategories();
+        if (planEditIndex.category >= 0) categories[planEditIndex.category] = category;
+        else categories.push(category);
+        activePlan.categories = categories;
+        await savePlan();
+      } else if (action === "plan-category-delete") {
+        const categories = planCategories();
+        const category = categories[Number(el.dataset.index)];
+        if (!category) return;
+        if (!confirm("Remove the category " + (category.label || category.id) + "?")) return;
+        categories.splice(Number(el.dataset.index), 1);
+        activePlan.categories = categories;
+        await savePlan();
+      } else if (action === "plan-behaviour-edit") {
+        // Four short answers rather than another form: these are numbers you
+        // set once and rarely revisit.
+        const separation = activePlan.separation || {};
+        const ask = (label, current) => {
+          const next = prompt(label, current || "");
+          return next === null ? null : next.trim();
+        };
+        const item = ask("Minimum gap before the SAME ITEM may air again (e.g. 8h):", separation.item || "8h");
+        if (item === null) return;
+        const source = ask("Minimum gap before the same SOURCE may air again.\n" +
+          "Only applies to sources that are one show — a playlist is a container of many artists, so this would make two songs in a row impossible.",
+          separation.source || "45m");
+        if (source === null) return;
+        const creator = ask("Minimum gap before the same PERSON may air again.\n" +
+          "A host, or a recording artist — two shows with the same host back to back is not variety.",
+          separation.creator || "90m");
+        if (creator === null) return;
+        const epsilon = prompt("How much surprise? The top N% of scores compete for the pick.\n" +
+          "0 always takes the best-scoring candidate, which sounds like a machine.",
+          String(Math.round(((activePlan.selection || {}).epsilon != null ? activePlan.selection.epsilon : 0.15) * 100)));
+        if (epsilon === null) return;
+        activePlan.separation = Object.assign({}, separation, { item, source, creator });
+        activePlan.selection = Object.assign({}, activePlan.selection || {}, {
+          epsilon: Math.max(0, Math.min(99, Number(epsilon) || 0)) / 100,
+        });
+        await savePlan();
+      } else if (action === "plan-source-edit") {
+        const src = activePlanSources.find((entry) => entry.id === el.dataset.id);
+        if (!src) return;
+        planEditSourceID = src.id;
+        const cfg = src.config || {};
+        setPlanField("planSourceLabel", src.label || "");
+        setPlanField("planSourceCategory", cfg.category || "");
+        setPlanField("planSourceTier", (cfg.tier || "C").toUpperCase());
+        setPlanField("planSourceCreator", cfg.creator || "");
+        setPlanField("planSourceFamily", cfg.family || "");
+        setPlanField("planSourceFresh", cfg.newWithinHours || "");
+        setPlanField("planSourceWeight", src.weight || 1);
+        const panel = document.getElementById("composer-plan-source");
+        if (panel && panel.hidden) toggleComposer("plan-source");
+      } else if (action === "plan-source-save") {
+        const src = activePlanSources.find((entry) => entry.id === planEditSourceID);
+        if (!src) return;
+        // Merged, not replaced: the kind-specific bits (podcastId, paths,
+        // playlistId) live in the same object and are not on this form.
+        const config = Object.assign({}, src.config || {});
+        const set = (key, value) => {
+          if (value === "" || value == null) delete config[key];
+          else config[key] = value;
+        };
+        set("category", planField("planSourceCategory"));
+        set("tier", planField("planSourceTier"));
+        set("creator", planField("planSourceCreator"));
+        set("family", planField("planSourceFamily"));
+        const fresh = planNumber("planSourceFresh");
+        set("newWithinHours", fresh && fresh > 0 ? fresh : "");
+        const weight = planNumber("planSourceWeight");
+        await api("/api/v1/channels/" + encodeURIComponent(activeChannelID) +
+          "/sources/" + encodeURIComponent(src.id), {
+          method: "PATCH",
+          body: {
+            label: planField("planSourceLabel"),
+            config: config,
+            weight: weight && weight > 0 ? weight : 1,
+          },
+        });
+        await viewRadio();
+      } else if (action === "plan-pools-repair") {
+        // Turn the frozen id lists into live rules. A rotation pool that is a
+        // snapshot of the library loses everything added after it was saved,
+        // which is not a mistake anybody can be expected to notice.
+        const categories = planCategories();
+        if (categories.length === 0) { alert("Add a category first."); return; }
+        const pools = planPools();
+        let repaired = 0;
+        categories.forEach((category) => {
+          const existing = pools.find((pool) => pool.id === category.id);
+          if (existing) {
+            delete existing.sourceIds;
+            existing.match = { category: category.id };
+            repaired++;
+            return;
+          }
+          pools.push({ id: category.id, label: category.label || category.id, match: { category: category.id } });
+          repaired++;
+        });
+        activePlan.pools = pools;
+        // Any block that played a category pool keeps playing it; a block that
+        // referenced nothing gets the rotation pools so it is not left empty.
+        (activePlan.blocks || []).forEach((block) => {
+          if (!block.pools || block.pools.length === 0) {
+            block.pools = categories.map((category) => ({ pool: category.id, weight: 1 }));
+          }
+        });
+        if (!confirm("Make " + repaired + " pool(s) match by category, so anything you add later joins automatically?")) return;
+        await savePlan();
+      } else if (action === "plan-json-toggle") {
+        toggleComposer("plan-json");
+      } else if (action === "plan-json-save") {
+        const raw = document.getElementById("planJSON");
+        if (!raw) return;
+        let parsed;
+        try {
+          parsed = JSON.parse(raw.value);
+        } catch (err) {
+          alert("That is not valid JSON:\n\n" + (err.message || ""));
+          return;
+        }
+        activePlan = parsed;
+        await savePlan();
+      } else if (action === "plan-reset") {
+        if (!confirm("Throw away this channel's saved plan and go back to the one its sources and booked slots describe?")) return;
+        await api("/api/v1/channels/" + encodeURIComponent(el.dataset.id) + "/plan", { method: "DELETE" });
+        await viewRadio();
+      } else if (action === "plan-why-refresh") {
+        await viewRadio();
+      } else if (action === "plan-why-more") {
+        whyLimit = whyLimit >= 10 ? 1 : 10;
+        await viewRadio();
+      } else if (action === "channel-talk-share") {
+        const current = Math.round((Number(el.dataset.share) || 0.75) * 100);
+        const next = prompt(
+          "What percentage of this channel should be spoken word?\n" +
+            "The rest is music. 75 is a talk station with music threaded through it.",
+          String(current),
+        );
+        if (next === null) return;
+        const share = Number(next) / 100;
+        if (!(share > 0 && share < 1)) {
+          alert("Enter a number between 1 and 99.");
+          return;
+        }
+        await api("/api/v1/channels/" + encodeURIComponent(el.dataset.id), {
+          method: "PATCH",
+          body: { talkShare: share },
+        });
+        await viewRadio();
+      } else if (action === "channel-listening-day") {
+        // The hours somebody is actually around. Everything the station
+        // believes about "new" hangs off this: podcasts publish overnight, and
+        // an episode aired to a dark room has not reached anyone, so airings
+        // outside these hours do not spend it.
+        const parse = (value) => {
+          const match = /^\s*(\d{1,2}):?(\d{2})?\s*$/.exec(value || "");
+          if (!match) return null;
+          const hours = Number(match[1]);
+          const minutes = Number(match[2] || 0);
+          if (hours > 23 || minutes > 59) return null;
+          return hours * 60 + minutes;
+        };
+        const start = parse(prompt(
+          "When does your listening day start? (HH:MM)\n" +
+            "New episodes are held until then rather than aired to an empty room.",
+          minuteToHHMM(Number(el.dataset.start) || 480),
+        ));
+        if (start === null) return;
+        const end = parse(prompt(
+          "And when does it end? (HH:MM)",
+          minuteToHHMM(Number(el.dataset.end) || 1380),
+        ));
+        if (end === null) return;
+        await api("/api/v1/channels/" + encodeURIComponent(el.dataset.id), {
+          method: "PATCH",
+          body: { dayStartMinute: start, dayEndMinute: end },
+        });
+        await viewRadio();
+      } else if (action === "channel-timezone") {
+        // Schedule rules are a bare minute-of-day, so the zone is what gives
+        // "16:00" a meaning. Worth being able to see and change it.
+        let browserZone = "";
+        try { browserZone = Intl.DateTimeFormat().resolvedOptions().timeZone || ""; } catch { browserZone = ""; }
+        const current = el.dataset.tz || browserZone || "";
+        const next = prompt(
+          "Timezone for this channel's schedule (IANA name, e.g. America/Denver).\n" +
+            "Leave blank to use the server default (" + (el.dataset.effective || "UTC") + ").",
+          current,
+        );
+        if (next === null) return;
+        await api("/api/v1/channels/" + encodeURIComponent(el.dataset.id), {
+          method: "PATCH",
+          body: { timezone: next.trim() },
+        });
+        await viewRadio();
+      } else if (action === "channel-previous") {
+        const back = await api(
+          "/api/v1/channels/" + encodeURIComponent(el.dataset.id) + "/previous",
+          { method: "POST" },
+        );
+        if (back && back.moved === false) {
+          alert("Nothing to go back to yet on this channel.");
+          return;
+        }
+        setTimeout(() => { void renderRadio(true); }, 1200);
       } else if (action === "channel-open") {
         activeChannelID = el.dataset.id || "";
         await viewRadio();

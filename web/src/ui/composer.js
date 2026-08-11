@@ -221,6 +221,148 @@ export function composerChannel() {
     "// pick a codec your clients support — MP3 is the safest default for browsers and most apps");
 }
 
+
+// contentPickerHTML is the one control that replaced four separate "add a
+// source" forms.
+//
+// Every kind of content a channel can hold is one dropdown and one field, so
+// adding a podcast and adding a folder are the same gesture. The per-kind
+// fields all render and all but the selected one start hidden; the change
+// handler in app.js swaps them. That keeps the markup static and the
+// interaction one line, rather than re-rendering a form on every selection.
+// availableContentKinds is the single answer to "what can this channel be
+// given", so the picker and the role default cannot disagree about which kind
+// is selected when the form opens.
+export function availableContentKinds(options) {
+  options = options || {};
+  return [
+    ["podcast-subscription", "PODCAST", (options.podcasts || []).length > 0],
+    ["internet-station", "INTERNET STATION", (options.stations || []).length > 0],
+    ["music-playlist", "MUSIC PLAYLIST", (options.playlists || []).length > 0],
+    ["file-pool", "FILES / FOLDER", true],
+    ["live-stream", "LIVE URL", true],
+  ].filter(([, , available]) => available);
+}
+
+export function defaultContentKind(options) {
+  const kinds = availableContentKinds(options);
+  return kinds.length > 0 ? kinds[0][0] : "file-pool";
+}
+
+// roleForKind is the role a piece of content almost always wants.
+//
+// A podcast added as filler is not a cosmetic mistake: only podcast-role
+// sources supply fresh episodes, so it would quietly never air anything new.
+export function roleForKind(kind) {
+  return kind === "music-playlist" ? "music" : "talk";
+}
+
+export function contentPickerHTML(prefix, options) {
+  options = options || {};
+  const podcasts = options.podcasts || [];
+  const stations = options.stations || [];
+  const playlists = options.playlists || [];
+
+  const kinds = availableContentKinds(options);
+  const first = defaultContentKind(options);
+  const kindOptions = kinds
+    .map(([value, label]) => '<option value="' + attr(value) + '">' + escapeHTML(label) + '</option>')
+    .join("");
+
+  const group = (kind, inner) =>
+    '<div class="composer-row" id="' + attr(prefix) + 'Fields-' + attr(kind) + '"' +
+      (kind === first ? "" : " hidden") + '>' + inner + '</div>';
+
+  const selectField = (id, label, items, render) =>
+    '<label class="field full"><span class="field-label">' + escapeHTML(label) + '</span>' +
+      '<select id="' + attr(id) + '">' +
+        items.map(render).join("") +
+      '</select></label>';
+
+  let html =
+    '<div class="composer-row">' +
+      '<label class="field"><span class="field-label">Content</span>' +
+        '<select id="' + attr(prefix) + 'Kind" data-action="composer-kind" data-prefix="' + attr(prefix) + '">' +
+          kindOptions +
+        '</select></label>' +
+      fieldHTML(prefix + "Label", "Label (optional)", "leave blank to use its own name", "text", "") +
+    '</div>';
+
+  if (podcasts.length > 0) {
+    html += group("podcast-subscription",
+      selectField(prefix + "Podcast", "Podcast", podcasts,
+        (p) => '<option value="' + attr(p.id) + '">' + escapeHTML(podcastTitle(p)) + '</option>'));
+  }
+  if (stations.length > 0) {
+    html += group("internet-station",
+      selectField(prefix + "Station", "Station", stations,
+        (st) => '<option value="' + attr(st.id) + '">' + escapeHTML(st.name) + '</option>'));
+  }
+  if (playlists.length > 0) {
+    html += group("music-playlist",
+      selectField(prefix + "Playlist", "Playlist", playlists,
+        (pl) => '<option value="' + attr(pl.id) + '">' + escapeHTML(pl.name) + '</option>'));
+  }
+  html += group("file-pool",
+    textAreaHTML(prefix + "Paths", "Files, folders or globs (one per line)",
+      "/mnt/data2tb/commercials\n/mnt/data2tb/oldies/*.mp3", "", "full"));
+  html += group("live-stream",
+    fieldHTML(prefix + "Url", "Stream URL", "https://example.com/live.mp3", "url", "", "full"));
+
+  return html;
+}
+
+// composerChannelShow books a programme: content AND its slot, in one go.
+//
+// It used to be two disjoint forms — create a source, then create a rule that
+// points at it — which meant holding an id in your head between them. A show
+// is one thing, so it is one form.
+export function composerChannelShow(channelID, options) {
+  const body =
+    contentPickerHTML("composerShow", options) +
+    '<div class="composer-row">' +
+      '<label class="field"><span class="field-label">Days</span><select id="composerShowDays">' +
+        weekdayOptionsHTML() +
+      '</select></label>' +
+      fieldHTML("composerShowStart", "Start (HH:MM)", "16:00", "text", "") +
+      fieldHTML("composerShowEnd", "End (HH:MM)", "17:00", "text", "") +
+    '</div>' +
+    '<div class="composer-actions">' +
+      '<button class="btn primary" data-action="composer-submit" data-composer="channel-show" data-channel-id="' + attr(channelID) + '">ADD SHOW</button>' +
+      '<button class="btn ghost" data-action="composer-toggle" data-composer="channel-show">CANCEL</button>' +
+    '</div>';
+  return composerHTML("channel-show", "BOOK A SHOW", body,
+    "// a show only airs in its slot. Crossing midnight is fine — 22:00 to 06:00 is booked as two windows for you.");
+}
+
+// composerChannelContent adds something to the mix: what it is, and its role.
+export function composerChannelContent(channelID, options) {
+  const body =
+    contentPickerHTML("composerContent", options) +
+    '<div class="composer-row">' +
+      roleSelectHTML("composerContentRole", "", defaultContentKind(options)) +
+    '</div>' +
+    '<div class="composer-actions">' +
+      '<button class="btn primary" data-action="composer-submit" data-composer="channel-content" data-channel-id="' + attr(channelID) + '">ADD TO MIX</button>' +
+      '<button class="btn ghost" data-action="composer-toggle" data-composer="channel-content">CANCEL</button>' +
+    '</div>';
+  return composerHTML("channel-content", "ADD TO THE MIX", body,
+    "// the channel plays new episodes first, then falls back to reruns and music. You pick what each thing is; it works out the order.");
+}
+
+export function weekdayOptionsHTML() {
+  return '<option value="127">EVERY DAY</option>' +
+    '<option value="62">WEEKDAYS (MON–FRI)</option>' +
+    '<option value="65">WEEKENDS (SAT+SUN)</option>' +
+    '<option value="2">MONDAY</option>' +
+    '<option value="4">TUESDAY</option>' +
+    '<option value="8">WEDNESDAY</option>' +
+    '<option value="16">THURSDAY</option>' +
+    '<option value="32">FRIDAY</option>' +
+    '<option value="64">SATURDAY</option>' +
+    '<option value="1">SUNDAY</option>';
+}
+
 export function composerChannelSchedule(channelID, sources) {
   const sourceOptions = sources.map((s) => '<option value="' + attr(s.id) + '">' + escapeHTML(s.label || s.kind) + ' · ' + escapeHTML(s.kind) + '</option>').join("");
   const body =
@@ -255,94 +397,28 @@ export function composerChannelSchedule(channelID, sources) {
     "// when the rule's window is active it preempts rotation. Higher priority wins when multiple rules overlap. Cross-midnight windows? Add two rules.");
 }
 
-export function composerChannelSourcePodcast(channelID, podcasts) {
-  if (!podcasts || podcasts.length === 0) {
-    const body =
-      '<div class="empty-state" style="margin: 0">// add a podcast feed under PODCASTS first, then come back here to subscribe a channel to it</div>' +
-      '<div class="composer-actions">' +
-        '<button class="btn ghost" data-action="composer-toggle" data-composer="channel-source-podcast">CLOSE</button>' +
-      '</div>';
-    return composerHTML("channel-source-podcast", "NEW PODCAST SUBSCRIPTION SOURCE", body, "");
-  }
-  const options = podcasts.map((p) => {
-    const title = podcastTitle(p);
-    return '<option value="' + attr(p.id) + '">' + escapeHTML(title) + '</option>';
-  }).join("");
-  const body =
-    '<div class="composer-row">' +
-      '<label class="field"><span class="field-label">Podcast</span><select id="composerSrcPodID">' + options + '</select></label>' +
-      fieldHTML("composerSrcPodLabel", "Label (optional)", "leave blank to use show title", "text", "") +
-    '</div>' +
-    '<div class="composer-row">' +
-      fieldHTML("composerSrcPodMaxAge", "Max age (days)", "30", "number", "30") +
-      fieldHTML("composerSrcPodWeight", "Weight", "1", "number", "1") +
-    '</div>' +
-    '<div class="composer-actions">' +
-      '<button class="btn primary" data-action="composer-submit" data-composer="channel-source-podcast" data-channel-id="' + attr(channelID) + '">SUBSCRIBE</button>' +
-      '<button class="btn ghost" data-action="composer-toggle" data-composer="channel-source-podcast">CANCEL</button>' +
-    '</div>';
-  return composerHTML("channel-source-podcast", "NEW PODCAST SUBSCRIPTION SOURCE", body,
-    "// the channel will play the freshest unplayed episode of this show. Max-age skips episodes older than the cutoff.");
-}
 
-export function composerChannelSourceInternet(channelID, stations) {
-  if (!stations || stations.length === 0) {
-    const body =
-      '<div class="empty-state" style="margin: 0">// add an internet radio station under RADIO → INTERNET first, then come back here</div>' +
-      '<div class="composer-actions">' +
-        '<button class="btn ghost" data-action="composer-toggle" data-composer="channel-source-internet">CLOSE</button>' +
-      '</div>';
-    return composerHTML("channel-source-internet", "NEW INTERNET STATION SOURCE", body, "");
-  }
-  const options = stations.map((st) => (
-    '<option value="' + attr(st.id) + '">' + escapeHTML(st.name) + '</option>'
-  )).join("");
-  const body =
-    '<div class="composer-row">' +
-      '<label class="field"><span class="field-label">Station</span><select id="composerSrcInetID">' + options + '</select></label>' +
-      fieldHTML("composerSrcInetLabel", "Label (optional)", "leave blank to use station name", "text", "") +
-    '</div>' +
-    '<div class="composer-row">' +
-      '<label class="field checkbox"><input id="composerSrcInetRotation" type="checkbox"><span>Eligible for rotation when no schedule rule is active</span></label>' +
-    '</div>' +
-    '<div class="composer-actions">' +
-      '<button class="btn primary" data-action="composer-submit" data-composer="channel-source-internet" data-channel-id="' + attr(channelID) + '">ATTACH STATION</button>' +
-      '<button class="btn ghost" data-action="composer-toggle" data-composer="channel-source-internet">CANCEL</button>' +
-    '</div>';
-  return composerHTML("channel-source-internet", "NEW INTERNET STATION SOURCE", body,
-    "// reuses an existing internet radio station. When the channel cuts to this source, ffmpeg proxies the station's stream URL live.");
-}
-
-export function composerChannelSourceFile(channelID) {
-  const body =
-    '<div class="composer-row">' +
-      fieldHTML("composerSrcFileLabel", "Label", "Commercials", "text", "") +
-      fieldHTML("composerSrcFileWeight", "Weight", "1", "number", "1") +
-    '</div>' +
-    '<div class="composer-row">' +
-      textAreaHTML("composerSrcFilePaths", "Paths (one per line — files, folders, or globs)", "/data/media/commercials\n/data/media/oldies/*.mp3", "", "full") +
-    '</div>' +
-    '<div class="composer-actions">' +
-      '<button class="btn primary" data-action="composer-submit" data-composer="channel-source-file" data-channel-id="' + attr(channelID) + '">ADD FILE POOL</button>' +
-      '<button class="btn ghost" data-action="composer-toggle" data-composer="channel-source-file">CANCEL</button>' +
-    '</div>';
-  return composerHTML("channel-source-file", "NEW FILE POOL SOURCE", body,
-    "// folders are scanned one level deep; globs use shell-style patterns. Paths must be readable by samo-server.");
-}
-
-export function composerChannelSourceLive(channelID) {
-  const body =
-    '<div class="composer-row">' +
-      fieldHTML("composerSrcLiveLabel", "Label", "NPR Live", "text", "") +
-      fieldHTML("composerSrcLiveURL", "Stream URL", "https://example.com/live.mp3", "url", "") +
-    '</div>' +
-    '<div class="composer-row">' +
-      '<label class="field checkbox"><input id="composerSrcLiveRotation" type="checkbox"><span>Eligible for rotation when no schedule rule is active</span></label>' +
-    '</div>' +
-    '<div class="composer-actions">' +
-      '<button class="btn primary" data-action="composer-submit" data-composer="channel-source-live" data-channel-id="' + attr(channelID) + '">ATTACH LIVE STREAM</button>' +
-      '<button class="btn ghost" data-action="composer-toggle" data-composer="channel-source-live">CANCEL</button>' +
-    '</div>';
-  return composerHTML("channel-source-live", "NEW LIVE STREAM SOURCE", body,
-    "// schedule this source via a rule to cut in at specific times (e.g. NPR at 16:00–17:00). Leaving rotation off keeps it from playing outside its window.");
+// roleSelectHTML is the one control that replaced weights-as-priority.
+//
+// You say what a thing IS; the engine owns the running order. That ordering is
+// deliberately not exposed — letting it be tuned is how a music playlist ends
+// up outranking a scheduled news block.
+export function roleSelectHTML(id, selected, kind) {
+  const roles = [
+    ["talk", "TALK — podcasts and spoken word"],
+    ["music", "MUSIC — counts toward the music share"],
+    ["show", "SCHEDULED SHOW — only at its booked times"],
+    ["commercial", "COMMERCIAL — padding between items"],
+  ];
+  const fallback = selected || roleForKind(kind);
+  const options = roles.map(([value, label]) =>
+    '<option value="' + attr(value) + '"' + (value === fallback ? " selected" : "") + '>' +
+      escapeHTML(label) + '</option>').join("");
+  // data-role-auto marks a role the form chose rather than the user. The kind
+  // switcher keeps updating it while that is set, and stops the moment
+  // somebody picks a role themselves.
+  return '<label class="field"><span class="field-label">Role</span>' +
+    '<select id="' + attr(id) + '" data-action="composer-role" data-role-auto="1">' +
+      options +
+    '</select></label>';
 }

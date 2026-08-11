@@ -1,0 +1,682 @@
+{
+ "version": 1,
+ "categories": [
+  {
+   "id": "talk",
+   "label": "Talk",
+   "target": 1
+  },
+  {
+   "id": "music",
+   "label": "Music",
+   "target": 0
+  }
+ ],
+ "pools": [
+  {
+   "id": "show-csrc_fc258b1931cd43bcda3155cb",
+   "label": "Show",
+   "sourceIds": [
+    "csrc_fc258b1931cd43bcda3155cb"
+   ]
+  },
+  {
+   "id": "show-csrc_b3409c7a24c7ca809f57d4a8",
+   "label": "Radio New Vegas",
+   "sourceIds": [
+    "csrc_b3409c7a24c7ca809f57d4a8"
+   ]
+  },
+  {
+   "id": "show-csrc_aa4cc72d2505b3297a67c31a",
+   "label": "KRCC",
+   "sourceIds": [
+    "csrc_aa4cc72d2505b3297a67c31a"
+   ]
+  },
+  {
+   "id": "show-csrc_b54c45b7536e9bf78f165632",
+   "label": "VORW",
+   "sourceIds": [
+    "csrc_b54c45b7536e9bf78f165632"
+   ]
+  },
+  {
+   "id": "show-csrc_8eab261c56611feb3ce1e530",
+   "label": "VORW",
+   "sourceIds": [
+    "csrc_8eab261c56611feb3ce1e530"
+   ]
+  },
+  {
+   "id": "show-csrc_83cdc87b89a9e1ec8b729fc9",
+   "label": "KRDO",
+   "sourceIds": [
+    "csrc_83cdc87b89a9e1ec8b729fc9"
+   ]
+  },
+  {
+   "id": "show-csrc_ff6573ce09fc3554e66090c1",
+   "label": "Coast To Coast",
+   "sourceIds": [
+    "csrc_ff6573ce09fc3554e66090c1"
+   ]
+  },
+  {
+   "id": "show-csrc_d8a632afb8b540ad8ee98626",
+   "label": "Coast to Coast",
+   "sourceIds": [
+    "csrc_d8a632afb8b540ad8ee98626"
+   ]
+  },
+  {
+   "id": "show-csrc_55523bc6dd3878097facff9a",
+   "label": "NPR Sunday Evening",
+   "sourceIds": [
+    "csrc_55523bc6dd3878097facff9a"
+   ]
+  },
+  {
+   "id": "show-csrc_cbf001253e52ad2a57f4cd83",
+   "label": "Wait Wait Don't Tell Me",
+   "sourceIds": [
+    "csrc_cbf001253e52ad2a57f4cd83"
+   ]
+  },
+  {
+   "id": "show-csrc_1d1fd88baa89e445b6eedf0a",
+   "label": "MarketPlace / Colorado Matters",
+   "sourceIds": [
+    "csrc_1d1fd88baa89e445b6eedf0a"
+   ]
+  },
+  {
+   "id": "show-csrc_0d62aa6ff3c9144c60f482c7",
+   "label": "TED Radio Hour / Freakonomics",
+   "sourceIds": [
+    "csrc_0d62aa6ff3c9144c60f482c7"
+   ]
+  },
+  {
+   "id": "show-csrc_d10e693bdad0e2c70d423ba7",
+   "label": "TED/Freakonomics",
+   "sourceIds": [
+    "csrc_d10e693bdad0e2c70d423ba7"
+   ]
+  },
+  {
+   "id": "show-csrc_aa1f65d6eace1c08c9315cf5",
+   "label": "KRCC",
+   "sourceIds": [
+    "csrc_aa1f65d6eace1c08c9315cf5"
+   ]
+  },
+  {
+   "id": "show-csrc_90e664bfc379266b25285957",
+   "label": "Colorado Matters",
+   "sourceIds": [
+    "csrc_90e664bfc379266b25285957"
+   ]
+  },
+  {
+   "id": "show-csrc_52e372b110346c7b5e570695",
+   "label": "TED Radio Hour Friday",
+   "sourceIds": [
+    "csrc_52e372b110346c7b5e570695"
+   ]
+  },
+  {
+   "id": "show-csrc_27c5c2bfd255ae02e2e751a1",
+   "label": "Code Switch/Life Kit",
+   "sourceIds": [
+    "csrc_27c5c2bfd255ae02e2e751a1"
+   ]
+  },
+  {
+   "id": "show-csrc_36f979337575bb4b612db8a3",
+   "label": "Planet Money / How I built This",
+   "sourceIds": [
+    "csrc_36f979337575bb4b612db8a3"
+   ]
+  },
+  {
+   "id": "show-csrc_6cfe166a96dca72cda435950",
+   "label": "Coast to Coast",
+   "sourceIds": [
+    "csrc_6cfe166a96dca72cda435950"
+   ]
+  },
+  {
+   "id": "show-csrc_996bdefabe52eb2edfa37a92",
+   "label": "Coast to Coast Sunday",
+   "sourceIds": [
+    "csrc_996bdefabe52eb2edfa37a92"
+   ]
+  },
+  {
+   "id": "show-csrc_267f14d04f87e28d9f434656",
+   "label": "Saturday Coast to Coast",
+   "sourceIds": [
+    "csrc_267f14d04f87e28d9f434656"
+   ]
+  },
+  {
+   "id": "show-csrc_705739b814d5b00b45882ebe",
+   "label": "Lofi Weekday",
+   "sourceIds": [
+    "csrc_705739b814d5b00b45882ebe"
+   ]
+  },
+  {
+   "id": "show-csrc_9d4e781ba46cba9eccd0d204",
+   "label": "Sleepy Sundays",
+   "sourceIds": [
+    "csrc_9d4e781ba46cba9eccd0d204"
+   ]
+  },
+  {
+   "id": "show-csrc_83247ccff5e8be03039a1bdb",
+   "label": "Lofi Saturday",
+   "sourceIds": [
+    "csrc_83247ccff5e8be03039a1bdb"
+   ]
+  },
+  {
+   "id": "show-csrc_f4b624875009717990bbf9fe",
+   "label": "Coast to Coast",
+   "sourceIds": [
+    "csrc_f4b624875009717990bbf9fe"
+   ]
+  },
+  {
+   "id": "show-csrc_9a6bf327709ed56ec57729c3",
+   "label": "NPR Sundays",
+   "sourceIds": [
+    "csrc_9a6bf327709ed56ec57729c3"
+   ]
+  },
+  {
+   "id": "show-csrc_60f78a19c88be5afbe2babad",
+   "label": "WWCR",
+   "sourceIds": [
+    "csrc_60f78a19c88be5afbe2babad"
+   ]
+  },
+  {
+   "id": "podcasts",
+   "label": "PODCASTS",
+   "match": {
+    "kind": "podcast-subscription"
+   }
+  },
+  {
+   "id": "music",
+   "label": "MUSIC",
+   "match": {
+    "kind": "music-playlist"
+   }
+  }
+ ],
+ "blocks": [
+  {
+   "id": "general",
+   "label": "General rotation",
+   "default": true,
+   "enter": {},
+   "exit": {},
+   "pools": [
+    {
+     "pool": "podcasts",
+     "weight": 1
+    }
+   ],
+   "breaks": {
+    "between": [
+     "talk"
+    ],
+    "target": {
+     "duration": "25m",
+     "items": 7
+    },
+    "accept": {
+     "duration": [
+      "18m",
+      "32m"
+     ],
+     "items": [
+      5,
+      9
+     ]
+    },
+    "elements": [
+     {
+      "pool": "music",
+      "count": [
+       5,
+       9
+      ],
+      "fill": true
+     }
+    ]
+   },
+   "limits": {}
+  },
+  {
+   "id": "fresh",
+   "label": "New episodes",
+   "enter": {
+    "at": "08:00",
+    "days": "*",
+    "when": "obligations.pending > 0"
+   },
+   "exit": {
+    "when": "obligations.pending == 0"
+   },
+   "next": "general",
+   "pools": [
+    {
+     "pool": "podcasts",
+     "weight": 1
+    }
+   ],
+   "pattern": [
+    {
+     "want": "break"
+    },
+    {
+     "want": "obligation"
+    }
+   ],
+   "breaks": {
+    "between": [
+     "talk"
+    ],
+    "target": {
+     "duration": "6m",
+     "items": 2
+    },
+    "accept": {
+     "duration": [
+      "3m",
+      "9m"
+     ],
+     "items": [
+      1,
+      2
+     ]
+    },
+    "elements": [
+     {
+      "pool": "music",
+      "count": [
+       1,
+       2
+      ],
+      "fill": true
+     }
+    ]
+   },
+   "limits": {}
+  },
+  {
+   "id": "music-hour",
+   "label": "Music hour",
+   "enter": {
+    "at": "14:00",
+    "days": "*",
+    "hard": true
+   },
+   "exit": {
+    "at": "15:00"
+   },
+   "next": "fresh",
+   "pools": [
+    {
+     "pool": "music",
+     "weight": 1
+    }
+   ],
+   "limits": {}
+  },
+  {
+   "id": "slot-csched_1debe7e0c9e9493613b08911",
+   "label": "Lofi Weekday",
+   "enter": {
+    "at": "00:00",
+    "days": "mon,tue,wed,thu,fri",
+    "hard": true,
+    "start": "startImmediately"
+   },
+   "exit": {
+    "at": "08:00"
+   },
+   "pools": [
+    {
+     "pool": "show-csrc_705739b814d5b00b45882ebe",
+     "weight": 1
+    }
+   ],
+   "limits": {}
+  },
+  {
+   "id": "slot-csched_68448dc62c7828b8a2fd621d",
+   "label": "Sleepy Sundays",
+   "enter": {
+    "at": "00:00",
+    "days": "sun",
+    "hard": true,
+    "start": "startImmediately"
+   },
+   "exit": {
+    "at": "08:00"
+   },
+   "pools": [
+    {
+     "pool": "show-csrc_9d4e781ba46cba9eccd0d204",
+     "weight": 1
+    }
+   ],
+   "limits": {}
+  },
+  {
+   "id": "slot-csched_70f0e64ec9ebb0695574af4d",
+   "label": "VORW",
+   "enter": {
+    "at": "00:00",
+    "days": "sat",
+    "hard": true,
+    "start": "startImmediately"
+   },
+   "exit": {
+    "at": "01:00"
+   },
+   "pools": [
+    {
+     "pool": "show-csrc_8eab261c56611feb3ce1e530",
+     "weight": 1
+    }
+   ],
+   "limits": {}
+  },
+  {
+   "id": "slot-csched_11303ca7a89dee5ac7be3d17",
+   "label": "Lofi Saturday",
+   "enter": {
+    "at": "01:00",
+    "days": "sat",
+    "hard": true,
+    "start": "startImmediately"
+   },
+   "exit": {
+    "at": "08:00"
+   },
+   "pools": [
+    {
+     "pool": "show-csrc_83247ccff5e8be03039a1bdb",
+     "weight": 1
+    }
+   ],
+   "limits": {}
+  },
+  {
+   "id": "slot-csched_41f32f169d0b8697d6f26cb4",
+   "label": "KRCC",
+   "enter": {
+    "at": "08:00",
+    "days": "*",
+    "hard": true,
+    "start": "startImmediately"
+   },
+   "exit": {
+    "at": "09:00"
+   },
+   "pools": [
+    {
+     "pool": "show-csrc_aa4cc72d2505b3297a67c31a",
+     "weight": 1
+    }
+   ],
+   "limits": {}
+  },
+  {
+   "id": "slot-csched_2bb618edf462871b602d35f7",
+   "label": "Wait Wait Don't Tell Me",
+   "enter": {
+    "at": "12:00",
+    "days": "sun",
+    "hard": true,
+    "start": "startImmediately"
+   },
+   "exit": {
+    "at": "13:00"
+   },
+   "pools": [
+    {
+     "pool": "show-csrc_cbf001253e52ad2a57f4cd83",
+     "weight": 1
+    }
+   ],
+   "limits": {}
+  },
+  {
+   "id": "slot-csched_284a41a581ede1252df1f323",
+   "label": "All things Considered",
+   "enter": {
+    "at": "16:00",
+    "days": "mon,tue,wed,thu,fri",
+    "hard": true,
+    "start": "startImmediately"
+   },
+   "exit": {
+    "at": "17:00"
+   },
+   "pools": [
+    {
+     "pool": "show-csrc_fc258b1931cd43bcda3155cb",
+     "weight": 1
+    }
+   ],
+   "limits": {}
+  },
+  {
+   "id": "slot-csched_54385e9f99b6092591d4f420",
+   "label": "KRCC",
+   "enter": {
+    "at": "18:30",
+    "days": "mon,tue,wed,thu,fri",
+    "hard": true,
+    "start": "startImmediately"
+   },
+   "exit": {
+    "at": "20:00"
+   },
+   "pools": [
+    {
+     "pool": "show-csrc_aa1f65d6eace1c08c9315cf5",
+     "weight": 1
+    }
+   ],
+   "limits": {}
+  },
+  {
+   "id": "slot-csched_323972472fac00512835f8c1",
+   "label": "NPR Sundays",
+   "enter": {
+    "at": "20:00",
+    "days": "sun",
+    "hard": true,
+    "start": "startImmediately"
+   },
+   "exit": {
+    "at": "22:00"
+   },
+   "pools": [
+    {
+     "pool": "show-csrc_9a6bf327709ed56ec57729c3",
+     "weight": 1
+    }
+   ],
+   "limits": {}
+  },
+  {
+   "id": "slot-csched_9e46fcb0bc105411f2781f7b",
+   "label": "Colorado Matters",
+   "enter": {
+    "at": "20:00",
+    "days": "thu",
+    "hard": true,
+    "start": "startImmediately"
+   },
+   "exit": {
+    "at": "21:00"
+   },
+   "pools": [
+    {
+     "pool": "show-csrc_90e664bfc379266b25285957",
+     "weight": 1
+    }
+   ],
+   "limits": {}
+  },
+  {
+   "id": "slot-csched_301239967d1e30f0556d5d8a",
+   "label": "TED/Freakonomics",
+   "enter": {
+    "at": "21:00",
+    "days": "sat",
+    "hard": true,
+    "start": "startImmediately"
+   },
+   "exit": {
+    "at": "23:00"
+   },
+   "pools": [
+    {
+     "pool": "show-csrc_d10e693bdad0e2c70d423ba7",
+     "weight": 1
+    }
+   ],
+   "limits": {}
+  },
+  {
+   "id": "slot-csched_44418f239c9ccc67103decc4",
+   "label": "Code Switch/Life Kit",
+   "enter": {
+    "at": "22:00",
+    "days": "tue",
+    "hard": true,
+    "start": "startImmediately"
+   },
+   "exit": {
+    "at": "23:00"
+   },
+   "pools": [
+    {
+     "pool": "show-csrc_27c5c2bfd255ae02e2e751a1",
+     "weight": 1
+    }
+   ],
+   "limits": {}
+  },
+  {
+   "id": "slot-csched_9cb513af81e121efa5904d58",
+   "label": "Coast to Coast",
+   "enter": {
+    "at": "22:00",
+    "days": "mon",
+    "hard": true,
+    "start": "startImmediately"
+   },
+   "exit": {
+    "at": "23:00"
+   },
+   "pools": [
+    {
+     "pool": "show-csrc_f4b624875009717990bbf9fe",
+     "weight": 1
+    }
+   ],
+   "limits": {}
+  },
+  {
+   "id": "slot-csched_cf5f66d57c5ba3d1f560c218",
+   "label": "TED Radio Hour Friday",
+   "enter": {
+    "at": "22:00",
+    "days": "fri",
+    "hard": true,
+    "start": "startImmediately"
+   },
+   "exit": {
+    "at": "23:00"
+   },
+   "pools": [
+    {
+     "pool": "show-csrc_52e372b110346c7b5e570695",
+     "weight": 1
+    }
+   ],
+   "limits": {}
+  },
+  {
+   "id": "slot-csched_f234d4a0baf4194c34b10dcf",
+   "label": "WWCR",
+   "enter": {
+    "at": "22:00",
+    "days": "sun",
+    "hard": true,
+    "start": "startImmediately"
+   },
+   "exit": {
+    "at": "23:00"
+   },
+   "pools": [
+    {
+     "pool": "show-csrc_60f78a19c88be5afbe2babad",
+     "weight": 1
+    }
+   ],
+   "limits": {}
+  },
+  {
+   "id": "slot-csched_f626e411c6f2394b91dfef94",
+   "label": "Planet Money / How I built This",
+   "enter": {
+    "at": "22:00",
+    "days": "wed",
+    "hard": true,
+    "start": "startImmediately"
+   },
+   "exit": {
+    "at": "23:00"
+   },
+   "pools": [
+    {
+     "pool": "show-csrc_36f979337575bb4b612db8a3",
+     "weight": 1
+    }
+   ],
+   "limits": {}
+  }
+ ],
+ "longForm": {
+  "threshold": "2h",
+  "rest": "21d"
+ },
+ "separation": {},
+ "horizons": {
+  "recency": "14d"
+ },
+ "selection": {},
+ "freshness": {
+  "surfacings": {
+   "S": 2,
+   "A": 2
+  }
+ },
+ "listeningDay": {
+  "start": "08:00",
+  "end": "23:00"
+ },
+ "underrunPool": "music"
+}

@@ -92,3 +92,117 @@ export function channelNowPlayingBody(now) {
     '<div class="channel-now-stats">' + listenersChip + '</div>' +
   '</div>';
 }
+
+// channelScheduleStatusBody explains, in the panel itself, why the thing you
+// booked is or is not on air.
+//
+// "My slot did not fire" has several causes that look identical from the
+// listening end — the clock is in the wrong zone, nothing is booked today, a
+// slot matched but its source could not produce audio — and the only one that
+// used to be visible was none of them.
+// programmingBody shows the balance the rotation is actually working from.
+//
+// "Why is it playing this" has as many answers as the algorithm has rules, and
+// none of them were visible: the mix could be nine hours of talk against a 75%
+// target and the panel would say nothing at all. These are the exact numbers
+// the next decision is made from, so a station that sounds wrong can be argued
+// with instead of guessed at.
+function programmingBody(programming) {
+  if (!programming) return "";
+  const categories = programming.categories || [];
+  const off = categories.some((c) => Math.abs((c.actualPercent || 0) - (c.targetPercent || 0)) > 15);
+
+  const mix = categories.length === 0
+    ? "no categories configured"
+    : categories
+        .map((c) => escapeHTML(c.category) + " " + (c.actualPercent || 0) + "%/" + (c.targetPercent || 0) + "%")
+        .join(" · ");
+
+  const limits = (programming.limits || []).map((limit) =>
+    escapeHTML(limit.category) + " run " + limit.runMinutes + "m of " + limit.maxMinutes + "m" +
+    (limit.exceeded ? " — over, so something else goes next" : "")).join(" · ");
+
+  const room = programming.nextAnchor
+    ? "next booked: " + escapeHTML(programming.nextAnchor.label) + " at " +
+      escapeHTML(programming.nextAnchor.at) + " (in " + escapeHTML(programming.nextAnchor.in) + ") — " +
+      (programming.roomMinutes || 0) + "m of room"
+    : "nothing booked ahead";
+
+  return '<div class="sched-programming' + (off ? " bad" : "") + '">' +
+    '<div class="sched-status-detail">' +
+      "on now: " + escapeHTML(programming.blockLabel || programming.blockId || "—") +
+      (programming.entryReason ? " — " + escapeHTML(programming.entryReason) : "") +
+      (programming.exitReason ? " · ends " + escapeHTML(programming.exitReason) : "") +
+    '</div>' +
+    '<div class="sched-status-detail">' +
+      "mix over the last " + escapeHTML(String(programming.windowHours || 0)) + "h: " + mix +
+      " (actual/target)" +
+    '</div>' +
+    (limits ? '<div class="sched-status-detail">' + limits + '</div>' : "") +
+    '<div class="sched-status-detail">' + room + '</div>' +
+    '<div class="sched-status-detail">' +
+      "listening day " + escapeHTML(String(programming.listeningDay || "")) +
+      " — episodes aired outside it stay new · plan: " +
+      escapeHTML(String(programming.planSource || "derived")) +
+    '</div>' +
+  '</div>';
+}
+
+export function channelScheduleStatusBody(status, channelID) {
+  if (!status) return "";
+  const bad = Boolean(status.ruleError || status.playbackError);
+
+  // The browser is the only party that knows what clock the operator programs
+  // against. The server is UTC on purpose and the host is too, so neither can
+  // supply this — but a schedule read in UTC silently shifts every slot by the
+  // operator's offset, which looks exactly like the feature being broken.
+  const browserZone = (() => {
+    try {
+      return Intl.DateTimeFormat().resolvedOptions().timeZone || "";
+    } catch {
+      return "";
+    }
+  })();
+  const mismatched = status.usingFallbackZone && browserZone && browserZone !== status.timezone;
+  const clock = escapeHTML(status.localTime || "??:??") + " " +
+    escapeHTML(status.weekday || "") + " · " + escapeHTML(status.timezone || "UTC");
+
+  let detail = "";
+  if (status.activeRule) {
+    const window = minuteToHHMM(status.activeRule.startMinute) + "–" + minuteToHHMM(status.activeRule.endMinute);
+    detail = "slot " + escapeHTML(status.activeRule.label || "(unnamed)") + " " + escapeHTML(window);
+    if (status.activeSource) {
+      detail += " → " + escapeHTML(status.activeSource.label || status.activeSource.kind);
+    }
+  } else if (status.nextRule) {
+    detail = "next slot " + escapeHTML(status.nextRule.label || "(unnamed)") +
+      " at " + escapeHTML(status.nextRuleAt || "") +
+      (status.nextRuleIn ? " (in " + escapeHTML(status.nextRuleIn) + ")" : "");
+  } else {
+    detail = status.rulesToday + " of " + status.totalRules + " slots apply today";
+  }
+
+  const warning = mismatched
+    ? '<div class="sched-status-warn">' +
+        '// this schedule is being read in ' + escapeHTML(status.timezone) +
+        ', but you are in ' + escapeHTML(browserZone) + ' — every slot is off by the difference' +
+        ' <button class="btn primary btn-mini" data-action="channel-use-browser-zone"' +
+          ' data-id="' + attr(channelID) + '" data-zone="' + attr(browserZone) + '">' +
+          'USE ' + escapeHTML(browserZone.toUpperCase()) + '</button>' +
+      '</div>'
+    : "";
+
+  return '<div class="sched-status' + (bad || mismatched ? " bad" : "") + '">' +
+    warning +
+    '<div class="sched-status-clock">' + clock + '</div>' +
+    '<div class="sched-status-line">' + escapeHTML(status.onAir || "") + '</div>' +
+    '<div class="sched-status-detail">' + detail + '</div>' +
+    programmingBody(status.programming) +
+    (bad ? '<div class="sched-status-error">// ' + escapeHTML(status.ruleError) + '</div>' : "") +
+    (status.playbackError
+      ? '<div class="sched-status-error">// audio failed' +
+          (status.playbackErrorItem ? " on " + escapeHTML(status.playbackErrorItem) : "") +
+          ': ' + escapeHTML(status.playbackError) + '</div>'
+      : "") +
+  '</div>';
+}

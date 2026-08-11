@@ -1404,3 +1404,245 @@ main.app-main {
   .bar-util { width: 100%; }
   .bar-util-btn { flex: 1; }
 }
+
+/* ---------- samo-radio: the server's own audio output ---------- */
+
+.samoradio-card { gap: 16px; }
+.samoradio-spec {
+  font-family: var(--mono);
+  font-size: 0.95rem;
+  letter-spacing: 0.04em;
+  color: var(--muted);
+  word-break: break-all;
+}
+/* The status chip is the first thing read on this panel: is the aux port
+   alive, and is anything coming out of it. */
+.samoradio-chip {
+  display: inline-block;
+  padding: 4px 10px;
+  font-family: var(--mono);
+  font-size: 0.85rem;
+  letter-spacing: 0.16em;
+  color: var(--text);
+  border: 1px solid var(--line-strong);
+}
+.samoradio-chip.live { color: var(--bg); background: var(--accent); border-color: var(--accent); }
+.samoradio-chip.off { color: var(--muted); }
+.samoradio-chip.bad {
+  color: var(--danger);
+  border-color: color-mix(in srgb, var(--danger) 60%, transparent);
+}
+.samoradio-now { display: grid; gap: 6px; }
+.samoradio-now .name {
+  font-family: var(--mono);
+  font-size: 1.35rem;
+  font-weight: 700;
+  color: var(--text);
+}
+.samoradio-now .sub { font-size: 1.05rem; color: var(--text-dim); }
+.samoradio-now .sub.mono { font-family: var(--mono); font-size: 0.95rem; color: var(--muted); }
+.samoradio-bar {
+  height: 4px;
+  background: var(--surface-high);
+  overflow: hidden;
+}
+.samoradio-bar span { display: block; height: 100%; background: var(--accent); }
+.samoradio-transport { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+.samoradio-volume {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-left: auto;
+  font-family: var(--mono);
+  font-size: 0.85rem;
+  letter-spacing: 0.16em;
+  color: var(--muted);
+}
+.samoradio-volume input[type="range"] { width: 160px; accent-color: var(--accent); }
+.samoradio-volume-value { min-width: 3ch; text-align: right; color: var(--text-dim); }
+.samoradio-settings {
+  display: grid;
+  gap: 12px;
+  padding-top: 16px;
+  border-top: 1px solid var(--line);
+}
+.samoradio-settings .field { margin-bottom: 0; }
+.samoradio-actions { display: flex; flex-wrap: wrap; gap: 8px; }
+/* The "play to" strip rides along with a detail view, so it stays quiet until
+   it is looked at — it is an alternative to pressing play, not the main act. */
+.samoradio-send-bar {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
+  padding: 12px 0;
+}
+.samoradio-send-label {
+  font-family: var(--mono);
+  font-size: 0.9rem;
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+.composer-hint.bad { color: var(--danger); }
+@media (max-width: 640px) {
+  .samoradio-volume { margin-left: 0; width: 100%; }
+  .samoradio-volume input[type="range"] { flex: 1; width: auto; }
+}
+
+/* The schedule's own answer to "why is my show not playing". Reads before the
+   timeline because it is what somebody opens this panel to find out. */
+.sched-status {
+  display: grid;
+  gap: 4px;
+  padding: 14px 16px;
+  border: 1px solid var(--line);
+  background: var(--surface-2, var(--bg));
+}
+.sched-status.bad { border-color: color-mix(in srgb, var(--danger) 60%, transparent); }
+.sched-status-clock {
+  font-family: var(--mono);
+  font-size: 1.2rem;
+  color: var(--text);
+  letter-spacing: 0.04em;
+}
+.sched-status-line { font-family: var(--mono); font-size: 0.95rem; color: var(--text-dim); }
+.sched-status-detail { font-family: var(--mono); font-size: 0.9rem; color: var(--muted); }
+.sched-status-error { font-family: var(--mono); font-size: 0.9rem; color: var(--danger); }
+/* The balance readout, set off from the schedule lines above it: they answer
+   "is my show on", this answers "why does the mix sound like that". */
+.sched-programming {
+  margin-top: 8px;
+  padding-top: 8px;
+  border-top: 1px solid var(--line);
+}
+.sched-programming.bad .sched-status-detail { color: var(--danger); }
+.sched-status-warn {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  align-items: center;
+  font-family: var(--mono);
+  font-size: 0.95rem;
+  color: var(--danger);
+  padding-bottom: 8px;
+  margin-bottom: 4px;
+  border-bottom: 1px solid color-mix(in srgb, var(--danger) 35%, transparent);
+}
+
+/* ---- the station plan editor -------------------------------------------
+
+   The plan is the station-building surface, so its sections are visually
+   flatter than a panel: they are parts of one document, not separate cards.
+   Everything here is deliberately plain — functional controls beat a
+   drag-and-drop suite you cannot finish. */
+.plan-section {
+  margin-top: 18px;
+  padding-top: 14px;
+  border-top: 1px solid var(--line);
+}
+.plan-section:first-of-type { margin-top: 8px; }
+.plan-grid {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin: 10px 0;
+  padding: 10px;
+  border: 1px solid var(--line);
+  background: var(--bg-elevated);
+}
+.plan-grid-head {
+  font-family: var(--mono);
+  font-size: 0.8rem;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--muted);
+}
+.plan-grid-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  align-items: flex-end;
+}
+.plan-grid-row .field { flex: 1 1 90px; min-width: 90px; }
+.plan-grid-label {
+  font-family: var(--mono);
+  font-size: 0.9rem;
+  color: var(--text-dim);
+  min-width: 110px;
+  align-self: center;
+}
+.field-check { flex: 0 0 auto; }
+.field-check input { width: auto; }
+.composer-sub {
+  font-family: var(--mono);
+  font-size: 0.8rem;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--muted);
+  margin: 12px 0 4px;
+}
+
+/* ---- why did it play that ----------------------------------------------
+
+   Reads top to bottom the way the decision was actually made: what the station
+   thought it was doing, what was booked, what it considered, what it ruled out,
+   what won. */
+.why-decision {
+  padding: 12px 0;
+  border-top: 1px solid var(--line);
+}
+.why-decision:first-of-type { border-top: none; }
+.why-head {
+  display: flex;
+  gap: 12px;
+  align-items: baseline;
+  margin-bottom: 8px;
+}
+.why-time { font-family: var(--mono); font-size: 0.85rem; color: var(--muted); }
+.why-title { font-size: 1.05rem; color: var(--text); }
+.why-line {
+  font-family: var(--mono);
+  font-size: 0.88rem;
+  color: var(--muted);
+  padding: 1px 0;
+}
+.why-line.bad { color: var(--danger); }
+.why-key {
+  display: inline-block;
+  min-width: 96px;
+  color: var(--text-dim);
+  text-transform: uppercase;
+  font-size: 0.78rem;
+  letter-spacing: 0.06em;
+}
+.why-sub {
+  font-family: var(--mono);
+  font-size: 0.8rem;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--muted);
+  margin: 10px 0 4px;
+}
+.why-table { display: flex; flex-direction: column; }
+.why-row {
+  display: flex;
+  gap: 10px;
+  align-items: baseline;
+  font-family: var(--mono);
+  font-size: 0.85rem;
+  color: var(--muted);
+  padding: 2px 0;
+  overflow-x: auto;
+}
+.why-row.contender { color: var(--text); }
+.why-row.rejected { color: var(--text-dim); }
+.why-score { min-width: 52px; text-align: right; color: var(--text-dim); }
+.why-name { min-width: 220px; flex: 0 1 auto; }
+.why-terms { flex: 1 1 auto; font-size: 0.8rem; white-space: nowrap; }
+
+/* An obligation that has been settled stays visible but recedes: the useful
+   question is what is still owed, and the answer is more legible when the
+   things that are not owed stop competing for attention. */
+.list-row.done .name { color: var(--text-dim); }
+.list-row.done .num { color: var(--muted); }

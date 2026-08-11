@@ -3,6 +3,10 @@
 # The image rebuilds the UI in its own node stage; a host node_modules would
 # be both huge and wrong (native deps built for the host platform).
 web/node_modules
+# ~400MB of bundled linux ffmpeg/ffprobe for the bare-metal dist layout. The
+# image installs its own via apt, so this is build context Docker copies and
+# never opens.
+internal/toolchain/assets
 .cache
 data
 dist
