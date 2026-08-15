@@ -73,11 +73,18 @@ type scoreEnv struct {
 
 	lastByRef     map[string]time.Time
 	lastBySource  map[string]time.Time
+	lastByShow    map[string]time.Time
 	lastByCreator map[string]time.Time
 
 	separationItem    time.Duration
 	separationSource  time.Duration
 	separationCreator time.Duration
+	// separationByCreator is the per-creator window the rules settled on, for
+	// anyone who is too much of the library to be held to the general one.
+	separationByCreator map[string]time.Duration
+	// separationTurn is one pass of a shuffled source, which is what separates
+	// its items instead of the configured window.
+	separationTurn map[string]time.Duration
 
 	lastCategory CategoryID
 	minRuns      []resolvedMinRun
@@ -218,24 +225,43 @@ func (s scoreEnv) freshness(candidate Candidate) float64 {
 // obligation queue's own ordering, and adding a second opinion there would let
 // a slightly newer C-tier episode nudge ahead of an S-tier one.
 //
-// Decays over the horizon rather than cutting off, so there is no cliff where
-// an episode stops counting as recent overnight.
+// Decays for ever instead of stopping at the horizon, because a term that goes
+// flat has stopped answering the question.
+//
+// It used to return zero for anything past the horizon, which reads as a mild
+// simplification and behaves as "the station has no opinion about age". Two
+// weeks is nothing next to an archive that runs back years: past that line an
+// episode from last month and an episode from 2019 scored identically, the
+// weighted pick treated thirty of them as interchangeable, and which one you
+// got was decided by the random draw. That is precisely how a six-year-old
+// episode arrives in the middle of the afternoon.
+//
+// horizon/(horizon+age) keeps ordering all the way down without ever reaching
+// zero: full marks for something published moments ago, half at the horizon,
+// and always less for the older of any two episodes. The horizon stops being a
+// cut-off and becomes what it sounds like — the point where an episode has lost
+// half its claim to being recent.
+//
+// An episode with NO publication date is treated as ancient rather than
+// unscored. Nearly every one of them is a file rip of something old, and
+// "unknown" scoring the same as "brand new" is what let undated on-disk copies
+// sit level with this week's releases.
 func (s scoreEnv) recency(candidate Candidate) float64 {
-	if candidate.Owed || candidate.Published.IsZero() {
+	if candidate.Owed {
 		return 0
 	}
 	horizon := s.recencyHorizon
 	if horizon <= 0 {
 		return 0
 	}
+	if candidate.Published.IsZero() {
+		return 0
+	}
 	age := s.now.Sub(candidate.Published)
 	if age <= 0 {
 		return 1
 	}
-	if age >= horizon {
-		return 0
-	}
-	return 1 - float64(age)/float64(horizon)
+	return float64(horizon) / float64(horizon+age)
 }
 
 // restedness is how far past its separation floor the least-rested attribute of
@@ -246,11 +272,13 @@ func (s scoreEnv) recency(candidate Candidate) float64 {
 // aired in a month.
 func (s scoreEnv) restedness(candidate Candidate) float64 {
 	value := 1.0
-	consider := func(last time.Time, window time.Duration) {
-		if window <= 0 || last.IsZero() {
+	// restedAt is the gradient: nothing at all when it just aired, full marks
+	// once `full` has gone by.
+	restedAt := func(last time.Time, full time.Duration) {
+		if full <= 0 || last.IsZero() {
 			return
 		}
-		ratio := float64(s.now.Sub(last)) / float64(2*window)
+		ratio := float64(s.now.Sub(last)) / float64(full)
 		if ratio > 1 {
 			ratio = 1
 		}
@@ -261,14 +289,66 @@ func (s scoreEnv) restedness(candidate Candidate) float64 {
 			value = ratio
 		}
 	}
-	consider(s.lastByRef[candidate.Ref], s.separationItem)
+	// A configured window is a floor you are meant to clear comfortably, so
+	// "rested" means twice it.
+	consider := func(last time.Time, window time.Duration) {
+		restedAt(last, 2*window)
+	}
+	if turn, ok := s.separationTurn[candidate.SourceID]; ok && turn > 0 {
+		// Inside a queue there is no such thing as more rested than "has not
+		// come round yet", so the gradient saturates at the turn rather than
+		// twice it — the same reason a fitted creator window does.
+		restedAt(s.lastByRef[candidate.Ref], turn)
+	} else {
+		consider(s.lastByRef[candidate.Ref], s.separationItem)
+	}
 	if candidate.Traits.SharedCreator {
+		// The show, not the source row — otherwise the same programme arriving
+		// as two sources reads as fully rested the moment it airs from either
+		// one, and scores as though it had not been on for weeks.
 		consider(s.lastBySource[candidate.SourceID], s.separationSource)
+		if candidate.Show != "" {
+			consider(s.lastByShow[candidate.Show], s.separationSource)
+		}
 	}
 	if candidate.Creator != "" && candidate.Traits.HasCreator {
-		consider(s.lastByCreator[candidate.Creator], s.separationCreator)
+		if fitted, ok := s.separationByCreator[candidate.Creator]; ok {
+			// A fitted window is not a floor, it is the ceiling — the closest
+			// spacing this artist can get in a collection they are this much
+			// of. There is no "twice as rested" for them to reach, so asking
+			// for it scores a shortfall against a collection that is doing
+			// exactly what it was told to. That is how an artist you gave half
+			// the playlist to ends up rarer than one you gave a single track:
+			// the rule let him back after six minutes and the preference went
+			// on docking him for three hours.
+			restedAt(s.lastByCreator[candidate.Creator], fitted)
+		} else {
+			consider(s.lastByCreator[candidate.Creator], s.separationCreator)
+		}
 	}
 	return value
+}
+
+// adoptSeparation takes the windows the hard rules actually applied.
+//
+// The rules fit their separation to the library before using it: an artist who
+// is half the playlist cannot be kept ninety minutes from themselves, so they
+// are not asked to be. Scoring was reading the CONFIGURED windows instead, and
+// so re-imposed as a preference exactly what the rule had just decided was
+// unreasonable — creatorSeparation let Elvis back after six minutes while
+// restedness went on marking all hundred and thirty-seven of his tracks as
+// unrested for three hours. Below the contender band, a preference is a ban,
+// and that is the whole of "a third of my playlist is Elvis and I never hear
+// Elvis".
+//
+// One set of numbers, decided once, used by both halves. They were never two
+// questions.
+func (s *scoreEnv) adoptSeparation(env constraintEnv) {
+	s.separationItem = env.separationItem
+	s.separationSource = env.separationSource
+	s.separationCreator = env.separationCreator
+	s.separationByCreator = env.separationByCreator
+	s.separationTurn = env.separationTurn
 }
 
 // windowFit is how close this item is to the length the block ASKED for.

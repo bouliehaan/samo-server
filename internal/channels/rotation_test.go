@@ -110,11 +110,20 @@ func TestTraitsComeFromTheKindAndCanBeOverridden(t *testing.T) {
 		t.Fatalf("a podcast has dated episodes, a host, and one host for all of them: %+v", pod)
 	}
 	playlist := TraitsFor(Source{Kind: SourceMusicPlaylist, Role: RoleMusic})
-	if !playlist.HasCreator {
-		t.Fatalf("a playlist's tracks have artists")
+	if !playlist.Shuffled {
+		t.Fatalf("a playlist is a bag: every track once before any of them twice")
+	}
+	if playlist.HasCreator {
+		t.Fatalf("a playlist is not spaced by artist — the shelf's proportions are the instruction")
 	}
 	if playlist.SharedCreator {
 		t.Fatalf("a playlist is many artists behind one row — separating the SOURCE would ban music sets")
+	}
+	// And a station that does want its artists spaced can say so.
+	spaced := TraitsFor(Source{Kind: SourceMusicPlaylist, Role: RoleMusic,
+		Config: map[string]any{"traits": map[string]any{"hasCreator": true}}})
+	if !spaced.HasCreator {
+		t.Fatalf("the per-source override has to be able to put artist spacing back")
 	}
 	station := TraitsFor(Source{Kind: SourceInternetStation, Role: RoleTalk})
 	if !station.Continuous {

@@ -37,6 +37,12 @@ type ProgramState struct {
 	// are two things that want separating, so the station separates them, for
 	// ever. No threshold fixes that; knowing what a break IS does.
 	LastWasBreak bool `json:"lastWasBreak,omitempty"`
+	// EnteredToday counts entries per block for the listening day named by
+	// EnteredDay, so a block capped with `maxPerDay` knows how much of its
+	// allowance is left. Keyed on the listening day rather than the calendar
+	// one because that is the day the station's owner actually experiences.
+	EnteredToday map[string]int `json:"enteredToday,omitempty"`
+	EnteredDay   string         `json:"enteredDay,omitempty"`
 	// Queue is programming already decided and not yet played — a break,
 	// assembled as a unit so its items go out in order.
 	//
@@ -85,6 +91,10 @@ type BlockDecision struct {
 	// Anchor is the appointment that put this block on air, if one did.
 	Anchor *Anchor
 	State  ProgramState
+	// CutAtBoundary asks this pass to pick something that will be cut when the
+	// next appointment starts. Set only by the gap-filling retry; see
+	// ProgrammingIntent.CutAtBoundary for why the fit rule stands down for it.
+	CutAtBoundary bool
 	// Changed reports whether this decision moved the station to a new block.
 	Changed bool
 }
@@ -192,8 +202,51 @@ func withState(decision BlockDecision, previous ProgramState, block Block, now t
 	}
 	decision.EnteredAt = now
 	decision.Changed = true
-	decision.State = ProgramState{BlockID: block.ID, EnteredAt: now}
+	decision.State = enteringBlock(previous, block.ID, now)
 	return decision
+}
+
+// countEntry records that a block has just been entered, for the daily caps.
+//
+// Only capped blocks are counted. An uncapped one would grow the state document
+// by a key per block per day for a number nothing ever reads.
+func countEntry(previous ProgramState, blockID string) map[string]int {
+	out := map[string]int{}
+	for id, count := range previous.EnteredToday {
+		out[id] = count
+	}
+	out[blockID]++
+	return out
+}
+
+// rollListeningDay clears the per-day entry counts when the listening day named
+// in the state is no longer the one the station is in.
+//
+// Keyed on a day STRING rather than a timestamp comparison because the listening
+// day is wall-clock in the channel's zone, and the state is stored in UTC — the
+// same mismatch that made the old schedule rules fire an hour out.
+func rollListeningDay(state ProgramState, day ListeningDay, loc *time.Location, now time.Time) ProgramState {
+	today := listeningDayKey(day, loc, now)
+	if state.EnteredDay == today {
+		return state
+	}
+	state.EnteredDay = today
+	state.EnteredToday = nil
+	return state
+}
+
+// listeningDayKey names the listening day `now` falls in. The small hours
+// before the day opens still belong to the day that just ended, so a block
+// capped at once a day cannot come round again at 02:00.
+func listeningDayKey(day ListeningDay, loc *time.Location, now time.Time) string {
+	if loc == nil {
+		loc = time.UTC
+	}
+	local := now.In(loc)
+	if minutes := local.Hour()*60 + local.Minute(); minutes < day.normalized().StartMinute {
+		local = local.AddDate(0, 0, -1)
+	}
+	return local.Format("2006-01-02")
 }
 
 func handoverVerb(from, to Block) string {
@@ -233,6 +286,11 @@ func followNext(plan Plan, from Block, cond ConditionContext, now time.Time) Blo
 // blockAccepts reports whether a block is willing to take over right now.
 func blockAccepts(block Block, cond ConditionContext, now time.Time) bool {
 	if len(block.Pools) == 0 && !block.Default {
+		return false
+	}
+	// Its allowance for the day, before anything else is asked. A block that
+	// has had its turn is not a candidate, however true its condition is.
+	if block.Enter.MaxPerDay > 0 && cond.EnteredToday[block.ID] >= block.Enter.MaxPerDay {
 		return false
 	}
 	condition, err := ParseCondition(block.Enter.When)
@@ -438,6 +496,19 @@ type ProgrammingIntent struct {
 	Pools   []PoolRef
 	Limits  []ResolvedLimit
 
+	// CutAtBoundary means this pick exists to hold the last of a block's time
+	// and is ALLOWED to be cut when the appointment starts.
+	//
+	// The fit rule normally refuses anything that would overrun an
+	// appointment, which is right for programming and wrong for the forty
+	// seconds in front of one: nothing the station owns is forty seconds long,
+	// so the fit rule empties the candidate set and the appointment is dragged
+	// forward to meet the silence. A booked show that begins whenever the last
+	// track happened to end is not booked. So for this pass — and only this
+	// pass, over a pool the plan has nominated as cuttable — the rule stands
+	// down, the item is capped at the gap and faded out on the boundary.
+	CutAtBoundary bool
+
 	// Want is what this position in the block's cycle calls for.
 	Want WantKind
 	// Exposure is how much airing something here counts toward satisfying an
@@ -502,4 +573,20 @@ func resolveLimits(block Block, tail []PlayTailEntry, enteredAt time.Time) []Res
 		})
 	}
 	return out
+}
+
+// enteringBlock is the state for a block the station is moving into.
+//
+// The daily allowances have to survive the move. Building a fresh ProgramState
+// at every entry point drops them, and a cap that resets whenever the station
+// changes block is not a cap — it is the same defect as a break policy that only
+// chained in production, and it hides in exactly the same way, because in-memory
+// the counts look right until something re-enters by a different route.
+func enteringBlock(previous ProgramState, blockID string, now time.Time) ProgramState {
+	return ProgramState{
+		BlockID:      blockID,
+		EnteredAt:    now,
+		EnteredDay:   previous.EnteredDay,
+		EnteredToday: countEntry(previous, blockID),
+	}
 }

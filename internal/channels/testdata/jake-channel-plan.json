@@ -235,31 +235,35 @@
      "talk"
     ],
     "target": {
-     "duration": "25m",
-     "items": 7
+     "duration": "6m",
+     "items": 2
     },
     "accept": {
      "duration": [
-      "18m",
-      "32m"
+      "3m",
+      "9m"
      ],
      "items": [
-      5,
-      9
+      1,
+      2
      ]
     },
     "elements": [
      {
       "pool": "music",
       "count": [
-       5,
-       9
+       1,
+       2
       ],
       "fill": true
      }
     ]
    },
-   "limits": {}
+   "limits": {},
+   "longForm": {
+    "threshold": "2h",
+    "rest": "14d"
+   }
   },
   {
    "id": "fresh",
@@ -322,12 +326,12 @@
    "id": "music-hour",
    "label": "Music hour",
    "enter": {
-    "at": "14:00",
+    "at": "17:00",
     "days": "*",
     "hard": true
    },
    "exit": {
-    "at": "15:00"
+    "at": "18:00"
    },
    "next": "fresh",
    "pools": [
@@ -661,7 +665,7 @@
  ],
  "longForm": {
   "threshold": "2h",
-  "rest": "21d"
+  "rest": "never"
  },
  "separation": {},
  "horizons": {
@@ -678,5 +682,6 @@
   "start": "08:00",
   "end": "23:00"
  },
- "underrunPool": "music"
+ "underrunPool": "music",
+ "minItem": "5m"
 }

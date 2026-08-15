@@ -46,6 +46,20 @@ type Plan struct {
 	// a booked show.
 	LongForm LongFormPolicy `json:"longForm,omitempty"`
 
+	// MinItem is the floor on what counts as programming at all.
+	//
+	// The mirror of LongForm: that rations the enormous, this excludes the
+	// trivial. Feeds carry things that are not episodes — a sixty-second "the
+	// show has ended" post, a trailer, a "we are on break until January" —
+	// and to the scheduler they look like perfectly good short items, which
+	// makes them ideal for exactly the gap before a booked show. So the one
+	// slot most likely to be filled with an announcement is the one right
+	// before something you were looking forward to.
+	//
+	// Items with no known duration are never excluded: unmeasured is not the
+	// same as short, and guessing would drop real episodes.
+	MinItem string `json:"minItem,omitempty"`
+
 	Separation SeparationPolicy `json:"separation"`
 	Horizons   Horizons         `json:"horizons"`
 	Selection  SelectionPolicy  `json:"selection"`
@@ -253,6 +267,17 @@ type Block struct {
 	// minutes.
 	Breaks *BreakPolicy `json:"breaks,omitempty"`
 
+	// LongForm overrides the station's long-form policy while this block is on
+	// air, which is how "a giant is welcome on a quiet afternoon and never in
+	// the middle of the new-episode cycle" gets said.
+	//
+	// The condition Jacob actually wants is not a timer, it is "there is a big
+	// enough hole AND nothing is owed" — and a block already MEANS "nothing is
+	// owed", so the eligibility belongs on the block rather than in another
+	// rule. The hole takes care of itself: a four-hour episode simply does not
+	// fit a two-hour gap, and the window constraint never relaxes.
+	LongForm *LongFormPolicy `json:"longForm,omitempty"`
+
 	// Pattern is a repeating sequence of intents, for a block whose shape is a
 	// cycle rather than a rotation: "a new episode, a break, a new episode, a
 	// break, until there are no new episodes left".
@@ -424,6 +449,19 @@ type BlockEntry struct {
 	// When is an extra condition, from a small closed vocabulary. See
 	// ParseCondition.
 	When string `json:"when,omitempty"`
+
+	// MaxPerDay caps how often this block may be entered in one listening day.
+	// Zero means no cap.
+	//
+	// What makes a flex block possible. A condition like "window < 45m" is true
+	// at the tail of every booked slot, so a block that only says WHEN it may
+	// run will run at every one of them; the station needs a way to say "this
+	// is a thing I do occasionally, when the schedule asks for it" without
+	// pinning it to a clock time. Pinning it to a clock time is what a fixed
+	// music hour is, and a fixed hour is an appointment: it fragments the day
+	// into stretches too short for a long episode, which is the whole problem
+	// it was meant to help with.
+	MaxPerDay int `json:"maxPerDay,omitempty"`
 }
 
 // StartPolicy is what happens when a hard anchor is due and something is on.
@@ -506,7 +544,24 @@ type LongFormPolicy struct {
 }
 
 func (p LongFormPolicy) threshold() time.Duration { return durationOr(p.Threshold, 2*time.Hour) }
-func (p LongFormPolicy) rest() time.Duration      { return durationOr(p.Rest, 7*24*time.Hour) }
+
+// rest is how long a show steps back after a giant airs.
+//
+// "never" means back catalogue giants do not come round on their own at all —
+// the only thing that puts one on air is a NEW episode, which is exempt from
+// rationing because it is news rather than a rerun. That is a real editorial
+// position ("I want Hardcore History when Dan puts one out, and not otherwise")
+// and it deserves to be sayable rather than approximated with a big number.
+func (p LongFormPolicy) rest() time.Duration {
+	if strings.EqualFold(strings.TrimSpace(p.Rest), "never") {
+		return neverAgain
+	}
+	return durationOr(p.Rest, 7*24*time.Hour)
+}
+
+// neverAgain is longer than any station will be on the air, and is deliberately
+// finite so every "how long since" comparison keeps working unchanged.
+const neverAgain = 100 * 365 * 24 * time.Hour
 
 // SeparationPolicy is how far apart the same thing may be repeated.
 type SeparationPolicy struct {
@@ -572,6 +627,18 @@ func (p Plan) balanceHorizon() time.Duration {
 func (p Plan) rerunHorizon() time.Duration {
 	return durationOr(p.Horizons.Rerun, defaultRerunHorizon)
 }
+
+// longFormFor is the long-form policy in force while a block is on air.
+func (p Plan) longFormFor(block Block) LongFormPolicy {
+	if block.LongForm != nil {
+		return *block.LongForm
+	}
+	return p.LongForm
+}
+
+// minItem is the floor on what counts as programming. Zero means no floor.
+func (p Plan) minItem() time.Duration { return durationOr(p.MinItem, 0) }
+
 func (p Plan) recencyHorizon() time.Duration {
 	return durationOr(p.Horizons.Recency, defaultRecencyHorizon)
 }
@@ -840,6 +907,27 @@ func (p Plan) Validate() error {
 				"give it an end time, a duration, or 'ends at the next booked slot'",
 				block.ID, block.Enter.At)
 		}
+		if block.Enter.MaxPerDay < 0 {
+			add("block %q has maxPerDay %d — a cap cannot be negative",
+				block.ID, block.Enter.MaxPerDay)
+		}
+		// The default block is never asked whether it accepts; it is the answer
+		// when nothing else claims the hour. A cap on it would be stored,
+		// displayed and silently ignored, which is the failure mode this
+		// validator exists to prevent.
+		if block.Default && block.Enter.MaxPerDay > 0 {
+			add("block %q is the default block, so maxPerDay would never apply — "+
+				"the default is what runs when nothing else claims the hour", block.ID)
+		}
+		// A capped block with nothing to trigger it can only ever be reached by
+		// falling through to it, and then its cap stops it coming back. That is
+		// a block that runs once and vanishes, which is not what anybody means.
+		if block.Enter.MaxPerDay > 0 && block.Enter.At == "" &&
+			block.Enter.When == "" && block.Enter.After == "" {
+			add("block %q is capped at %d a day but never says when it may run — "+
+				"give it a time, an 'after', or a condition like 'window < 45m'",
+				block.ID, block.Enter.MaxPerDay)
+		}
 		if block.Exit.At != "" {
 			if _, err := parseClock(block.Exit.At); err != nil {
 				add("block %q exit.at: %v", block.ID, err)
@@ -909,6 +997,32 @@ func (p Plan) Validate() error {
 	if p.Horizons.Rerun != "" {
 		if _, err := parseDuration(p.Horizons.Rerun); err != nil {
 			add("horizons.rerun: %v", err)
+		}
+	}
+	if p.Horizons.Recency != "" {
+		if _, err := parseDuration(p.Horizons.Recency); err != nil {
+			add("horizons.recency: %v", err)
+		}
+	}
+	if p.MinItem != "" {
+		if _, err := parseDuration(p.MinItem); err != nil {
+			add("minItem: %v", err)
+		}
+	}
+	// The one that got away. Every duration is read through durationOr, which
+	// swallows a parse error and returns the DEFAULT — so an unvalidated field
+	// does not fail, it quietly means something else. longForm.rest was set to
+	// "21d", parsed as an error, and became the seven-day default: the giant
+	// aired three times in three weeks instead of once, and the plan reported
+	// itself as valid throughout.
+	if p.LongForm.Threshold != "" {
+		if _, err := parseDuration(p.LongForm.Threshold); err != nil {
+			add("longForm.threshold: %v", err)
+		}
+	}
+	if p.LongForm.Rest != "" && !strings.EqualFold(strings.TrimSpace(p.LongForm.Rest), "never") {
+		if _, err := parseDuration(p.LongForm.Rest); err != nil {
+			add("longForm.rest: %v (or \"never\")", err)
 		}
 	}
 	if p.UnderrunPool != "" && !seenPool[p.UnderrunPool] {
@@ -1100,6 +1214,20 @@ func DerivePlan(channel Channel, sources []Source, rules []ScheduleRule, default
 	if len(interstitial) > 0 {
 		plan.Pools = append(plan.Pools, Pool{ID: "interstitial", Label: "Interstitial", SourceIDs: interstitial})
 	}
+	// Music holds the gap in front of a booked show, so the show starts when it
+	// says it does rather than whenever the last thing that fitted ran out.
+	//
+	// Derived here rather than left empty because every channel has the problem
+	// — the gap in front of an appointment always closes to less than the
+	// shortest thing the station owns — and a setting nobody knows to switch on
+	// is a setting that fixes nothing. A channel with no music simply has no
+	// pool to nominate, and keeps the old answer.
+	for _, src := range sources {
+		if src.Enabled && LegacyCategoryOf(src) == LegacyCategoryMusic && src.Role != RoleShow {
+			plan.UnderrunPool = string(LegacyCategoryMusic)
+			break
+		}
+	}
 
 	// The rotation, as one always-available block.
 	general := Block{
@@ -1206,6 +1334,73 @@ func DerivePlan(channel Channel, sources []Source, rules []ScheduleRule, default
 	return plan
 }
 
+// AdoptScheduleRules adds a block for every booked slot the plan does not
+// already have one for, and returns what it added.
+//
+// A stored plan is a snapshot of the schedule at the moment somebody pressed
+// save. Book a show afterwards and the rule exists, the UI lists it as ENABLED,
+// the programme grid draws it — and the scheduler, which reads the PLAN, has no
+// block for it, so at the appointed hour nothing claims the time and the
+// station falls back to ordinary rotation. No error anywhere. Exactly the trap
+// that frozen pool lists were, one level up.
+//
+// So booked slots are adopted the same way rotation pools became rules: the
+// plan says what the station IS, and the schedule says what is booked. Deleting
+// a slot from the plan does not disable it — deleting the RULE does, which is
+// the switch the UI actually presents.
+func (p Plan) AdoptScheduleRules(rules []ScheduleRule, sources []Source) (Plan, []string) {
+	existing := map[string]bool{}
+	for _, block := range p.Blocks {
+		existing[block.ID] = true
+	}
+	showPools := map[string]string{}
+	for _, pool := range p.Pools {
+		if len(pool.SourceIDs) == 1 {
+			showPools[pool.SourceIDs[0]] = pool.ID
+		}
+	}
+
+	ordered := append([]ScheduleRule(nil), rules...)
+	sort.SliceStable(ordered, func(i, j int) bool {
+		if ordered[i].StartMinute != ordered[j].StartMinute {
+			return ordered[i].StartMinute < ordered[j].StartMinute
+		}
+		return ordered[i].ID < ordered[j].ID
+	})
+
+	adopted := []string{}
+	for _, rule := range ordered {
+		if !rule.Enabled || existing["slot-"+rule.ID] {
+			continue
+		}
+		poolID, ok := showPools[rule.SourceID]
+		if !ok {
+			poolID = "slot-" + rule.SourceID
+			if _, exists := p.Pool(poolID); !exists {
+				p.Pools = append(p.Pools, Pool{
+					ID:        poolID,
+					Label:     firstNonEmpty(rule.Label, "Slot source"),
+					SourceIDs: []string{rule.SourceID},
+				})
+			}
+		}
+		p.Blocks = append(p.Blocks, Block{
+			ID:    "slot-" + rule.ID,
+			Label: firstNonEmpty(rule.Label, "Booked slot"),
+			Enter: BlockEntry{
+				At:    minuteToClock(rule.StartMinute),
+				Days:  weekdayMaskToSpec(rule.WeekdayMask),
+				Hard:  true,
+				Start: StartImmediately,
+			},
+			Exit:  BlockExit{At: minuteToClock(rule.EndMinute)},
+			Pools: []PoolRef{{Pool: poolID, Weight: 1}},
+		})
+		adopted = append(adopted, firstNonEmpty(rule.Label, rule.ID))
+	}
+	return p, adopted
+}
+
 // hasRotationInventory reports whether a channel owns anything a rotation pool
 // can actually reach — that is, anything that is not a booked show and not
 // separator inventory.
@@ -1253,9 +1448,22 @@ func parseDuration(raw string) (time.Duration, error) {
 	if value, err := strconv.Atoi(raw); err == nil {
 		return time.Duration(value) * time.Minute, nil
 	}
+	// Days, because scheduling talks in them. A giant rests for three weeks and
+	// a rerun horizon is a month; spelling those "504h" and "720h" is a puzzle,
+	// and Go's own parser has no unit for it — so "21d" errored, and every
+	// caller reads durations through durationOr, which swallows the error and
+	// hands back the DEFAULT. The plan saved cleanly and meant something else.
+	if rest, ok := strings.CutSuffix(strings.ToLower(raw), "d"); ok {
+		if days, err := strconv.Atoi(strings.TrimSpace(rest)); err == nil {
+			if days < 0 {
+				return 0, fmt.Errorf("%q is negative", raw)
+			}
+			return time.Duration(days) * 24 * time.Hour, nil
+		}
+	}
 	parsed, err := time.ParseDuration(raw)
 	if err != nil {
-		return 0, fmt.Errorf("%q is not a duration (try 90m or 1h30m)", raw)
+		return 0, fmt.Errorf("%q is not a duration (try 90m, 1h30m or 21d)", raw)
 	}
 	if parsed < 0 {
 		return 0, fmt.Errorf("%q is negative", raw)

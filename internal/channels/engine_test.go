@@ -982,18 +982,21 @@ func TestAMusicOnlyStationJustWorks(t *testing.T) {
 	s := newStation(t, plan, []Source{musicSource("mus1", "The Whole Station", "pl1")},
 		&stubCatalog{playlists: map[string][]catalog.MusicTrack{"pl1": songs}}, now)
 
+	// Two songs by one artist back to back is fine here — a playlist shuffles,
+	// and the shelf's proportions are the instruction. What must not happen is
+	// the same RECORD coming round while others are still waiting.
 	played := map[string]int{}
-	lastArtist := ""
+	lastRef := ""
 	for i := 0; i < 40; i++ {
 		item, decision := s.step()
 		if len(decision.Relaxed) > 0 {
 			t.Fatalf("pick %d had to relax %v on a station with plenty of music\n%s",
 				i, decision.Relaxed, decision.Explain())
 		}
-		if item.Artist != "" && item.Artist == lastArtist {
-			t.Fatalf("pick %d played %s twice in a row", i, item.Artist)
+		if item.ItemRef == lastRef {
+			t.Fatalf("pick %d played %q twice in a row", i, item.Title)
 		}
-		lastArtist = item.Artist
+		lastRef = item.ItemRef
 		played[item.ItemRef]++
 	}
 	if len(played) < 20 {
@@ -1048,4 +1051,86 @@ func TestInterstitialAirtimeIsOutsideTheFormatBalance(t *testing.T) {
 	if got := scoring.airtime.ByCategory["talk"]; got > 31*time.Minute {
 		t.Fatalf("talk airtime = %s; the 30 minutes of spots should not count toward it", got)
 	}
+}
+
+// One unplayable episode must not turn the day into music.
+//
+// The programme state is committed when an item is CHOSEN, not when it airs, so
+// a dead pick used to spend its turn in the cycle: the obligation position was
+// consumed by something nobody heard, and the pattern moved on to a break. The
+// next obligation came round after that break, failed again, and the listener
+// got music, silence-nobody-hears, music, for as long as the episode stayed
+// owed. Jacob's morning, exactly.
+//
+// A failure has to leave the cycle where it was AND pass the item over, so the
+// slot is refilled with the next thing you are owed.
+func TestADeadPickDoesNotSpendItsTurnInTheCycle(t *testing.T) {
+	now := time.Date(2026, 8, 11, 9, 10, 0, 0, time.UTC)
+
+	shows := []Source{}
+	episodes := map[string][]catalog.PodcastEpisode{}
+	for index := 0; index < 3; index++ {
+		id := "p" + strconv.Itoa(index)
+		src := podcastSource("pod"+strconv.Itoa(index), "Show "+strconv.Itoa(index), id)
+		src.Config["tier"] = []string{"C", "B", "A"}[index]
+		shows = append(shows, src)
+		episodes[id] = []catalog.PodcastEpisode{
+			episode(id+"-new", "Show "+strconv.Itoa(index)+" today", now.Add(-5*time.Hour), 45),
+		}
+	}
+	songs := []catalog.MusicTrack{}
+	for index := 0; index < 30; index++ {
+		songs = append(songs, track("t"+strconv.Itoa(index), "Song "+strconv.Itoa(index),
+			"Artist "+strconv.Itoa(index%15), 200))
+	}
+	plan := Plan{
+		Version:    PlanVersion,
+		Categories: []CategoryDef{{ID: "talk", Target: 1}, {ID: "music", Target: 0}},
+		Pools: []Pool{
+			{ID: "podcasts", Match: &PoolMatch{Kind: SourcePodcastSubscription}},
+			{ID: "music", Match: &PoolMatch{Category: "music"}},
+		},
+		Blocks: []Block{{
+			ID: "fresh", Default: true,
+			Pools:   []PoolRef{{Pool: "podcasts"}},
+			Pattern: []PatternStep{{Want: WantBreak}, {Want: WantObligation}},
+			Breaks: &BreakPolicy{
+				Between:  []CategoryID{"talk"},
+				Target:   BreakSize{Duration: "6m", Items: 2},
+				Accept:   BreakRange{Duration: []string{"3m", "9m"}, Items: []int{1, 2}},
+				Elements: []BreakElement{{Pool: "music", Count: []int{1, 2}, Fill: true}},
+			},
+		}},
+	}
+	cat := &stubCatalog{episodes: episodes, playlists: map[string][]catalog.MusicTrack{"pl1": songs}}
+	s := newStation(t, plan, append(shows, musicSource("mus1", "House", "pl1")), cat, now)
+
+	// Sitting at the obligation position.
+	s.state = ProgramState{BlockID: "fresh", EnteredAt: now.Add(-10 * time.Minute), PatternIndex: 1}
+
+	item, _, next, err := s.engine.Decide(context.Background(), now, s.state)
+	if err != nil {
+		t.Fatalf("decide: %v", err)
+	}
+	if item.Category != "talk" {
+		t.Fatalf("the obligation position should have picked something owed, got %s", item.Category)
+	}
+
+	// That item turns out to be unplayable. The streamer passes it over and
+	// rewinds — so the cycle is still AT the obligation position.
+	s.engine.Skips.SuppressRef(item.ItemRef)
+	rewound := s.state
+
+	again, _, _, err := s.engine.Decide(context.Background(), now.Add(2*time.Second), rewound)
+	if err != nil {
+		t.Fatalf("decide after the dead pick: %v", err)
+	}
+	if again.Category != "talk" {
+		t.Fatalf("after a dead pick the slot played %s — the position was spent on something nobody heard",
+			again.Category)
+	}
+	if again.ItemRef == item.ItemRef {
+		t.Fatal("the dead item was handed back again")
+	}
+	_ = next
 }

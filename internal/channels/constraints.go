@@ -27,6 +27,10 @@ type Rejection struct {
 type constraintEnv struct {
 	now    time.Time
 	window time.Duration
+	// cutAtBoundary means this pass is filling the gap in front of an
+	// appointment and its pick will be faded out on the boundary, so the fit
+	// rule has nothing to protect.
+	cutAtBoundary bool
 
 	lastByRef     map[string]time.Time
 	lastBySource  map[string]time.Time
@@ -42,9 +46,27 @@ type constraintEnv struct {
 	separationSource  time.Duration
 	separationCreator time.Duration
 	separationFamily  time.Duration
+	// separationByCreator loosens the creator window for anyone who makes up a
+	// large share of the library — see fitSeparationToLibrary.
+	separationByCreator map[string]time.Duration
+	// separationTurn is how long one turn of a shuffled source takes, keyed by
+	// source. For those, this replaces the configured item window entirely —
+	// see turnsForShuffledSources.
+	separationTurn map[string]time.Duration
+	// separationFitted marks an env whose windows have already been sized to
+	// the library, so the decision path can fit once and hand the same numbers
+	// to the rules and to scoring instead of each deciding for itself.
+	separationFitted bool
 
 	longFormThreshold time.Duration
 	longFormRest      time.Duration
+	// lastGiantByShow is when each show last put an ENORMOUS item on air, and
+	// how long that item ran.
+	//
+	// The rest is earned by that airing and covers the whole show, and its
+	// length is priced by what the giant cost. Keyed on the show for the usual
+	// reason: one programme is routinely two sources.
+	lastGiantByShow map[string]LongFormAiring
 
 	limits []ResolvedLimit
 	// categoriesPresent is which categories the candidate set contains, so a
@@ -88,7 +110,11 @@ func standardConstraints() []constraint {
 				if c.Creator == "" || !c.Traits.HasCreator || env.separationCreator <= 0 {
 					return true, ""
 				}
-				return sinceOK(env.lastByCreator[c.Creator], env.now, env.separationCreator, c.Creator)
+				window := env.separationCreator
+				if fitted, ok := env.separationByCreator[c.Creator]; ok {
+					window = fitted
+				}
+				return sinceOK(env.lastByCreator[c.Creator], env.now, window, c.Creator)
 			},
 		},
 		{
@@ -101,7 +127,18 @@ func standardConstraints() []constraint {
 				if !c.Traits.SharedCreator || env.separationSource <= 0 {
 					return true, ""
 				}
-				return sinceOK(env.lastBySource[c.SourceID], env.now, env.separationSource, "this source")
+				// Keyed on the SHOW, for the same reason the rationing is: one
+				// programme routinely arrives as two sources, the episodes on
+				// disk and the same show's feed. Resting the source it aired
+				// from while its twin stays eligible spaces out nothing at all.
+				// ShowOf falls back to the source, so a show that IS one source
+				// is unchanged; the later of the two is taken so the rule can
+				// only ever get stricter than it was.
+				last := env.lastBySource[c.SourceID]
+				if byShow := env.lastByShow[c.Show]; c.Show != "" && byShow.After(last) {
+					last = byShow
+				}
+				return sinceOK(last, env.now, env.separationSource, "this show")
 			},
 		},
 		{
@@ -125,6 +162,14 @@ func standardConstraints() []constraint {
 				// separation, half credit means half the window, a full airing
 				// means the whole thing.
 				window := env.separationItem
+				// A shuffled source is separated by its own queue instead. Eight
+				// hours is the wrong answer in both directions: on a three-hundred
+				// song playlist it lets a song come round with two hundred others
+				// still unplayed, and on a twenty-song one it holds nineteen
+				// tracks hostage for an afternoon.
+				if turn, ok := env.separationTurn[c.SourceID]; ok && turn > 0 {
+					window = turn
+				}
 				if c.Owed {
 					window = time.Duration(float64(window) * c.Credit)
 					if window <= 0 {
@@ -153,22 +198,76 @@ func standardConstraints() []constraint {
 			},
 		},
 		{
-			// Rationing the enormous. Once a giant airs, that show steps back
-			// for a week, so one turns up occasionally rather than filling the
-			// afternoon whenever there happens to be room for it.
+			// Rationing the enormous, which is two questions with two answers.
+			//
+			// How OFTEN may a six-hour epic come round? Rarely — the show steps
+			// back for the configured rest, so one turns up occasionally rather
+			// than filling the afternoon whenever there is room for it.
+			//
+			// How soon may that SHOW be heard again at all, once it has taken
+			// the whole afternoon? Not for a while, and the whole show is
+			// covered, because nobody hears an episode length — they hear the
+			// show. That one is priced by what the giant cost rather than by the
+			// rationing period, or a feed with a single atypically long episode
+			// would disappear for three weeks on the strength of one outlier.
 			//
 			// Relaxed late but not last: playing a six-hour episode two days
 			// running is bad radio, playing nothing at all is worse.
 			Name:       "longFormRationing",
 			RelaxOrder: 2,
 			Check: func(c Candidate, env constraintEnv) (bool, string) {
-				if env.longFormThreshold <= 0 || c.Duration < env.longFormThreshold {
+				if env.longFormThreshold <= 0 {
+					return true, ""
+				}
+				giant := c.Duration >= env.longFormThreshold
+				if !giant {
+					// The rest a giant earns covers the whole show, not just its
+					// other giants.
+					//
+					// Gating on the length of the episode in hand reads as
+					// "ration the enormous" and behaves as "ration nothing", for
+					// the simple reason that a show which publishes six-hour
+					// epics also publishes the odd half-hour piece. Every giant
+					// in the feed is refused with "this show aired two days ago";
+					// the short one is not a giant, so the rest it is sitting
+					// inside is never even consulted, and the show walks straight
+					// back on air the same afternoon. Nobody hears an episode
+					// length. They hear the show again.
+					//
+					// It is the AIRING that is asked about rather than the show's
+					// usual habits: a feed with one three-hour special among five
+					// hundred ordinary episodes is not a long-form show, and
+					// resting its whole catalogue because of that one outlier
+					// would empty the archive it is there to fill.
+					last, resting := env.lastGiantByShow[c.Show]
+					if !resting || last.EndedAt.IsZero() {
+						return true, ""
+					}
+					if c.Owed {
+						return true, ""
+					}
+					quiet := showQuietAfter(last.Length, env.longFormRest)
+					if since := env.now.Sub(last.EndedAt); since < quiet {
+						return false, fmt.Sprintf(
+							"this show gave you %s of it %s ago, so it is quiet for %s",
+							round(last.Length), round(since), round(quiet))
+					}
 					return true, ""
 				}
 				// Something the station OWES is a different question: a new
 				// six-hour episode is news, not a rerun of a special.
 				if c.Owed {
 					return true, ""
+				}
+				// "Never" is not a very long rest, it is a different rule: back
+				// catalogue giants do not come round on their own AT ALL, and
+				// the only thing that puts one on air is a new episode, which
+				// left above. Without this the first airing is still allowed —
+				// nothing has aired yet, so there is nothing to rest from — and
+				// a station that wanted none gets one.
+				if env.longFormRest >= neverAgain {
+					return false, fmt.Sprintf("%s long, and this show only airs on a new episode",
+						round(c.Duration))
 				}
 				// Keyed on the SHOW, not the source. The same programme is
 				// routinely two sources — the episodes on disk and the feed —
@@ -284,6 +383,14 @@ func standardConstraints() []constraint {
 			Name:       "fitsBeforeAnchor",
 			RelaxOrder: -1,
 			Check: func(c Candidate, env constraintEnv) (bool, string) {
+				// Unless being cut off is the job. A gap-filler is chosen in
+				// full knowledge that the boundary will take it — that is what
+				// keeps the boundary where the schedule put it — so measuring it
+				// against a gap nothing can fit would refuse the whole pool and
+				// hand the time back to the appointment, early.
+				if env.cutAtBoundary {
+					return true, ""
+				}
 				if env.window <= 0 || c.Duration <= 0 {
 					// A continuous source has no length of its own; it is
 					// bounded by the play window imposed on it instead.
@@ -297,6 +404,34 @@ func standardConstraints() []constraint {
 			},
 		},
 	}
+}
+
+// quietPerHourOfAir is how much silence an hour of one show buys that show.
+//
+// A day off per hour on air. Two different questions were being answered with
+// one number and it suited neither: how OFTEN a six-hour epic may come round is
+// a rationing decision measured in weeks, while how soon you want to hear that
+// same show again after it has taken your whole afternoon is a question about
+// the last few days. Charging the second at the first's rate makes a show that
+// aired one atypically long episode vanish for three weeks.
+//
+// Proportionate, so nothing has to be configured per show and the answer scales
+// with what the listener actually sat through: four hours of Hardcore History
+// buys four days, and a podcast whose one long episode ran two and a half hours
+// is back within three days.
+const quietPerHourOfAir = 24 * time.Hour
+
+// showQuietAfter is how long a whole show steps back once a giant of its has
+// been on, never longer than the rationing period the giants themselves serve.
+func showQuietAfter(length, ceiling time.Duration) time.Duration {
+	if length <= 0 {
+		return 0
+	}
+	quiet := time.Duration(float64(length) / float64(time.Hour) * float64(quietPerHourOfAir))
+	if ceiling > 0 && quiet > ceiling {
+		return ceiling
+	}
+	return quiet
 }
 
 // sinceOK is every separation rule, which are all the same rule asked about a
@@ -347,6 +482,10 @@ const rotationHeadroom = 0.75
 // quietly gets a rule it can keep. Nothing has to be configured, which is the
 // point — the station should work with whatever is there.
 func fitSeparationToLibrary(env constraintEnv, candidates []Candidate) constraintEnv {
+	if env.separationFitted {
+		return env
+	}
+	env.separationFitted = true
 	typical := typicalDuration(candidates)
 	if typical <= 0 {
 		return env
@@ -354,16 +493,28 @@ func fitSeparationToLibrary(env constraintEnv, candidates []Candidate) constrain
 	sources := map[string]bool{}
 	creators := map[string]bool{}
 	families := map[string]bool{}
+	// How much of the library each creator actually IS, which is a different
+	// question from how many creators there are.
+	byCreator := map[string]int{}
 	items := 0
 	for _, candidate := range candidates {
 		if candidate.Ref != "" {
 			items++
 		}
 		if candidate.Traits.SharedCreator {
-			sources[candidate.SourceID] = true
+			// Counted as shows, because that is what the rule now separates. A
+			// show added twice is one thing to space out, not two, and counting
+			// it twice would size the window for a library richer than the one
+			// actually there.
+			key := candidate.Show
+			if key == "" {
+				key = candidate.SourceID
+			}
+			sources[key] = true
 		}
 		if candidate.Creator != "" && candidate.Traits.HasCreator {
 			creators[candidate.Creator] = true
+			byCreator[candidate.Creator]++
 		}
 		if candidate.Family != "" {
 			families[candidate.Family] = true
@@ -392,9 +543,148 @@ func fitSeparationToLibrary(env constraintEnv, candidates []Candidate) constrain
 	}
 	env.separationSource = fit(env.separationSource, len(sources))
 	env.separationCreator = fit(env.separationCreator, len(creators))
+
+	// Then per creator, by how much of the library they ARE.
+	//
+	// Counting distinct creators says a hundred and fifteen artists can easily
+	// be kept ninety minutes apart. It is blind to the shape of the collection:
+	// if a third of the playlist is one artist, holding that artist to the same
+	// spacing as one with a single track means the station spends its time
+	// refusing to play what it was mostly given. A library that is mostly Elvis
+	// is a statement of taste, not an accident to be corrected.
+	//
+	// The gap between two of an artist's OWN records, if the collection were
+	// dealt out evenly: share s means s of every slot is theirs, so between two
+	// of them sit (1−s)/s other records.
+	//
+	// This was typical/s, which is the length of a full turn through the
+	// library rather than the gap inside it — too long by exactly one of the
+	// artist's own tracks. For somebody with a single track in four hundred the
+	// difference is nothing. For somebody who IS half the collection it is
+	// nearly double, so the formula over-spaced precisely the artists it was
+	// written to stop over-spacing, and capped them below their own share of
+	// the shelf however much of it they owned.
+	//
+	// Headroom applies the same way it does everywhere else — the window comes
+	// in UNDER the even-spread gap, so the artist can actually reach their
+	// share rather than being held exactly at the theoretical minimum for it.
+	// Nobody is ever held to LONGER than the configured window; this only ever
+	// relaxes.
+	if total := len(candidates); total > 0 && env.separationCreator > 0 {
+		windows := make(map[string]time.Duration, len(byCreator))
+		for creator, count := range byCreator {
+			if count <= 0 {
+				continue
+			}
+			share := float64(count) / float64(total)
+			if share >= 1 {
+				// The whole pool is one artist. There is nothing to separate
+				// them from, and a rule that cannot be kept is not a rule.
+				windows[creator] = 0
+				continue
+			}
+			natural := time.Duration(float64(typical) * (1 - share) / share * rotationHeadroom)
+			// Under one record's length, the honest window is none.
+			//
+			// Separation is measured from the END of the last airing, so ANY
+			// window above zero means at least one other record in between —
+			// which caps the artist at p/(1+p) of the hour however much of the
+			// shelf is theirs. Half a playlist comes out as a third of it, and
+			// no amount of loosening fixes that, because the floor is one whole
+			// track and the arithmetic asks for less.
+			//
+			// So an artist whose natural gap is shorter than a single record is
+			// not separated at all. They are too much of the collection to be
+			// kept apart from themselves, which is the same answer fit() gives
+			// when there is only one artist in the pool — this is that case
+			// arriving by degree rather than all at once. Two of theirs back to
+			// back is not the rotation failing; it is what a shelf that is half
+			// one artist sounds like.
+			if natural < typical {
+				windows[creator] = 0
+				continue
+			}
+			if natural < env.separationCreator {
+				windows[creator] = natural
+			}
+		}
+		if len(windows) > 0 {
+			env.separationByCreator = windows
+		}
+	}
 	env.separationFamily = fit(env.separationFamily, len(families))
 	env.separationItem = fit(env.separationItem, items)
+	env.separationTurn = turnsForShuffledSources(candidates, typical)
 	return env
+}
+
+// queueTail is how much of a shuffled source stays in hand.
+//
+// The queue is expressed as a separation window — a track that may not air
+// again until its playlist has run cannot come round while others are still
+// waiting — which needs no stored cursor, no shuffle seed, and nothing that can
+// drift out of step with what actually went to air. The play log already knows
+// what has been played; this is the right question to ask it.
+//
+// But a window set to the WHOLE turn releases tracks one at a time, in the
+// order they were played, so exactly one is ever eligible and the second pass
+// replays the first pass note for note. That is not a shuffle, it is a loop,
+// and it is the same trap rotationHeadroom exists to keep the separation rules
+// out of. A strict shuffle bag has the identical problem at the end of every
+// cycle — when one card is left, the "random" pick is forced.
+//
+// So a tail of the playlist stays in hand and gets shuffled back in: you will
+// not hear a record again until nearly all the others have been, and which of
+// the remaining few comes next is a real choice, every time, on every pass.
+const queueTailShare = 0.10
+
+// minQueueChoices is the floor under that tail, so a twenty-track playlist has
+// something to choose between rather than becoming the loop by a different
+// route.
+const minQueueChoices = 3
+
+// turnsForShuffledSources is how long a shuffled source may hold each of its
+// items back — its full running time, less the tail kept in hand.
+//
+// Summed rather than counted, because a playlist is not uniform and the turn is
+// how long it actually RUNS. Items of unknown length count as typical, which is
+// the best available guess and keeps one unprobed file from shortening the
+// queue for everything else.
+func turnsForShuffledSources(candidates []Candidate, typical time.Duration) map[string]time.Duration {
+	total := map[string]time.Duration{}
+	count := map[string]int{}
+	for _, candidate := range candidates {
+		if !candidate.Traits.Shuffled || candidate.Ref == "" {
+			continue
+		}
+		length := candidate.Duration
+		if length <= 0 {
+			length = typical
+		}
+		total[candidate.SourceID] += length
+		count[candidate.SourceID]++
+	}
+	if len(total) == 0 {
+		return nil
+	}
+	turns := make(map[string]time.Duration, len(total))
+	for sourceID, runtime := range total {
+		items := count[sourceID]
+		if items <= minQueueChoices {
+			// Fewer records than the tail we would hold back. Nothing here can
+			// be kept apart from itself for a turn, so nothing is.
+			continue
+		}
+		tail := int(float64(items) * queueTailShare)
+		if tail < minQueueChoices {
+			tail = minQueueChoices
+		}
+		turns[sourceID] = time.Duration(float64(runtime) * float64(items-tail) / float64(items))
+	}
+	if len(turns) == 0 {
+		return nil
+	}
+	return turns
 }
 
 // typicalDuration is the median length of what is on offer, which is the right

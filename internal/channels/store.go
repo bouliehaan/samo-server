@@ -701,6 +701,72 @@ func LastAiredBySource(ctx context.Context, db *sql.DB, channelID string, window
 	return out, rows.Err()
 }
 
+// LastLongFormBySource is when each source last put an ENORMOUS item on air.
+//
+// Distinct from LastAiredBySource because the rest a giant earns is paid for by
+// the giant, not by the show. A feed that publishes the occasional three-hour
+// special and a great many ordinary episodes should step back after the special
+// and not after the ordinary ones, so the question is about the airing rather
+// than about the show's usual habits.
+//
+// Rows rather than a MAX(), because the end matters: a four-hour episode that
+// started four hours ago finished a second ago, and the rest runs from when the
+// listener got their time back. Giants are rare, so this is a handful of rows.
+func LastLongFormBySource(
+	ctx context.Context,
+	db *sql.DB,
+	channelID string,
+	minDuration, window time.Duration,
+	now time.Time,
+) (map[string]LongFormAiring, error) {
+	channelID = strings.TrimSpace(channelID)
+	if channelID == "" {
+		return nil, ErrInvalidID
+	}
+	if minDuration <= 0 {
+		return map[string]LongFormAiring{}, nil
+	}
+	if window <= 0 {
+		window = 90 * 24 * time.Hour
+	}
+	cutoff := clockOr(now).Add(-window).Format(time.RFC3339)
+	rows, err := db.QueryContext(ctx, `
+		SELECT source_id, started_at, duration_seconds FROM channel_play_log
+		WHERE channel_id = ? AND source_id <> '' AND started_at > ?
+		  AND duration_seconds >= ?`,
+		channelID, cutoff, int64(minDuration/time.Second),
+	)
+	if err != nil {
+		return nil, fmt.Errorf("query last long form by source: %w", err)
+	}
+	defer rows.Close()
+	out := map[string]LongFormAiring{}
+	for rows.Next() {
+		var sourceID, startedAt string
+		var durationSeconds int64
+		if err := rows.Scan(&sourceID, &startedAt, &durationSeconds); err != nil {
+			return nil, fmt.Errorf("scan last long form: %w", err)
+		}
+		began := parseStoredTime(startedAt)
+		if began.IsZero() {
+			continue
+		}
+		length := time.Duration(durationSeconds) * time.Second
+		if ended := began.Add(length); ended.After(out[sourceID].EndedAt) {
+			out[sourceID] = LongFormAiring{EndedAt: ended, Length: length}
+		}
+	}
+	return out, rows.Err()
+}
+
+// LongFormAiring is one enormous item that went out: when it finished, and how
+// much of the day it took. The length is carried because the rest a show owes
+// afterwards is priced by it.
+type LongFormAiring struct {
+	EndedAt time.Time
+	Length  time.Duration
+}
+
 // PlayTailEntry is one row of the channel's recent history, newest first.
 type PlayTailEntry struct {
 	SourceID string

@@ -6,8 +6,10 @@ import (
 	"errors"
 	"fmt"
 	"hash/fnv"
+	"io"
 	"log"
 	"math/rand"
+	"net/http"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -214,6 +216,22 @@ func (s *Scheduler) PeekItem(ctx context.Context, channelID string) (PlaybackIte
 	return item, err
 }
 
+// PeekItemAt answers "what will be playing at this moment", for a moment that
+// has not arrived yet.
+//
+// The streamer asks a few seconds before a booked show so it can have the
+// station connected and answering by the time the hour turns. Asking "what
+// should play now" would answer about the programme still on air, which is the
+// wrong question and would warm up the wrong source.
+//
+// Deterministic against the real decision: the seed is derived from the second
+// being decided for, so the peek and the decision that follows at that second
+// agree unless the world itself changed in between.
+func (s *Scheduler) PeekItemAt(ctx context.Context, channelID string, at time.Time) (PlaybackItem, error) {
+	item, _, err := s.decideAt(ctx, channelID, at, false)
+	return item, err
+}
+
 // Explain returns what would play right now together with the full record of
 // how that answer was reached.
 func (s *Scheduler) Explain(ctx context.Context, channelID string) (Decision, error) {
@@ -222,6 +240,13 @@ func (s *Scheduler) Explain(ctx context.Context, channelID string) (Decision, er
 }
 
 func (s *Scheduler) decide(ctx context.Context, channelID string, commit bool) (PlaybackItem, Decision, error) {
+	return s.decideAt(ctx, channelID, time.Time{}, commit)
+}
+
+// decideAt runs a decision for a given moment. A zero moment means now, which
+// is every caller except the one warming a source for a boundary that has not
+// arrived.
+func (s *Scheduler) decideAt(ctx context.Context, channelID string, at time.Time, commit bool) (PlaybackItem, Decision, error) {
 	if s.deps.DB == nil {
 		return PlaybackItem{}, Decision{}, errors.New("scheduler has no database")
 	}
@@ -230,7 +255,11 @@ func (s *Scheduler) decide(ctx context.Context, channelID string, commit bool) (
 		return PlaybackItem{}, Decision{}, err
 	}
 
-	now := s.deps.now().In(engine.location())
+	now := at
+	if now.IsZero() {
+		now = s.deps.now()
+	}
+	now = now.In(engine.location())
 	engine.Rand = rand.New(rand.NewSource(decisionSeed(engine.Plan, channelID, now)))
 
 	item, decision, next, err := engine.Decide(ctx, now, state)
@@ -243,6 +272,9 @@ func (s *Scheduler) decide(ctx context.Context, channelID string, commit bool) (
 		}
 		// BACK is spent once. Reading it without consuming it is what lets the
 		// watchdog peek without stealing the listener's instruction.
+		if s.deps.Skips.PreferredRef(channelID) != "" {
+			s.deps.Skips.ClearPreferredRef(channelID)
+		}
 		if s.deps.Skips.PreferredSource(channelID) != "" {
 			s.deps.Skips.ClearPreferredSource(channelID)
 		}
@@ -307,12 +339,21 @@ func (s *Scheduler) PlanFor(ctx context.Context, channel Channel, sources []Sour
 		s.deps.logf("channel %s: stored plan is not usable, falling back to the derived one: %v",
 			channel.ID, err)
 	}
-	if ok {
-		return stored, nil
-	}
 	rules, err := ListScheduleRules(ctx, s.deps.DB, channel.ID)
 	if err != nil {
 		return Plan{}, err
+	}
+	if ok {
+		// A booked show added after the plan was saved still has to go out.
+		// The plan says what the station IS; the schedule says what is booked,
+		// and the two are kept in step here rather than at save time — save
+		// time is a moment, and the schedule keeps changing after it.
+		adopted, added := stored.AdoptScheduleRules(rules, sources)
+		if len(added) > 0 {
+			s.deps.logf("channel %s: booked slots not in the stored plan, adopting: %s",
+				channel.ID, strings.Join(added, ", "))
+		}
+		return adopted, nil
 	}
 	return DerivePlan(channel, sources, rules, s.deps.talkShare(channel)), nil
 }
@@ -344,6 +385,37 @@ func filterEnabledSources(items []Source) []Source {
 	return out
 }
 
+// NextCutIn is when the next appointment that cuts in is due.
+//
+// The streamer used to find this out by asking every fifteen seconds whether
+// the world had changed, which meant a booked show started up to fifteen
+// seconds late before ffmpeg had even been asked to begin — and radio is
+// expected to run to the second. The time is already known; there is no reason
+// to discover it by polling.
+//
+// Reports only appointments that CUT IN. One that waits for the current item is
+// not a deadline, it is a queue position.
+func (s *Scheduler) NextCutIn(ctx context.Context, channelID string) (time.Time, bool) {
+	engine, _, err := s.engineFor(ctx, channelID)
+	if err != nil {
+		return time.Time{}, false
+	}
+	loc := engine.location()
+	now := s.deps.now().In(loc)
+	timeline := BuildTimeline(engine.Plan, now, loc)
+	if timeline.Next == nil {
+		return time.Time{}, false
+	}
+	policy := timeline.Next.Policy
+	if policy != "" && policy != StartImmediately {
+		return time.Time{}, false
+	}
+	if !timeline.Next.Start.After(now) {
+		return time.Time{}, false
+	}
+	return timeline.Next.Start, true
+}
+
 // ----- resolving the items that need the outside world -----------------
 
 func (e *Engine) episodeURL(ctx context.Context, ep catalog.PodcastEpisode) (string, error) {
@@ -358,8 +430,70 @@ func (e *Engine) episodeURL(ctx context.Context, ep catalog.PodcastEpisode) (str
 	if strings.TrimSpace(ep.EnclosureURL) == "" {
 		return "", errors.New("episode has no playable source")
 	}
-	return ep.EnclosureURL, nil
+	return resolveEnclosure(ctx, ep.EnclosureURL), nil
 }
+
+// enclosureRedirects is how many hops the station will follow to find the audio.
+//
+// Podcast enclosures are not links to files any more, they are chains of
+// measurement prefixes — podtrac, then pdst.fm, then megaphone, then two
+// analytics vendors, then the CDN. ffmpeg gives up at eight and exits 1, so an
+// episode that plays perfectly well in the app is simply dead on the channel:
+// the item produces no audio, the station moves on, and the only evidence is
+// "exit status 1".
+//
+// Following them here instead means ffmpeg is handed the thing at the end.
+const enclosureRedirects = 20
+
+// enclosureClient follows redirects further than ffmpeg will, and identifies
+// itself: a few hosts refuse a request with no user agent.
+var enclosureClient = &http.Client{
+	Timeout: 20 * time.Second,
+	CheckRedirect: func(req *http.Request, via []*http.Request) error {
+		if len(via) >= enclosureRedirects {
+			return fmt.Errorf("stopped after %d redirects", enclosureRedirects)
+		}
+		return nil
+	},
+}
+
+// resolveEnclosure walks a tracking-prefix chain to the audio at the end of it.
+//
+// Best effort by design: anything unexpected returns the original URL, so this
+// can only ever turn an episode that would not play into one that does. The
+// request asks for a single byte, so nothing is downloaded to find out.
+func resolveEnclosure(ctx context.Context, raw string) string {
+	trimmed := strings.TrimSpace(raw)
+	if trimmed == "" || !strings.HasPrefix(strings.ToLower(trimmed), "http") {
+		return raw
+	}
+	ctx, cancel := context.WithTimeout(ctx, 20*time.Second)
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, trimmed, nil)
+	if err != nil {
+		return raw
+	}
+	req.Header.Set("User-Agent", enclosureUserAgent)
+	req.Header.Set("Range", "bytes=0-0")
+	resp, err := enclosureClient.Do(req)
+	if err != nil {
+		return raw
+	}
+	defer func() {
+		_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 1<<10))
+		_ = resp.Body.Close()
+	}()
+	if resp.StatusCode >= 400 || resp.Request == nil || resp.Request.URL == nil {
+		return raw
+	}
+	if final := resp.Request.URL.String(); final != "" {
+		return final
+	}
+	return raw
+}
+
+// enclosureUserAgent is what the station calls itself when fetching audio.
+const enclosureUserAgent = "samo-radio/1.0 (+https://github.com/bouliehaan/samo-server)"
 
 // resolveLiveStream returns the live URL configured for the source.
 func (e *Engine) resolveLiveStream(src Source) (PlaybackItem, error) {

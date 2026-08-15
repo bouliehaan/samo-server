@@ -197,6 +197,10 @@ type PlaybackItem struct {
 	Category    CategoryID    `json:"category,omitempty"`
 	MaxDuration time.Duration `json:"-"`
 	Live        bool          `json:"live,omitempty"`
+	// FadeOut is how long a fade to run into the end of MaxDuration, for an
+	// item the station picked knowing the clock would take it. Zero — every
+	// ordinary item — ends where its audio ends and is never faded.
+	FadeOut time.Duration `json:"-"`
 	// BlockID names the programming block this item was chosen for, and is
 	// recorded so "what was the station doing at the time" survives the
 	// decision.
