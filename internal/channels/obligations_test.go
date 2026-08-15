@@ -286,3 +286,56 @@ func TestAFreshCycleWorksThroughWhatIsOwedThenHandsOver(t *testing.T) {
 			s.state.BlockID, order)
 	}
 }
+
+// Pressing skip spends one surfacing, and the tier decides what that costs.
+//
+// Jacob's rule: "if I skip a podcast it should count for the listen credit —
+// because if it's A or S tier maybe I just don't wanna listen to it in that
+// moment, but I'll wanna listen to it. But if it's B tier or lower, I prolly
+// don't wanna hear it again."
+//
+// That falls straight out of the credit model. A skip is one surfacing: a show
+// worth two has one left and comes round again; a show worth one is settled.
+func TestSkippingSpendsOneSurfacing(t *testing.T) {
+	policy := FreshnessPolicy{Surfacings: map[string]int{"S": 2, "A": 2}}
+	now := time.Date(2026, 8, 11, 10, 0, 0, 0, time.UTC)
+
+	skip := func(tier Tier) Obligation {
+		o := Obligation{
+			Tier: tier, State: ObligationPending,
+			SettleAt:  policy.SurfacingsFor(tier),
+			ExpiresAt: now.Add(48 * time.Hour),
+		}
+		// What the skip button does: credit one full surfacing.
+		o.Credit += 1
+		settle(&o, now)
+		return o
+	}
+
+	// Top tier: skipped once, still owed — you said not now, not never.
+	if got := skip(TierS); got.State != ObligationPending {
+		t.Fatalf("skipping an S-tier episode settled it outright (%s); it should come round again", got.State)
+	}
+	if got := skip(TierA); got.State != ObligationPending {
+		t.Fatalf("skipping an A-tier episode settled it outright (%s)", got.State)
+	}
+
+	// B and below: skipped means done.
+	for _, tier := range []Tier{TierB, TierC, TierD} {
+		if got := skip(tier); got.State != ObligationSatisfied {
+			t.Fatalf("skipping a %s-tier episode left it owed (%s); it will come back and nag",
+				tier, got.State)
+		}
+	}
+
+	// And a SECOND skip finishes off even the top tier.
+	twice := Obligation{Tier: TierS, State: ObligationPending,
+		SettleAt: policy.SurfacingsFor(TierS), ExpiresAt: now.Add(48 * time.Hour)}
+	twice.Credit += 1
+	settle(&twice, now)
+	twice.Credit += 1
+	settle(&twice, now)
+	if twice.State != ObligationSatisfied {
+		t.Fatalf("skipping an S-tier episode twice still left it owed (%s)", twice.State)
+	}
+}

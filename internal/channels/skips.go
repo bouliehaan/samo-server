@@ -41,7 +41,10 @@ type SkipRegistry struct {
 	// the ordinary ordering guarantees it lands somewhere else, because what
 	// just played is by definition the most recently aired thing there is.
 	prefer map[string]string
-	now    func() time.Time
+	// preferRef is the same hint one level finer: the exact item BACK asked
+	// for. The source is only the fallback for when that item has gone.
+	preferRef map[string]string
+	now       func() time.Time
 }
 
 func NewSkipRegistry(now func() time.Time) *SkipRegistry {
@@ -49,9 +52,10 @@ func NewSkipRegistry(now func() time.Time) *SkipRegistry {
 		now = func() time.Time { return time.Now().UTC() }
 	}
 	return &SkipRegistry{
-		prefer: map[string]string{},
-		until:  map[string]time.Time{},
-		now:    now,
+		prefer:    map[string]string{},
+		preferRef: map[string]string{},
+		until:     map[string]time.Time{},
+		now:       now,
 	}
 }
 
@@ -72,6 +76,42 @@ func (r *SkipRegistry) RefSuppressed(itemRef string) bool {
 		return false
 	}
 	return r.Suppressed(refKey(itemRef))
+}
+
+// PreferRef asks the next pick to be one SPECIFIC item.
+//
+// What BACK actually means. Preferring the source instead was the bug: on a
+// podcast with a hundred episodes, "play the thing I just heard" narrowed the
+// field to that show and then re-scored across all of it, so the button
+// returned a different episode almost every time. The play log knows exactly
+// which item it was; the hint has to carry that, not the show it came from.
+func (r *SkipRegistry) PreferRef(channelID, itemRef string) {
+	if r == nil || strings.TrimSpace(channelID) == "" || strings.TrimSpace(itemRef) == "" {
+		return
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.preferRef[channelID] = itemRef
+}
+
+// PreferredRef reads the hint without consuming it.
+func (r *SkipRegistry) PreferredRef(channelID string) string {
+	if r == nil {
+		return ""
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.preferRef[channelID]
+}
+
+// ClearPreferredRef spends the hint.
+func (r *SkipRegistry) ClearPreferredRef(channelID string) {
+	if r == nil {
+		return
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	delete(r.preferRef, channelID)
 }
 
 // PreferSource asks the next pick to stay on a source if it can.

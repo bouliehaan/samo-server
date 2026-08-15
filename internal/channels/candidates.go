@@ -248,6 +248,13 @@ func (e *Engine) enumeratePodcast(ctx context.Context, src Source, base Candidat
 		if !rerunCutoff.IsZero() && episode.PublishedAt != nil && episode.PublishedAt.Before(rerunCutoff) {
 			continue
 		}
+		// Too short to be programming — an announcement, a trailer, a "we are
+		// on break" post. Never applied to items of unknown length: unmeasured
+		// is not the same as short.
+		if floor := e.Plan.minItem(); floor > 0 && episode.DurationSeconds > 0 &&
+			time.Duration(episode.DurationSeconds)*time.Second < floor {
+			continue
+		}
 		// A feed that says an episode publishes tomorrow is not offering the
 		// station something to play today. Rare, but it happens, and an
 		// embargoed episode surfacing early is the kind of thing that only ever
@@ -296,10 +303,16 @@ func (e *Engine) enumeratePlaylist(src Source, base Candidate, env enumerationCo
 	if playlistID == "" {
 		return nil
 	}
+	// The whole playlist, every time, and deliberately not searchWindow'd.
+	//
+	// A shuffled source's queue IS its candidate set: "every song once before
+	// any of them twice" is a claim about the playlist, and it cannot be
+	// checked against two thirds of one. Truncating here is also what made the
+	// tail of a playlist unplayable in the first place. The cost is a slice of
+	// an in-memory projection — no files, no queries, no network — so a
+	// thousand-track playlist is a thousand struct copies, not a thousand of
+	// anything expensive.
 	tracks := e.Catalog.MusicTracksForPlaylist(playlistID)
-	if len(tracks) > env.searchDepth {
-		tracks = tracks[:env.searchDepth]
-	}
 	out := make([]Candidate, 0, len(tracks))
 	for index := range tracks {
 		track := tracks[index]
@@ -319,6 +332,41 @@ func (e *Engine) enumeratePlaylist(src Source, base Candidate, env enumerationCo
 			candidate.Creator = firstNonEmpty(track.DisplayArtist, firstArtistName(track), base.Creator)
 		}
 		out = append(out, candidate)
+	}
+	return out
+}
+
+// searchWindow is which slice of a collection one decision looks at.
+//
+// searchDepth exists to bound what a decision costs, and taking the first N is
+// the right way to spend it only when the order MEANS something. Episodes are
+// sorted newest-first, so the first two hundred are the two hundred most recent
+// — a real answer to "what should this show offer today".
+//
+// A playlist has no such ordering. Its tracks come back in playlist position,
+// so tracks[:200] on a three-hundred-song playlist does not sample it, it
+// deletes the last hundred songs: never enumerated, never scored, never
+// rejected, absent from the record entirely. Which hundred is decided by where
+// they happen to sit in the list, which is why adding a block of one artist to
+// the end of a playlist makes that artist disappear from the station.
+//
+// So the window rotates instead of anchoring. The cost stays exactly what
+// searchDepth says it is, and everything comes into view within one turn.
+func searchWindow[T any](items []T, depth int, now time.Time) []T {
+	if depth <= 0 || len(items) <= depth {
+		return items
+	}
+	// One step a minute. Fast enough that a full turn takes hours rather than
+	// days, slow enough that consecutive decisions see almost the same field —
+	// the rotation is there to make everything reachable, not to be a second
+	// source of randomness on top of the weighted pick.
+	offset := int((now.Unix() / 60) % int64(len(items)))
+	if offset < 0 {
+		offset += len(items)
+	}
+	out := make([]T, 0, depth)
+	for i := 0; i < depth; i++ {
+		out = append(out, items[(offset+i)%len(items)])
 	}
 	return out
 }
@@ -344,10 +392,11 @@ func (e *Engine) enumerateFiles(src Source, base Candidate, env enumerationConte
 	if err != nil || len(files) == 0 {
 		return nil
 	}
+	// Sorted for a stable order, then rotated for the same reason a playlist is:
+	// a five-thousand-file spot pool would otherwise only ever play the two
+	// hundred whose names sort first.
 	sort.Strings(files)
-	if len(files) > env.searchDepth {
-		files = files[:env.searchDepth]
-	}
+	files = searchWindow(files, env.searchDepth, env.now)
 	out := make([]Candidate, 0, len(files))
 	for _, file := range files {
 		candidate := base

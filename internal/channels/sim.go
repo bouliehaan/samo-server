@@ -294,15 +294,24 @@ func buildSimReport(engine *Engine, result SimResult, from, to time.Time) SimRep
 		}
 		bySource[label] += step.Length
 
+		// Airtime is credited to whoever made it, always — that column is a
+		// fact about the week. Whether two in a row is a FAULT depends on
+		// whether the station separates on creator at all: a host presenting
+		// twice inside an hour is the station repeating itself, while two
+		// records by one artist is a shuffled playlist showing its shape, and
+		// counting the second as a defect makes the report cry wolf on every
+		// music station.
 		creator := strings.TrimSpace(step.Item.Artist)
-		if creator == "" {
-			if src, ok := engine.source(step.Item.SourceID); ok && TraitsFor(src).HasCreator {
+		spaced := false
+		if src, ok := engine.source(step.Item.SourceID); ok && TraitsFor(src).HasCreator {
+			spaced = true
+			if creator == "" {
 				creator = CreatorOf(src)
 			}
 		}
 		if creator != "" {
 			byCreator[creator] += step.Length
-			if index > 0 && creator == lastCreator {
+			if spaced && index > 0 && creator == lastCreator {
 				report.BackToBackCreator++
 				if len(report.BackToBackWhen) < 8 {
 					report.BackToBackWhen = append(report.BackToBackWhen, fmt.Sprintf(

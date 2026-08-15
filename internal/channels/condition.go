@@ -41,6 +41,9 @@ type ConditionContext struct {
 	PoolAvailable func(poolID string) bool
 	// ObligationsPending is how many things the station currently owes.
 	ObligationsPending int
+	// EnteredToday is how many times each block has already been entered in
+	// this listening day, for the `maxPerDay` caps.
+	EnteredToday map[string]int
 }
 
 // ParseCondition validates and compiles a condition. An empty string is always

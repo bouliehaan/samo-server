@@ -441,3 +441,529 @@ func withShowTitle(e catalog.PodcastEpisode, title string) catalog.PodcastEpisod
 	e.PodcastTitle = title
 	return e
 }
+
+// A feed carries things that are not episodes.
+//
+// "Dr. Drew After Dark Has Ended" is sixty seconds of announcement, and to the
+// scheduler it looked like an ideal short item — which made it perfect for the
+// gap before a booked show. The slot most likely to be filled with an
+// announcement was the one right before something you were waiting for.
+func TestAnnouncementsAreNotProgramming(t *testing.T) {
+	now := time.Date(2026, 8, 11, 21, 36, 0, 0, time.UTC)
+
+	show := podcastSource("pod1", "Dr. Drew After Dark", "p1")
+	cat := &stubCatalog{episodes: map[string][]catalog.PodcastEpisode{
+		"p1": {
+			episode("ended", "Dr. Drew After Dark Has Ended", now.AddDate(0, 0, -20), 1),
+			episode("real", "A real episode", now.AddDate(0, 0, -25), 62),
+			// Length unknown — must never be dropped on a guess.
+			episode("unmeasured", "An episode nobody has probed", now.AddDate(0, 0, -30), 0),
+		},
+	}}
+	plan := Plan{
+		Version:    PlanVersion,
+		Categories: []CategoryDef{{ID: "talk", Target: 1}},
+		MinItem:    "5m",
+		Pools:      []Pool{{ID: "talk", Match: &PoolMatch{Category: "talk"}}},
+		Blocks:     []Block{{ID: "general", Default: true, Pools: []PoolRef{{Pool: "talk"}}}},
+	}
+	s := newStation(t, plan, []Source{show}, cat, now)
+
+	refs := map[string]bool{}
+	for _, candidate := range s.engine.Enumerate(context.Background(),
+		ProgrammingIntent{Pools: []PoolRef{{Pool: "talk"}}}, s.env()) {
+		refs[candidate.Ref] = true
+	}
+	if refs["episode:ended"] {
+		t.Fatal("a one-minute announcement is still being offered as programming")
+	}
+	if !refs["episode:real"] {
+		t.Fatal("the floor dropped a real episode")
+	}
+	if !refs["episode:unmeasured"] {
+		t.Fatal("an episode of unknown length was dropped — unmeasured is not short")
+	}
+}
+
+// A library that is mostly one artist is a statement of taste.
+//
+// Separation was fitted to the NUMBER of artists — a hundred and fifteen of
+// them can obviously be kept ninety minutes apart — and was blind to the shape
+// of the collection. Jacob's playlist is 35% Elvis on purpose, and holding
+// Elvis to the same spacing as an artist with one track meant the station spent
+// its time refusing to play what it had mostly been given.
+func TestADominantArtistIsNotHeldToTheSameSpacing(t *testing.T) {
+	now := time.Date(2026, 8, 11, 14, 0, 0, 0, time.UTC)
+
+	candidates := []Candidate{}
+	add := func(ref, artist string) {
+		candidates = append(candidates, Candidate{
+			Ref: ref, Title: ref, SourceID: "mus1", Category: "music",
+			Creator: artist, Duration: 4 * time.Minute,
+			Traits: Traits{HasCreator: true},
+		})
+	}
+	// The real shape: 132 of 372 are Elvis, the rest spread over many artists.
+	for i := 0; i < 132; i++ {
+		add("elvis-"+strconv.Itoa(i), "Elvis Presley")
+	}
+	for i := 0; i < 240; i++ {
+		add("other-"+strconv.Itoa(i), "Artist "+strconv.Itoa(i%114))
+	}
+
+	env := constraintEnv{
+		now:               now,
+		separationCreator: 90 * time.Minute,
+		lastByCreator:     map[string]time.Time{},
+		lastByRef:         map[string]time.Time{},
+		lastBySource:      map[string]time.Time{},
+		lastByShow:        map[string]time.Time{},
+		airings:           map[string]int{},
+		lastAirings:       map[string]time.Time{},
+		listened:          map[string]bool{},
+		categoriesPresent: map[CategoryID]int{"music": 1},
+	}
+	fitted := fitSeparationToLibrary(env, candidates)
+
+	elvis, ok := fitted.separationByCreator["Elvis Presley"]
+	if !ok {
+		t.Fatal("the artist who is a third of the library got no allowance at all")
+	}
+	if elvis >= 30*time.Minute {
+		t.Fatalf("Elvis is still held %s apart — a third of the playlist cannot be that rare", elvis)
+	}
+	t.Logf("Elvis: %s apart (configured %s)", elvis.Round(time.Minute), fitted.separationCreator)
+
+	// A one-track artist keeps the full window — this must only ever relax.
+	if _, loosened := fitted.separationByCreator["Artist 7"]; loosened {
+		t.Fatal("a rare artist was loosened; the rule should only relax for dominant ones")
+	}
+
+	// And Elvis played ten minutes ago is still refused.
+	fitted.lastByCreator["Elvis Presley"] = now.Add(-2 * time.Minute)
+	for _, rule := range standardConstraints() {
+		if rule.Name != "creatorSeparation" {
+			continue
+		}
+		if ok, _ := rule.Check(candidates[0], fitted); ok {
+			t.Fatal("two Elvis tracks two minutes apart is not separation at all")
+		}
+	}
+}
+
+// A duration the plan cannot parse must be refused, not quietly defaulted.
+//
+// Every duration is read through durationOr, which swallows the error and
+// returns the DEFAULT — so an unvalidated field does not fail, it means
+// something else. longForm.rest was set to "21d", which Go's parser rejects
+// because it has no day unit, and became the seven-day default: the giant aired
+// three times in three weeks instead of once, and the plan called itself valid
+// the whole time.
+func TestAPlanRefusesDurationsItCannotRead(t *testing.T) {
+	base := func() Plan {
+		return Plan{
+			Version:    PlanVersion,
+			Categories: []CategoryDef{{ID: "talk", Target: 1}},
+			Pools:      []Pool{{ID: "talk", Match: &PoolMatch{Category: "talk"}}},
+			Blocks:     []Block{{ID: "general", Default: true, Pools: []PoolRef{{Pool: "talk"}}}},
+		}
+	}
+
+	// Days now parse, because scheduling talks in them.
+	got, err := parseDuration("21d")
+	if err != nil || got != 21*24*time.Hour {
+		t.Fatalf(`parseDuration("21d") = %v, %v`, got, err)
+	}
+
+	bad := base()
+	bad.LongForm = LongFormPolicy{Rest: "3 weeks"}
+	if err := bad.Validate(); err == nil {
+		t.Fatal("a plan with an unreadable longForm.rest was accepted, and would silently use the default")
+	}
+
+	// "never" is a real answer: only a NEW episode puts a giant on air.
+	forever := base()
+	forever.LongForm = LongFormPolicy{Threshold: "2h", Rest: "never"}
+	if err := forever.Validate(); err != nil {
+		t.Fatalf(`longForm.rest "never" should be valid: %v`, err)
+	}
+	if forever.LongForm.rest() < 50*365*24*time.Hour {
+		t.Fatalf("never should be effectively forever, got %s", forever.LongForm.rest())
+	}
+}
+
+// "never" is not a ban. A NEW episode still goes out.
+//
+// That is the whole point of the setting: Jacob wants Hardcore History when Dan
+// puts one out and not otherwise. If "never" silenced the show completely it
+// would be the wrong rule with a friendly name.
+func TestANewGiantStillAirsWhenTheShowRestsForever(t *testing.T) {
+	now := time.Date(2026, 8, 11, 10, 0, 0, 0, time.UTC)
+
+	giant := podcastSource("carlin", "Dan Carlin's Hardcore History", "phh")
+	filler := podcastSource("pod1", "Filler", "p1")
+	fill := []catalog.PodcastEpisode{}
+	for index := 0; index < 12; index++ {
+		fill = append(fill, episode("f"+strconv.Itoa(index), "Filler "+strconv.Itoa(index),
+			now.AddDate(0, 0, -40-index), 30))
+	}
+	cat := &stubCatalog{episodes: map[string][]catalog.PodcastEpisode{
+		"phh": {
+			// Brand new: this is news, not a rerun.
+			episode("hh-new", "Mania for Subjugation VII", now.Add(-4*time.Hour), 231),
+			episode("hh-old", "An old one", now.AddDate(0, 0, -300), 240),
+		},
+		"p1": fill,
+	}}
+	plan := Plan{
+		Version:    PlanVersion,
+		Categories: []CategoryDef{{ID: "talk", Target: 1}},
+		Pools:      []Pool{{ID: "talk", Match: &PoolMatch{Category: "talk"}}},
+		Blocks: []Block{{ID: "fresh", Default: true,
+			Pools:   []PoolRef{{Pool: "talk"}},
+			Pattern: []PatternStep{{Want: WantObligation}}}},
+		LongForm: LongFormPolicy{Threshold: "2h", Rest: "never"},
+	}
+	s := newStation(t, plan, []Source{giant, filler}, cat, now)
+
+	item, decision := s.decide()
+	if item.ItemRef != "episode:hh-new" {
+		t.Fatalf("a brand-new giant did not air; played %q instead\n%s",
+			item.Title, decision.Explain())
+	}
+	// And once the new one has been surfaced, the show goes quiet again — the
+	// back catalogue does not inherit its turn.
+	s.play()
+	for step := 0; step < 8; step++ {
+		next, why := s.step()
+		if next.ItemRef == "episode:hh-old" {
+			t.Fatalf("the back catalogue giant aired after the new one:\n%s", why.Explain())
+		}
+	}
+}
+
+// A show booked AFTER the plan was written still has to go out.
+//
+// A stored plan is a snapshot of the schedule at the moment somebody pressed
+// save. Book a show afterwards and the rule exists, the UI lists it ENABLED and
+// the programme grid draws it — while the scheduler, which reads the PLAN, has
+// no block for it. At the appointed hour nothing claims the time and the
+// station falls back to ordinary rotation, with no error anywhere. Jacob's
+// "Lofi Sleep" at 23:00 was invisible to the scheduler for exactly this reason.
+func TestASlotBookedAfterThePlanWasSavedStillAirs(t *testing.T) {
+	lofi := Source{ID: "lofi", ChannelID: "c", Kind: SourceLiveStream, Label: "Lofi Sleep",
+		Enabled: true, Role: RoleShow, Config: map[string]any{"url": "http://example.test/lofi"}}
+
+	plan := Plan{
+		Version:    PlanVersion,
+		Categories: []CategoryDef{{ID: "talk", Target: 1}},
+		Pools:      []Pool{{ID: "talk", Match: &PoolMatch{Category: "talk"}}},
+		Blocks:     []Block{{ID: "general", Default: true, Pools: []PoolRef{{Pool: "talk"}}}},
+	}
+	// Booked later, so the plan has never heard of it.
+	rules := []ScheduleRule{{
+		ID: "csched_lofi", ChannelID: "c", SourceID: "lofi", Label: "Lofi Sleep",
+		WeekdayMask: 127, StartMinute: 23 * 60, EndMinute: 24 * 60, Enabled: true,
+	}}
+
+	adopted, added := plan.AdoptScheduleRules(rules, []Source{lofi})
+	if len(added) != 1 {
+		t.Fatalf("expected the booked slot to be adopted, got %v", added)
+	}
+	if err := adopted.Validate(); err != nil {
+		t.Fatalf("the adopted plan should be valid: %v", err)
+	}
+
+	block, ok := adopted.Block("slot-csched_lofi")
+	if !ok {
+		t.Fatal("no block for the booked slot")
+	}
+	if !block.Enter.Hard || block.Enter.At != "23:00" {
+		t.Fatalf("the adopted slot is not booked where the rule says: %+v", block.Enter)
+	}
+	// Midnight renders as 00:00, and the wrap is handled by the timeline.
+	if block.Exit.At != "00:00" {
+		t.Fatalf("the adopted slot ends at %q, not midnight", block.Exit.At)
+	}
+
+	// At 23:00 it must be what is on air, not the rotation.
+	now := time.Date(2026, 8, 11, 23, 10, 0, 0, time.UTC)
+	timeline := BuildTimeline(adopted, now, time.UTC)
+	got := ResolveBlock(adopted, timeline, ProgramState{}, ConditionContext{}, now)
+	if got.Block.ID != "slot-csched_lofi" {
+		t.Fatalf("at 23:10 the station is in %q, not the booked slot", got.Block.ID)
+	}
+
+	// Adopting twice must not duplicate it.
+	again, addedAgain := adopted.AdoptScheduleRules(rules, []Source{lofi})
+	if len(addedAgain) != 0 || len(again.Blocks) != len(adopted.Blocks) {
+		t.Fatalf("adoption is not idempotent: added %v", addedAgain)
+	}
+}
+
+// Two booked blocks back to back must not leave a hole at the join — and must
+// not close it by moving the join.
+//
+// The last ninety seconds of a music block, where no track fits before the news
+// hour, used to be handed to ordinary programming — which was asked to fill
+// ninety seconds with a forty-minute episode, could not, and went silent at the
+// same minute every single day. The answer to that was to start the news early,
+// which traded dead air for a bulletin that opens before the hour.
+//
+// Neither is necessary. A music hour with a minute left wants one more song,
+// faded out on the hour: the hole is filled with the block's own content and
+// the news still starts at 18:30.
+func TestBackToBackBookedBlocksLeaveNoHole(t *testing.T) {
+	// 18:29, one minute before the news, inside a music block that ends 18:30.
+	now := time.Date(2026, 8, 11, 18, 29, 0, 0, time.UTC)
+
+	music := musicSource("mus1", "House", "pl1")
+	news := Source{ID: "krcc", ChannelID: "c", Kind: SourceLiveStream, Label: "KRCC",
+		Enabled: true, Role: RoleShow, Config: map[string]any{"url": "http://example.test/krcc"}}
+	songs := []catalog.MusicTrack{}
+	for index := 0; index < 40; index++ {
+		// Every track longer than the sliver that is left.
+		songs = append(songs, track("t"+strconv.Itoa(index), "Song "+strconv.Itoa(index),
+			"Artist "+strconv.Itoa(index%20), 240))
+	}
+
+	plan := Plan{
+		Version:    PlanVersion,
+		Categories: []CategoryDef{{ID: "talk", Target: 1}, {ID: "music", Target: 0}},
+		Pools: []Pool{
+			{ID: "music", Match: &PoolMatch{Category: "music"}},
+			{ID: "news", SourceIDs: []string{"krcc"}},
+			{ID: "talk", Match: &PoolMatch{Category: "talk"}},
+		},
+		Blocks: []Block{
+			{ID: "general", Default: true, Pools: []PoolRef{{Pool: "talk"}}},
+			{ID: "music-hour", Label: "Music hour",
+				Enter: BlockEntry{At: "17:00", Days: "*", Hard: true},
+				Exit:  BlockExit{At: "18:30"}, Next: "general",
+				Pools: []PoolRef{{Pool: "music"}}},
+			{ID: "news-hour", Label: "KRCC",
+				Enter: BlockEntry{At: "18:30", Days: "*", Hard: true, Start: StartImmediately},
+				Exit:  BlockExit{At: "20:00"},
+				Pools: []PoolRef{{Pool: "news"}}},
+		},
+	}
+	cat := &stubCatalog{playlists: map[string][]catalog.MusicTrack{"pl1": songs}}
+	s := newStation(t, plan, []Source{music, news}, cat, now)
+	s.state = ProgramState{BlockID: "music-hour", EnteredAt: now.Add(-89 * time.Minute), ItemCount: 20}
+	// Something has already aired in the slot, so the remaining time is a real
+	// fit constraint again — the opening item of a booked block is allowed to
+	// overrun, and this is not it.
+	s.history.Record(MemoryPlay{
+		SourceID: "mus1", ItemRef: "track:t0", Category: "music", Artist: "Artist 0",
+		StartedAt: now.Add(-4 * time.Minute), EndedAt: now, DurationSeconds: 240,
+	})
+
+	item, decision, _, err := s.engine.Decide(context.Background(), now, s.state)
+	if err != nil {
+		t.Fatalf("dead air at the join between two booked blocks: %v (%s)", err, decision.Error)
+	}
+	if item.SourceID == "krcc" {
+		t.Fatalf("the news started at 18:29 instead of 18:30:\n%s", decision.Explain())
+	}
+	if item.SourceID != "mus1" {
+		t.Fatalf("expected the music hour to hold its own last minute, got %q from %q",
+			item.Title, item.SourceID)
+	}
+	// And it lands ON the join: capped at what is left of the hour, faded
+	// rather than cut off mid-chorus.
+	if item.MaxDuration != time.Minute {
+		t.Fatalf("the last song runs %s; the hour has a minute left", item.MaxDuration)
+	}
+	if item.FadeOut <= 0 {
+		t.Fatalf("a song the clock will take must be faded, got %s", item.FadeOut)
+	}
+}
+
+// A bounded block should not paint itself into a corner.
+//
+// Playing greedily inside a booked hour leaves whatever is left over, and that
+// is eventually ninety seconds — shorter than anything the station owns. A
+// person filling that hour reaches for something that LANDS on the boundary
+// instead of leaving a stub nothing can fill.
+func TestABoundedBlockPicksSomethingThatLandsOnTheBoundary(t *testing.T) {
+	// Ten minutes of a music block left.
+	ceiling := 10 * time.Minute
+	mk := func(ref string, minutes int) Candidate {
+		return Candidate{Ref: ref, Title: ref, SourceID: "mus1", Category: "music",
+			Duration: time.Duration(minutes) * time.Minute}
+	}
+	// Shortest thing available is 2m. An 9m track leaves a 1m stub; a 8m track
+	// leaves 2m, which is playable; a 10m track lands exactly.
+	candidates := []Candidate{
+		mk("nine", 9), mk("eight", 8), mk("ten", 10), mk("two", 2),
+	}
+
+	kept := preferNoStub(candidates, ceiling, nil)
+	refs := map[string]bool{}
+	for _, c := range kept {
+		refs[c.Ref] = true
+	}
+	if refs["nine"] {
+		t.Fatal("kept the choice that leaves a one-minute stub nothing can fill")
+	}
+	for _, want := range []string{"eight", "ten", "two"} {
+		if !refs[want] {
+			t.Fatalf("dropped %q, which leaves a playable remainder", want)
+		}
+	}
+
+	// When EVERY choice leaves a stub, the station still plays.
+	onlyStubs := []Candidate{mk("a", 9), mk("b", 9)}
+	if got := preferNoStub(onlyStubs, ceiling, nil); len(got) != 2 {
+		t.Fatalf("with no clean option the station must still play, got %d candidates", len(got))
+	}
+
+	// Unbounded blocks are untouched.
+	if got := preferNoStub(candidates, 0, nil); len(got) != len(candidates) {
+		t.Fatal("an unbounded block should not be filtered")
+	}
+}
+
+// A six-year-old episode must not be interchangeable with last month's.
+//
+// From the real station, 2026-08-11 13:12. Every one of the thirty contenders
+// was older than the fourteen-day recency horizon, past which the term returned
+// a flat zero — so age had no bearing on the choice at all, the whole band
+// scored alike, and the weighted pick handed the afternoon to a Hardcore
+// History episode Dan Carlin put out years ago. Jacob's words: "hardcore
+// history released that episode several years ago."
+//
+// The station is supposed to play its back catalogue. It is not supposed to be
+// indifferent about how far back.
+func TestAncientBackCatalogueIsNotAContender(t *testing.T) {
+	now := time.Date(2026, 8, 11, 13, 12, 0, 0, time.UTC)
+	sources := []Source{
+		podcastSource("pod1", "Show One", "p1"),
+		podcastSource("pod2", "Show Two", "p2"),
+		musicSource("mus1", "House Playlist", "pl1"),
+	}
+	cat := &stubCatalog{
+		episodes: map[string][]catalog.PodcastEpisode{
+			// Same show, same length, neither ever aired: age is the only thing
+			// separating them.
+			"p1": {
+				episode("recent", "Last month", now.AddDate(0, 0, -20), 40),
+				episode("ancient", "Six years ago", now.AddDate(-6, 0, 0), 40),
+			},
+			"p2": {episode("other", "Another show", now.AddDate(0, 0, -25), 40)},
+		},
+		playlists: map[string][]catalog.MusicTrack{
+			"pl1": {track("t1", "Song one", "Artist A", 210)},
+		},
+	}
+	s := newStation(t, twoCategoryPlan(0.75), sources, cat, now)
+	_, decision := s.decide()
+
+	var recent, ancient *CandidateSummary
+	for index := range decision.Candidates {
+		switch decision.Candidates[index].Ref {
+		case "episode:recent":
+			recent = &decision.Candidates[index]
+		case "episode:ancient":
+			ancient = &decision.Candidates[index]
+		}
+	}
+	if recent == nil || ancient == nil {
+		t.Fatalf("both episodes should have been scored; got %d candidates\n%s",
+			len(decision.Candidates), decision.Explain())
+	}
+	if ancient.Score >= recent.Score {
+		t.Fatalf("a six-year-old episode scored %.3f against last month's %.3f —"+
+			" the scorer has no opinion about age\n%s",
+			ancient.Score, recent.Score, decision.Explain())
+	}
+	if ancient.Contender {
+		t.Fatalf("a six-year-old episode was in the running against last month's"+
+			" (%.3f vs %.3f); the random draw can hand it the afternoon\n%s",
+			ancient.Score, recent.Score, decision.Explain())
+	}
+}
+
+// No room for the new episode means no room for the show.
+//
+// From the real station, 2026-08-11 15:04. Joey Diaz published seventy-one
+// minutes at 09:10 that morning. Fifty-five minutes remained before All Things
+// Considered, so the new episode was refused — "1h11m0s long, but only 55m0s
+// until the next booked slot", which is correct and never bends. The station
+// then played "#244 | UNCLE JOEY'S JOINT with JOEY DIAZ", thirty-three minutes,
+// published June 2023, out of the SAME feed, because that one fit.
+//
+// Jacob: "Why is it just playing an old episode of joey diaz? There's a brand
+// fucking new one and it's playing this one."
+func TestNoRoomForTheNewEpisodeMeansNoRoomForTheShow(t *testing.T) {
+	now := time.Date(2026, 8, 11, 15, 4, 0, 0, time.UTC)
+	sources := []Source{
+		podcastSource("joey", "The Church of What's Happening Now", "pjoey"),
+		podcastSource("other", "Another Show", "pother"),
+		musicSource("mus1", "House Playlist", "pl1"),
+		{ID: "atc", ChannelID: "ch1", Kind: SourceLiveStream, Label: "ATC", Enabled: true,
+			Role: RoleShow, Config: map[string]any{"url": "http://example.test/atc"}},
+	}
+	cat := &stubCatalog{
+		episodes: map[string][]catalog.PodcastEpisode{
+			"pjoey": {
+				// This morning's, and too long for the gap.
+				episode("greyhound", "The Greyhound to Hell", now.Add(-6*time.Hour), 71),
+				// June 2023, and short enough to fit.
+				episode("ep244", "#244 | UNCLE JOEY'S JOINT", now.AddDate(-3, -2, 0), 33),
+			},
+			// Deliberately OLDER than the Joey Diaz rerun, so recency cannot be
+			// what saves this. Without the show rule the 2023 Joey Diaz is the
+			// better-scoring candidate and wins outright.
+			"pother": {episode("other1", "Someone else entirely", now.AddDate(-3, -8, 0), 30)},
+		},
+		playlists: map[string][]catalog.MusicTrack{
+			"pl1": {track("t1", "Song one", "Artist A", 210)},
+		},
+	}
+
+	// His station's shape: talk is the format, music is a separator, and the
+	// general block reaches for spoken word only.
+	plan := Plan{
+		Version: PlanVersion,
+		Seed:    3,
+		// No random draw: the single best-scoring candidate always wins, so the
+		// test measures the rule and not the dice.
+		Selection:  SelectionPolicy{Epsilon: -1},
+		Categories: []CategoryDef{{ID: "talk", Target: 1}, {ID: "music", Target: 0}},
+		Pools: []Pool{
+			{ID: "talk", Match: &PoolMatch{Category: "talk"}},
+			{ID: "music", Match: &PoolMatch{Category: "music"}},
+			{ID: "booked", SourceIDs: []string{"atc"}},
+		},
+		Blocks: []Block{
+			{ID: "general", Label: "General rotation", Default: true,
+				Pools: []PoolRef{{Pool: "talk"}}},
+			{ID: "atc", Label: "All Things Considered",
+				Enter: BlockEntry{At: "16:00", Days: "*", Hard: true, Start: StartImmediately},
+				Exit:  BlockExit{At: "17:00"},
+				Pools: []PoolRef{{Pool: "booked"}}, Next: "general"},
+		},
+	}
+
+	s := newStation(t, plan, sources, cat, now)
+	if err := s.engine.Obligations.Notice(context.Background(), []Obligation{{
+		ChannelID: "ch1", ItemRef: "episode:greyhound", Title: "The Greyhound to Hell",
+		SourceID: "joey", Tier: "C", PublishedAt: now.Add(-6 * time.Hour),
+		NoticedAt: now.Add(-6 * time.Hour), ExpiresAt: now.Add(66 * time.Hour),
+		SettleAt: 1,
+	}}, now); err != nil {
+		t.Fatalf("notice: %v", err)
+	}
+
+	item, decision := s.decide()
+	if item.ItemRef == "episode:ep244" {
+		t.Fatalf("refused this morning's 71-minute episode for not fitting the 55-minute gap,"+
+			" then played a 2023 episode of the SAME show\n%s", decision.Explain())
+	}
+	if item.ItemRef == "" {
+		t.Fatalf("played nothing at all — it should have reached for a different show\n%s",
+			decision.Explain())
+	}
+	t.Logf("played %q from %s instead", item.Title, item.SourceID)
+}

@@ -233,3 +233,126 @@ func TestStartupGetsMorePatienceThanAStall(t *testing.T) {
 		t.Fatalf("startup budget (%v) must outlast ffmpeg's own I/O timeout (%v)", startupTimeout, ffmpegTimeout)
 	}
 }
+
+// An item that will not play must not be handed back immediately.
+//
+// Discarding the play-log row keeps a dead item from counting as heard, and the
+// backoff keeps the retry from spinning — but neither tells SELECTION anything,
+// so the next decision picks the same unplayable episode again. On a cycle that
+// alternates break and obligation that produces music, a dead pick nobody
+// hears, music, a dead pick: the station sounds like it has given up on
+// podcasts. Jacob's 09:00 was exactly this, with one bad Shawn Ryan episode.
+func TestAnUnplayableItemIsPassedOver(t *testing.T) {
+	skips := NewSkipRegistry(func() time.Time { return time.Now().UTC() })
+
+	item := PlaybackItem{
+		ItemRef: "episode:dead", Title: "Scott Payne", SourceID: "pod-ryan",
+		SourceLabel: "Shawn Ryan Show", Category: "talk",
+	}
+
+	// What the streamer does when an item produces no audio.
+	if item.ItemRef != "" {
+		skips.SuppressRef(item.ItemRef)
+	}
+	if !skips.RefSuppressed(item.ItemRef) {
+		t.Fatal("a dead item is still on offer, so the next decision picks it again")
+	}
+	// Its siblings are still fine — one bad episode is not a bad show.
+	if skips.Suppressed("pod-ryan") {
+		t.Fatal("one failure should not take the whole show off the air")
+	}
+
+	// But a run of them should.
+	for failures := 1; failures <= deadSourceAfter; failures++ {
+		if failures >= deadSourceAfter {
+			skips.Suppress(item.SourceID, DefaultSkipSuppression)
+		}
+	}
+	if !skips.Suppressed("pod-ryan") {
+		t.Fatalf("after %d failures in a row the station should step off the source",
+			deadSourceAfter)
+	}
+}
+
+// A listener that stalls and then keeps up again must end up LIVE, not
+// permanently late.
+//
+// Jacob's station: chrony-synced server, decisions recorded at exactly
+// 08:00:00, and a booked show he heard thirty seconds after his watch said the
+// hour turned. The scheduler was never the problem — the queue in front of him
+// was. listenerBuffer holds ~40s at 192kbps, both ends of it run at exactly 1x,
+// and nothing in the loop ever reads faster than real time, so every transient
+// the connection suffers is added to the standing delay and never given back.
+//
+// Reverting catchUp fails this: the depth stays where the stall put it.
+func TestASlowListenerCatchesUpInsteadOfStayingLate(t *testing.T) {
+	jitter := jitterChunks(192)
+	lis := &listener{ch: make(chan []byte, listenerBuffer), jitter: jitter}
+
+	// A stall: the HTTP handler is blocked writing to a socket and reads
+	// nothing, while the encoder keeps producing.
+	for i := 0; i < listenerBuffer-1; i++ {
+		if !lis.send([]byte{byte(i)}) {
+			t.Fatalf("chunk %d was refused while there was still room", i)
+		}
+	}
+
+	if depth := len(lis.ch); depth > jitter {
+		t.Fatalf("listener sat %d chunks behind; a jitter buffer must not exceed %d",
+			depth, jitter)
+	}
+
+	// And what survived is the NEWEST audio — catching up means skipping
+	// forward to what the station is playing now, not replaying the backlog.
+	newest := byte(listenerBuffer - 2)
+	var last byte
+	for len(lis.ch) > 0 {
+		chunk := <-lis.ch
+		last = chunk[0]
+	}
+	if last != newest {
+		t.Fatalf("listener rejoined at chunk %d, want the most recent chunk %d", last, newest)
+	}
+}
+
+// The catch-up must not drop a listener that is keeping up perfectly well.
+func TestAHealthyListenerIsNeverDropped(t *testing.T) {
+	lis := &listener{ch: make(chan []byte, listenerBuffer), jitter: jitterChunks(192)}
+	for i := 0; i < listenerBuffer*4; i++ {
+		if !lis.send([]byte{byte(i)}) {
+			t.Fatalf("chunk %d was refused; a listener that never falls behind must not be dropped", i)
+		}
+		// The handler consumes each chunk as it arrives.
+		<-lis.ch
+	}
+	if depth := len(lis.ch); depth != 0 {
+		t.Fatalf("expected a drained queue, got %d chunk(s)", depth)
+	}
+}
+
+// The jitter target is a duration, so the standing delay must be broadly the
+// same at any bitrate. A fixed chunk count would make a 96kbps channel twice as
+// late as a 192kbps one for no stated reason. The floor is allowed to win —
+// see listenerJitterFloor — but nothing else is.
+func TestJitterTargetIsTheSameDelayAtEveryBitrate(t *testing.T) {
+	for _, bitrate := range []int{96, 128, 192, 320} {
+		chunks := jitterChunks(bitrate)
+		perSecond := float64(bitrate) * 1000 / 8
+		queued := time.Duration(float64(chunks) * streamChunk / perSecond * float64(time.Second))
+		allowed := listenerJitterTarget
+		if floor := time.Duration(float64(listenerJitterFloor) * streamChunk / perSecond * float64(time.Second)); floor > allowed {
+			allowed = floor
+		}
+		if queued > allowed {
+			t.Errorf("at %dkbps the queue holds %s, over the %s it is allowed", bitrate, queued, allowed)
+		}
+		// And it must not collapse to nothing, or normal jitter trims constantly.
+		if chunks < listenerJitterFloor {
+			t.Errorf("at %dkbps the depth fell to %d chunks, under the floor %d", bitrate, chunks, listenerJitterFloor)
+		}
+	}
+	// An unset bitrate falls back rather than trimming on every write.
+	if got, want := jitterChunks(0), jitterChunks(defaultBitrateKbps); got != want {
+		t.Errorf("an unset bitrate gave %d chunks, want the %dkbps default of %d", got, defaultBitrateKbps, want)
+	}
+}

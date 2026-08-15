@@ -701,12 +701,42 @@ func (s *Service) Skip(ctx context.Context, channelID string, scope SkipScope) (
 		// that accumulates until nobody can say why the station does anything.
 		if item.ItemRef != "" {
 			s.skips.SuppressRef(item.ItemRef)
+			s.creditSkip(ctx, channelID, item)
 		}
 		if item.SourceID != "" {
 			s.skips.Suppress(item.SourceID, skipSourceStepAside)
 		}
 	}
 	return streamer.skipCurrent(), nil
+}
+
+// creditSkip spends one surfacing on something the listener chose to skip.
+//
+// Pressing skip is not the station failing to reach you — it is the station
+// reaching you and you saying not this. Left uncredited, a skipped episode
+// stays owed, comes back forty-five minutes later, and keeps coming back for as
+// long as its freshness window lasts. Skipping a three-hour podcast should not
+// mean skipping it six more times.
+//
+// One surfacing, not all of them, and that is the whole design: a show set to
+// two surfacings (the ones worth not missing) has one left, so it comes round
+// again later — "not right now" rather than "never". Anything on a single
+// surfacing is settled by the skip, which is what "I probably do not want to
+// hear that again" means. The tier already says which is which; nothing new has
+// to be configured.
+//
+// Credited in FULL regardless of the block's exposure. Exposure answers "could
+// anybody have heard this", and a hand on the skip button is the one piece of
+// evidence that settles that question outright.
+func (s *Service) creditSkip(ctx context.Context, channelID string, item PlaybackItem) {
+	if s.db == nil || item.ItemRef == "" {
+		return
+	}
+	if err := NewSQLObligations(s.db, channelID).Credit(ctx, item.ItemRef, 1, time.Now().UTC()); err != nil {
+		if s.logger != nil {
+			s.logger.Printf("channel %s: could not credit a skip for %s: %v", channelID, item.ItemRef, err)
+		}
+	}
 }
 
 // Previous replays the last thing that actually aired.
@@ -742,10 +772,15 @@ func (s *Service) Previous(ctx context.Context, channelID string) (bool, error) 
 		if entry.SourceID == "" {
 			continue
 		}
-		// Ask the next decision to go back to that source, and clear any
-		// suppression standing in its way — going back is an explicit
-		// instruction and it outranks a skip from ten minutes ago.
+		// Ask the next decision for THAT ITEM, and clear anything standing in
+		// its way — going back is an explicit instruction and it outranks a
+		// skip from ten minutes ago. The source is kept as the fallback for
+		// when the item itself is no longer on offer.
 		s.skips.Clear([]string{entry.SourceID})
+		if entry.ItemRef != "" {
+			s.skips.Clear([]string{refKey(entry.ItemRef)})
+			s.skips.PreferRef(channelID, entry.ItemRef)
+		}
 		s.skips.PreferSource(channelID, entry.SourceID)
 		return streamer.skipCurrent(), nil
 	}

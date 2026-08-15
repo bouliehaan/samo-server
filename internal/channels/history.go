@@ -26,6 +26,9 @@ type History interface {
 	LastAiredBySource(ctx context.Context, window time.Duration, now time.Time) (map[string]time.Time, error)
 	// LastAiredByRef is when it last played each specific item.
 	LastAiredByRef(ctx context.Context, window time.Duration, now time.Time) (map[string]time.Time, error)
+	// LastLongFormBySource is when each source last put an enormous item on
+	// air, which is the event that earns a show its rest.
+	LastLongFormBySource(ctx context.Context, minDuration, window time.Duration, now time.Time) (map[string]LongFormAiring, error)
 	// Tail is the recent running order, newest first. Aggregates cannot answer
 	// questions about runs, and a run is what a listener actually experiences.
 	Tail(ctx context.Context, window time.Duration, limit int, now time.Time) ([]PlayTailEntry, error)
@@ -54,6 +57,10 @@ func (h *sqlHistory) Airtime(ctx context.Context, window time.Duration, now time
 
 func (h *sqlHistory) LastAiredBySource(ctx context.Context, window time.Duration, now time.Time) (map[string]time.Time, error) {
 	return LastAiredBySource(ctx, h.db, h.channelID, window, now)
+}
+
+func (h *sqlHistory) LastLongFormBySource(ctx context.Context, minDuration, window time.Duration, now time.Time) (map[string]LongFormAiring, error) {
+	return LastLongFormBySource(ctx, h.db, h.channelID, minDuration, window, now)
 }
 
 func (h *sqlHistory) LastAiredByRef(ctx context.Context, window time.Duration, now time.Time) (map[string]time.Time, error) {
@@ -156,6 +163,32 @@ func (h *MemoryHistory) LastAiredBySource(_ context.Context, window time.Duratio
 
 func (h *MemoryHistory) LastAiredByRef(_ context.Context, window time.Duration, now time.Time) (map[string]time.Time, error) {
 	return h.lastAired(window, now, func(entry MemoryPlay) string { return entry.ItemRef }), nil
+}
+
+// LastLongFormBySource mirrors the SQL query: the last time each source put
+// something enormous on air, measured from when that item finished.
+func (h *MemoryHistory) LastLongFormBySource(_ context.Context, minDuration, window time.Duration, now time.Time) (map[string]LongFormAiring, error) {
+	out := map[string]LongFormAiring{}
+	if minDuration <= 0 {
+		return out, nil
+	}
+	cutoff := now.Add(-window)
+	for _, entry := range h.entries {
+		if entry.SourceID == "" || entry.StartedAt.Before(cutoff) || entry.StartedAt.After(now) {
+			continue
+		}
+		length := time.Duration(entry.DurationSeconds) * time.Second
+		if length <= 0 && !entry.EndedAt.IsZero() {
+			length = entry.EndedAt.Sub(entry.StartedAt)
+		}
+		if length < minDuration {
+			continue
+		}
+		if ended := entry.StartedAt.Add(length); ended.After(out[entry.SourceID].EndedAt) {
+			out[entry.SourceID] = LongFormAiring{EndedAt: ended, Length: length}
+		}
+	}
+	return out, nil
 }
 
 func (h *MemoryHistory) lastAired(window time.Duration, now time.Time, key func(MemoryPlay) string) map[string]time.Time {

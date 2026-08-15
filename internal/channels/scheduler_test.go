@@ -11,6 +11,11 @@ import (
 
 	"github.com/bouliehaan/samo-server/internal/catalog"
 	"github.com/bouliehaan/samo-server/internal/storage/storagetest"
+	"net/http"
+	"net/http/httptest"
+	"strconv"
+	"strings"
+	"sync"
 )
 
 // The database-backed half: a real schema, real rows, and the scheduler shell
@@ -446,5 +451,110 @@ func TestNormalizeRole(t *testing.T) {
 		if got := NormalizeRole(tc.role, tc.kind, tc.rotation); got != tc.want {
 			t.Fatalf("NormalizeRole(%q, %q, %v) = %q, want %q", tc.role, tc.kind, tc.rotation, got, tc.want)
 		}
+	}
+}
+
+// A podcast enclosure is a chain of measurement prefixes, not a link to a file.
+//
+// podtrac, then pdst.fm, then megaphone, then two analytics vendors, then the
+// CDN. ffmpeg gives up at eight hops and exits 1, so an episode that plays
+// perfectly in the app is dead on the channel — it produces no audio, the
+// station moves on, and the only evidence anywhere is "exit status 1". The
+// Shawn Ryan episode that ate a morning needed exactly eight.
+func TestEnclosureRedirectsAreFollowedPastFFmpegsLimit(t *testing.T) {
+	var mu sync.Mutex
+	hops := 0
+
+	var server *httptest.Server
+	server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("User-Agent") == "" {
+			http.Error(w, "no user agent", http.StatusForbidden)
+			return
+		}
+		mu.Lock()
+		hops++
+		count := hops
+		mu.Unlock()
+		// Twelve prefixes deep — well past what ffmpeg will follow.
+		if count <= 12 {
+			http.Redirect(w, r, server.URL+"/hop"+strconv.Itoa(count), http.StatusFound)
+			return
+		}
+		w.Header().Set("Content-Type", "audio/mpeg")
+		w.WriteHeader(http.StatusPartialContent)
+		_, _ = w.Write([]byte{0})
+	}))
+	defer server.Close()
+
+	got := resolveEnclosure(context.Background(), server.URL+"/enclosure.mp3")
+	if got == server.URL+"/enclosure.mp3" {
+		t.Fatal("the prefix chain was not followed; ffmpeg would be handed the tracking URL and fail")
+	}
+	if !strings.Contains(got, "/hop") {
+		t.Fatalf("expected the audio at the end of the chain, got %q", got)
+	}
+
+	// Anything unexpected must return the original rather than make it worse.
+	if got := resolveEnclosure(context.Background(), "not a url"); got != "not a url" {
+		t.Fatalf("a non-URL should pass through untouched, got %q", got)
+	}
+	dead := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "gone", http.StatusNotFound)
+	}))
+	defer dead.Close()
+	if got := resolveEnclosure(context.Background(), dead.URL+"/x.mp3"); got != dead.URL+"/x.mp3" {
+		t.Fatalf("a failed probe must leave the URL alone, got %q", got)
+	}
+}
+
+// A booked show is an appointment with a known time.
+//
+// The streamer used to discover one had arrived by asking every fifteen
+// seconds, so the switch began up to a tick late and the listener missed the
+// top of the programme. Radio runs to the second; the time is already in the
+// plan and there is no reason to find it by polling.
+func TestNextCutInIsTheAppointmentTime(t *testing.T) {
+	loc := time.UTC
+	now := time.Date(2026, 8, 11, 15, 42, 0, 0, loc)
+
+	plan := Plan{
+		Version:    PlanVersion,
+		Categories: []CategoryDef{{ID: "talk", Target: 1}},
+		Pools:      []Pool{{ID: "talk", Match: &PoolMatch{Category: "talk"}}},
+		Blocks: []Block{
+			{ID: "general", Default: true, Pools: []PoolRef{{Pool: "talk"}}},
+			{ID: "atc", Label: "All Things Considered",
+				Enter: BlockEntry{At: "16:00", Days: "*", Hard: true, Start: StartImmediately},
+				Exit:  BlockExit{At: "17:00"},
+				Pools: []PoolRef{{Pool: "talk"}}},
+		},
+	}
+	timeline := BuildTimeline(plan, now, loc)
+	if timeline.Next == nil {
+		t.Fatal("the 16:00 appointment should be visible from 15:42")
+	}
+	if got := timeline.Next.Start; !got.Equal(time.Date(2026, 8, 11, 16, 0, 0, 0, loc)) {
+		t.Fatalf("the appointment is at %s, not 16:00", got.Format("15:04:05"))
+	}
+
+	// Eighteen minutes away — a fifteen-second poll can only ever notice it
+	// after the fact, which is the whole problem.
+	if wait := timeline.Next.Start.Sub(now); wait != 18*time.Minute {
+		t.Fatalf("expected 18 minutes to the cut-in, got %s", wait)
+	}
+	// And the station connects the incoming source ahead of the boundary, so
+	// what lands on the hour is the programme rather than the work of starting
+	// it. The lead has to cover a live station's two-and-a-half-second answer
+	// without being so long the item playing is likely to end inside it.
+	if cutInWarmLead < 3*time.Second || cutInWarmLead > 30*time.Second {
+		t.Fatalf("warm lead of %s is not a sensible lead", cutInWarmLead)
+	}
+
+	// A slot that waits for the current item is a queue position, not a
+	// deadline, and must not yank anything off the air.
+	plan.Blocks[1].Enter.Start = StartMakeNext
+	patient := BuildTimeline(plan, now, loc)
+	if patient.Next != nil && patient.Next.Policy == StartImmediately {
+		t.Fatal("a makeNext slot should not be treated as a cut-in")
 	}
 }

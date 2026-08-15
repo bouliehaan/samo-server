@@ -16,10 +16,24 @@ type Traits struct {
 	// an event rather than just another item. Podcasts have this; a folder of
 	// station idents does not.
 	SupportsFreshness bool
+	// Shuffled means this source is a bag, not a strand: its items are
+	// interchangeable, they come round in a random order, and none of them
+	// comes round twice until the rest have had their turn. What separates
+	// them is the length of their own queue rather than a configured window,
+	// because "do not repeat a song" means "not until the playlist is done",
+	// not "not for eight hours".
+	Shuffled bool
 	// HasCreator means items carry a person-level attribution worth keeping
-	// apart — a host, or a recording artist. It is one axis, not two: "two
-	// shows with the same host, back to back" and "two songs by the same
-	// artist, back to back" are the same mistake and get the same rule.
+	// APART — a host presenting twice inside an hour.
+	//
+	// It used to cover recording artists too, on the reading that "two shows
+	// with the same host" and "two songs by the same artist" are the same
+	// mistake. Only the first one is a mistake. The second is a record
+	// collection having a shape, and spacing it means an artist's share of the
+	// hour can never match their share of the shelf — any gap at all forces
+	// somebody else in between, which caps them at p/(1+p) however much of the
+	// collection is theirs. So playlists no longer set this, and a station that
+	// wants the old behaviour asks for it per source.
 	HasCreator bool
 	// SharedCreator means every item from this source carries the SAME
 	// attribution — it is one show, not a container of many.
@@ -56,9 +70,25 @@ func TraitsFor(src Source) Traits {
 		traits.HasCreator = true
 		traits.SharedCreator = true
 	case SourceMusicPlaylist:
-		// A playlist is hundreds of artists behind one row. The creator worth
-		// separating on is the one on the track.
-		traits.HasCreator = true
+		// A playlist is not programmed, it is shuffled.
+		//
+		// Artist separation used to be on here, on the reasoning that "two shows
+		// with the same host" and "two songs by the same artist" are the same
+		// mistake. They are not. A host presenting twice in an hour is the
+		// station repeating itself; two songs by one artist is a record
+		// collection having a shape. Spacing the second is not a refinement of
+		// the running order, it is a correction applied to the one statement of
+		// taste the operator actually made — and the arithmetic to decide how
+		// much correction each artist deserves runs to a page, all of it
+		// undoing a decision somebody already made by putting the songs in the
+		// playlist.
+		//
+		// So a playlist shuffles. Every track once before any of them twice,
+		// and whatever proportions the shelf has are the proportions you hear.
+		// A station that genuinely wants its artists spaced can say so on the
+		// source — `"traits": {"hasCreator": true}` — and get the old rule back.
+		traits.HasCreator = false
+		traits.Shuffled = true
 	case SourceLiveStream, SourceInternetStation:
 		traits.Continuous = true
 		traits.SharedCreator = true
@@ -71,6 +101,8 @@ func TraitsFor(src Source) Traits {
 	}
 	for key, value := range boolOverrides(src.Config) {
 		switch key {
+		case "shuffled":
+			traits.Shuffled = value
 		case "supportsFreshness":
 			traits.SupportsFreshness = value
 		case "hasCreator":

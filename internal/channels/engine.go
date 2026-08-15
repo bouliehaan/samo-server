@@ -116,12 +116,18 @@ func (e *Engine) Decide(ctx context.Context, now time.Time, state ProgramState) 
 	queue := e.refreshObligations(ctx, now, env)
 	env.owed = queue
 
+	// A new listening day wipes the per-day allowances before any block is
+	// asked whether it may run, so a once-a-day block gets its turn back at the
+	// start of the day rather than at midnight UTC.
+	state = rollListeningDay(state, e.listeningDay(), loc, now)
+
 	cond := ConditionContext{
 		Window: timeline.Window(),
 		PoolAvailable: func(poolID string) bool {
 			return e.PoolHasContent(ctx, poolID, env)
 		},
 		ObligationsPending: queue.Len(),
+		EnteredToday:       state.EnteredToday,
 	}
 
 	block := ResolveBlock(e.Plan, timeline, state, cond, now)
@@ -187,8 +193,20 @@ func (e *Engine) Decide(ctx context.Context, now time.Time, state ProgramState) 
 		// happened to end is not an hour, it is a surprise. Filling the gap
 		// keeps the clock honest — the booked block starts when it says it does.
 		//
-		// Only OUTSIDE an appointment. Filling the tail of a booked hour with
-		// something from another pool would be playing over the show itself.
+		// Two passes over the same pool, because "fill the gap" has two
+		// meanings and only the second one can hold a boundary. The first asks
+		// for something that fits the gap whole, which is the better radio when
+		// the station happens to own it. The second accepts being cut off: it is
+		// what makes the difference between a booked show that starts at 16:00
+		// and one that starts at 15:59:05 because the shortest thing on the
+		// station is longer than the hole in front of it.
+		//
+		// The pool depends on which side of the boundary the hole is on.
+		// Outside an appointment it is the one the plan nominated for exactly
+		// this — filling the tail of a booked hour from another pool would be
+		// playing over the show itself. Inside one it is the block's OWN pool:
+		// a music hour with ninety seconds it cannot fill wants one more song
+		// faded out on the hour, which is what the hour is for.
 		if timeline.Active == nil && e.Plan.UnderrunPool != "" {
 			filler := block
 			filler.Block.Pools = []PoolRef{{Pool: e.Plan.UnderrunPool, Weight: 1}}
@@ -197,6 +215,11 @@ func (e *Engine) Decide(ctx context.Context, now time.Time, state ProgramState) 
 			if item, fill := e.selectIn(ctx, now, timeline, filler, tail, env); fill.ok {
 				fill.decision.Note = "nothing left fits before " + timeline.nextLabel() +
 					", so the gap is filled rather than starting it early"
+				next := fill.state
+				next.ItemCount++
+				return item, fill.decision, next, nil
+			}
+			if item, fill, ok := e.holdBoundary(ctx, now, timeline, filler, tail, env); ok {
 				next := fill.state
 				next.ItemCount++
 				return item, fill.decision, next, nil
@@ -213,9 +236,127 @@ func (e *Engine) Decide(ctx context.Context, now time.Time, state ProgramState) 
 				return item, retry.decision, next, nil
 			}
 		}
+		// The tail of a booked hour that nothing else could fill either.
+		//
+		// Releasing it to ordinary programming is the better answer and is tried
+		// first, above — a news hour with two minutes left wants a song, not two
+		// minutes of another news programme. This is for when that came back
+		// empty as well, and the choice is down to one more of the block's own
+		// content or handing the last of the hour to whatever is booked next,
+		// early.
+		if timeline.Active != nil {
+			held := block
+			held.Block.Pattern = nil
+			held.Block.Breaks = nil
+			if item, fill, ok := e.holdBoundary(ctx, now, timeline, held, tail, env); ok {
+				next := fill.state
+				next.ItemCount++
+				return item, fill.decision, next, nil
+			}
+		}
+		// Nothing left but to let the appointment at the join come forward, and
+		// only across a gap too small to have filled.
+		if handover, ok := e.bringAppointmentForward(timeline, block, now); ok {
+			item, retry := e.selectIn(ctx, now, timeline, handover, tail, env)
+			if retry.ok {
+				retry.decision.Note = attempt.boundaryNote(timeline)
+				retry.decision.Rejected = attempt.decision.Rejected
+				next := retry.state
+				next.ItemCount++
+				next.PatternIndex++
+				return item, retry.decision, next, nil
+			}
+		}
 	}
 	return PlaybackItem{}, attempt.decision, block.State, errors.New(attempt.decision.Error)
 }
+
+// bringAppointmentForward opens the next booked block early, at a join where
+// the one on air has run out of room and nothing at all could fill the sliver.
+//
+// Two booked blocks back to back leave that sliver — the last ninety seconds of
+// a music block, where no track fits before the news. The honest answer, once
+// releasing it and holding it have both failed, is that the next booked block
+// starts a moment early: it was going to start anyway, and the alternative is
+// dead air at the same minute every single day.
+//
+// "A moment" was never checked, and that is the difference between a sliver at
+// a join and a landslide: a music hour ending at 18:00 with forty seconds it
+// could not fill handed the airwaves to the 18:30 news, which then went out at
+// 17:59:20 — half an hour early, every weekday, reported by nothing. An
+// appointment may only come forward across a gap too small to have filled.
+func (e *Engine) bringAppointmentForward(timeline Timeline, current BlockDecision, now time.Time) (BlockDecision, bool) {
+	if timeline.Active == nil || timeline.Next == nil {
+		return BlockDecision{}, false
+	}
+	if timeline.Next.Start.Sub(now) > minBoundaryFill {
+		return BlockDecision{}, false
+	}
+	booked, ok := e.Plan.Block(timeline.Next.BlockID)
+	if !ok || booked.ID == current.Block.ID {
+		return BlockDecision{}, false
+	}
+	anchor := *timeline.Next
+	return BlockDecision{
+		Block:       booked,
+		Anchor:      &anchor,
+		EnteredAt:   now,
+		EntryReason: "the booked slot before it had no room left, so it starts early",
+		ExitReason:  "runs until " + anchor.End.Format("15:04"),
+		State:       enteringBlock(current.State, booked.ID, now),
+		Changed:     true,
+	}, true
+}
+
+// holdBoundary fills the last of a block's time with something the clock will
+// take, rather than letting the boundary move to meet the silence.
+//
+// The room it is filling is whichever boundary is nearer: the appointment
+// coming, or the end of the appointment already on air. Both are moments the
+// schedule promised, and neither may be moved to suit the length of a song.
+func (e *Engine) holdBoundary(
+	ctx context.Context,
+	now time.Time,
+	timeline Timeline,
+	block BlockDecision,
+	tail []PlayTailEntry,
+	env enumerationContext,
+) (PlaybackItem, selection, bool) {
+	room := timeline.Window()
+	boundary := timeline.nextLabel()
+	if timeline.Active != nil {
+		room = timeline.Active.End.Sub(now)
+		boundary = "the end of " + timeline.Active.Label
+	}
+	if room < minBoundaryFill {
+		return PlaybackItem{}, selection{}, false
+	}
+	block.CutAtBoundary = true
+	item, fill := e.selectIn(ctx, now, timeline, block, tail, env)
+	if !fill.ok {
+		return PlaybackItem{}, selection{}, false
+	}
+	fill.decision.Note = fmt.Sprintf(
+		"nothing fits the %s before %s, so the time is held and this is faded out on the boundary",
+		round(room), boundary)
+	return item, fill, true
+}
+
+// minBoundaryFill is the smallest gap worth putting something in.
+//
+// Below it there is no fill that sounds like anything: a five-second stub of a
+// song, faded almost as soon as it starts, is a fault the listener can hear,
+// while an appointment that opens five seconds early is one nobody can. The
+// point of holding the boundary is that a booked show starts when the schedule
+// says — and to within a few seconds, it still does.
+const minBoundaryFill = 10 * time.Second
+
+// boundaryFade is how long the gap-filler takes to get out of the way.
+//
+// Long enough to read as a fade rather than a cut, short enough that most of
+// the gap is still music. The appointment starts at its own second either way;
+// this only decides what the last moments before it sound like.
+const boundaryFade = 3 * time.Second
 
 // pendingObligations reads what the station owes WITHOUT noticing anything new.
 //
@@ -534,14 +675,29 @@ func (e *Engine) selectIn(
 	// BACK is an explicit instruction about a specific thing, and the ordinary
 	// ordering would guarantee it lands somewhere else: what just played is by
 	// definition the most recently aired thing there is.
-	if preferred := e.Skips.PreferredSource(e.Channel.ID); preferred != "" {
+	// BACK means that ITEM, not something else by the same show.
+	//
+	// Narrowing to the source and re-scoring across it returned a different
+	// episode almost every time, which is what made the button feel random.
+	// The item is tried first; the source stays as the fallback for when the
+	// exact item is no longer on offer at all.
+	if wanted := e.Skips.PreferredRef(e.Channel.ID); wanted != "" {
+		if narrowed := filterByRef(candidates, wanted); len(narrowed) > 0 {
+			candidates = narrowed
+			out.decision.Note = "asked to go back to this item"
+		}
+	}
+	if preferred := e.Skips.PreferredSource(e.Channel.ID); preferred != "" && len(candidates) > 1 {
 		if narrowed := filterBySource(candidates, preferred); len(narrowed) > 0 {
 			candidates = narrowed
 			out.decision.Note = "asked to go back to a particular source"
 		}
 	}
 
-	cenv := e.constraintEnv(ctx, now, intent, tail, candidates)
+	// Fitted here rather than inside applyConstraints, so the windows the rules
+	// enforce are the same objects scoring is handed further down. Two copies of
+	// this arithmetic is how the rules came to allow what the scoring forbade.
+	cenv := fitSeparationToLibrary(e.constraintEnv(ctx, now, intent, tail, candidates), candidates)
 	survivors, rejections, relaxed := applyConstraints(candidates, cenv)
 	out.decision.Rejected = capRejections(append(owedWhyNot, rejections...))
 	out.decision.Relaxed = relaxed
@@ -583,10 +739,13 @@ func (e *Engine) selectIn(
 		}
 	}
 
+	survivors = dropBackCatalogueOfShowsAwaitingTheirNewEpisode(candidates, survivors, &out.decision)
 	survivors = preferOwedWithinCategory(survivors, &out.decision)
 	survivors = preferDueLongForm(survivors, cenv, &out.decision)
+	survivors = preferNoStub(survivors, intent.PlayCeiling, &out.decision)
 
 	scoring := e.scoreEnv(ctx, now, intent, tail)
+	scoring.adoptSeparation(cenv)
 	out.decision.applyBalance(intent.Targets, scoring.airtime)
 	scored := scoreCandidates(survivors, scoring)
 	chosen, contenders := chooseCandidate(scored, e.Plan.epsilon(), e.Rand)
@@ -645,7 +804,7 @@ func (e *Engine) blockForBoundary(timeline Timeline, current BlockDecision, now 
 			EnteredAt:   now,
 			EntryReason: "the booked slot had no room left for another item",
 			ExitReason:  blockExitDescription(next),
-			State:       ProgramState{BlockID: next.ID, EnteredAt: now},
+			State:       enteringBlock(current.State, next.ID, now),
 			Changed:     true,
 		}, true
 	}
@@ -664,7 +823,7 @@ func (e *Engine) blockForBoundary(timeline Timeline, current BlockDecision, now 
 		EnteredAt:   now,
 		EntryReason: "nothing fitted the gap in front of it, so it starts early",
 		ExitReason:  "runs until " + anchor.End.Format("15:04"),
-		State:       ProgramState{BlockID: block.ID, EnteredAt: now},
+		State:       enteringBlock(current.State, block.ID, now),
 		Changed:     true,
 	}, true
 }
@@ -684,18 +843,26 @@ func (e *Engine) buildIntent(block BlockDecision, timeline Timeline, tail []Play
 		}
 	}
 	intent := ProgrammingIntent{
-		Block:       block.Block,
-		BlockLabel:  blockName(block.Block),
-		EnteredAt:   block.EnteredAt,
-		EntryReason: block.EntryReason,
-		ExitReason:  block.ExitReason,
-		Window:      timeline.Window(),
-		PlayCeiling: timeline.Window(),
-		Targets:     e.Plan.CategoryTargets(block.Block, available),
-		Pools:       block.Block.Pools,
-		Limits:      resolveLimits(block.Block, tail, block.EnteredAt),
-		Want:        block.Block.WantAt(block.State.PatternIndex),
-		Exposure:    e.Plan.ExposureFor(block.Block, timeline.Now, e.listeningDay()),
+		Block:         block.Block,
+		BlockLabel:    blockName(block.Block),
+		EnteredAt:     block.EnteredAt,
+		EntryReason:   block.EntryReason,
+		ExitReason:    block.ExitReason,
+		Window:        timeline.Window(),
+		PlayCeiling:   timeline.Window(),
+		CutAtBoundary: block.CutAtBoundary,
+		Targets:       e.Plan.CategoryTargets(block.Block, available),
+		Pools:         block.Block.Pools,
+		Limits:        resolveLimits(block.Block, tail, block.EnteredAt),
+		Want:          block.Block.WantAt(block.State.PatternIndex),
+		Exposure:      e.Plan.ExposureFor(block.Block, timeline.Now, e.listeningDay()),
+	}
+	// Filling a gap is the one time the station has an opinion about length for
+	// its own sake: the least of the item lost to the boundary is the best of
+	// the pool, so the gap itself becomes the target and windowFit ranks by how
+	// near each candidate lands to it.
+	if intent.CutAtBoundary && intent.Window > 0 {
+		intent.TargetDuration = intent.Window
 	}
 	for _, obligation := range env.owed.Pending {
 		if urgency := obligation.Urgency(timeline.Now, e.Plan.Freshness); urgency > intent.MaxUrgency {
@@ -773,13 +940,22 @@ func (e *Engine) constraintEnv(
 	// rests for a week or three; if the history query only looks back as far as
 	// the rerun horizon, the last airing has already fallen off the end and the
 	// rationing reads "never played" for ever.
+	longForm := e.Plan.longFormFor(intent.Block)
 	sourceHorizon := e.Plan.rerunHorizon()
-	if rest := e.Plan.LongForm.rest(); rest > sourceHorizon {
+	if rest := longForm.rest(); rest > sourceHorizon && rest < neverAgain {
 		sourceHorizon = rest
 	}
 	lastBySource, err := e.History.LastAiredBySource(ctx, sourceHorizon, now)
 	if err != nil {
 		lastBySource = map[string]time.Time{}
+	}
+	// When each show last put an enormous item on air, which is what the rest
+	// is actually charged for — asked separately from "when did this source
+	// last air anything", because those are different questions with different
+	// answers and conflating them either rations nothing or rations everything.
+	lastGiant, err := e.History.LastLongFormBySource(ctx, longForm.threshold(), sourceHorizon, now)
+	if err != nil {
+		lastGiant = map[string]LongFormAiring{}
 	}
 	airings, lastAirings, err := e.History.ItemAirings(ctx, 24*time.Hour, now)
 	if err != nil {
@@ -799,6 +975,7 @@ func (e *Engine) constraintEnv(
 	return constraintEnv{
 		now:               now,
 		window:            intent.Window,
+		cutAtBoundary:     intent.CutAtBoundary,
 		lastByRef:         withEndTimes(lastByRef, tail, func(e PlayTailEntry) string { return e.ItemRef }),
 		lastBySource:      mergedBySource,
 		lastByShow:        e.lastByShow(mergedBySource),
@@ -811,8 +988,9 @@ func (e *Engine) constraintEnv(
 		separationSource:  e.Plan.separationSource(),
 		separationCreator: e.Plan.separationCreator(),
 		separationFamily:  e.Plan.separationFamily(),
-		longFormThreshold: e.Plan.LongForm.threshold(),
-		longFormRest:      e.Plan.LongForm.rest(),
+		longFormThreshold: longForm.threshold(),
+		longFormRest:      longForm.rest(),
+		lastGiantByShow:   e.giantsByShow(lastGiant),
 		limits:            intent.Limits,
 		categoriesPresent: present,
 		skips:             e.Skips,
@@ -852,13 +1030,14 @@ func (e *Engine) scoreEnv(ctx context.Context, now time.Time, intent Programming
 		airtime:           airtime,
 		lastByRef:         lastByRef,
 		lastBySource:      lastBySource,
+		lastByShow:        e.lastByShow(lastBySource),
 		lastByCreator:     e.lastByCreator(tail),
 		separationItem:    e.Plan.separationItem(),
 		separationSource:  e.Plan.separationSource(),
 		separationCreator: e.Plan.separationCreator(),
 		maxUrgency:        intent.MaxUrgency,
 		typicalItem:       typicalAired(tail),
-		longFormThreshold: e.Plan.LongForm.threshold(),
+		longFormThreshold: e.Plan.longFormFor(intent.Block).threshold(),
 		recencyHorizon:    e.Plan.recencyHorizon(),
 		weights:           e.Plan.Selection.Weights,
 	}
@@ -957,6 +1136,23 @@ func (e *Engine) lastByShow(lastBySource map[string]time.Time) map[string]time.T
 		}
 		if show := ShowOf(src); at.After(out[show]) {
 			out[show] = at
+		}
+	}
+	return out
+}
+
+// giantsByShow folds per-source giant airings onto the programme they came
+// from, so a show added twice — episodes on disk, plus the RSS feed — serves
+// one rest rather than two.
+func (e *Engine) giantsByShow(bySource map[string]LongFormAiring) map[string]LongFormAiring {
+	out := map[string]LongFormAiring{}
+	for sourceID, airing := range bySource {
+		src, ok := e.source(sourceID)
+		if !ok {
+			continue
+		}
+		if show := ShowOf(src); airing.EndedAt.After(out[show].EndedAt) {
+			out[show] = airing
 		}
 	}
 	return out
@@ -1073,10 +1269,25 @@ func (e *Engine) applyDuration(item *PlaybackItem, candidate Candidate, intent P
 			item.MaxDuration = 0
 		}
 		item.Live = candidate.Traits.Continuous
+		// Holding the last of a booked hour with one more of its own: the hour
+		// ends on the hour, and this goes quietly under rather than being cut
+		// off in the middle of a chorus.
+		if intent.CutAtBoundary {
+			item.FadeOut = boundaryFade
+		}
 		return
 	}
 	if timeline.Next != nil {
 		item.AnchorPolicy = timeline.Next.Policy
+	}
+	// Holding the gap in front of an appointment. The cap IS the boundary, and
+	// the fade is what makes the cut sound like radio rather than a fault: the
+	// item was picked knowing it would not finish.
+	if intent.CutAtBoundary && intent.Window > 0 {
+		item.MaxDuration = intent.Window
+		item.FadeOut = boundaryFade
+		item.Live = candidate.Traits.Continuous
+		return
 	}
 	if !candidate.Traits.Continuous {
 		// An item whose length NOBODY KNOWS is the hole in forward fitting: the
@@ -1149,6 +1360,72 @@ func preferOwedWithinCategory(candidates []Candidate, decision *Decision) []Cand
 	return out
 }
 
+// dropBackCatalogueOfShowsAwaitingTheirNewEpisode is the rule that if there is
+// no room for a show's new episode, there is no room for that show.
+//
+// From the real station, 2026-08-11 15:04. Joey Diaz had published seventy-one
+// minutes that morning; fifty-five minutes remained before All Things
+// Considered, so it was refused for not fitting — correctly, that rule never
+// bends. The station then filled the hole with a thirty-three-minute episode of
+// THE SAME SHOW from June 2023, because that one was short enough.
+//
+// Every rule behaved as written and the result is indefensible. "This does not
+// fit, so here is an older one of exactly the same thing" is not a compromise a
+// person would ever make; if the new Joey Diaz cannot go out, what the listener
+// wants is not an old Joey Diaz, it is something else.
+//
+// Scoped to the SHOW, deliberately. Dropping the whole category would silence
+// every spoken word for the rest of the hour because one podcast was too long,
+// and dropping nothing is what produced the 2023 rerun. The show is the unit the
+// listener actually perceives, and it is the unit that has something pending.
+//
+// Only when NONE of that show's owed episodes survived: if one did, it is about
+// to play and the ordinary owed precedence handles the rest.
+func dropBackCatalogueOfShowsAwaitingTheirNewEpisode(
+	candidates, survivors []Candidate,
+	decision *Decision,
+) []Candidate {
+	owed := map[string]bool{}
+	for _, candidate := range candidates {
+		if candidate.Owed && candidate.Show != "" {
+			owed[candidate.Show] = true
+		}
+	}
+	if len(owed) == 0 {
+		return survivors
+	}
+	for _, candidate := range survivors {
+		if candidate.Owed {
+			delete(owed, candidate.Show)
+		}
+	}
+	if len(owed) == 0 {
+		return survivors
+	}
+	out := make([]Candidate, 0, len(survivors))
+	dropped := 0
+	for _, candidate := range survivors {
+		if owed[candidate.Show] && !candidate.Owed {
+			dropped++
+			continue
+		}
+		out = append(out, candidate)
+	}
+	// Never to the point of silence. If a show's back catalogue is all that is
+	// left, the relaxation ladder has already given up everything else and the
+	// station plays rather than stopping to admire the problem.
+	if dropped == 0 || len(out) == 0 {
+		return survivors
+	}
+	if decision != nil {
+		decision.Note = strings.TrimSpace(decision.Note + fmt.Sprintf(
+			" %d older episodes set aside: the station owes you a new episode of"+
+				" that show and could not fit it, so it is not filling the gap with"+
+				" the same show's back catalogue", dropped))
+	}
+	return out
+}
+
 // categoriesOutOfRun is every category that owes the listener something which
 // no longer fits what is left of its run.
 //
@@ -1217,6 +1494,55 @@ func dropCategories(candidates []Candidate, drop map[CategoryID]bool) []Candidat
 	return out
 }
 
+// preferNoStub keeps a bounded block from painting itself into a corner.
+//
+// Playing greedily inside a booked hour leaves whatever is left over, and
+// "whatever is left over" is eventually ninety seconds — shorter than anything
+// the station owns, so the last stretch of a block that was supposed to run to
+// the minute has nothing that fits. A person filling that hour would not do
+// this: near the end they reach for something that LANDS on the boundary.
+//
+// So a candidate is preferred when what it leaves behind is playable: either it
+// runs to the end, or it leaves room for at least one more item. Only a
+// preference — if nothing avoids a stub, the station still plays rather than
+// stopping to admire the problem, and the boundary handover covers the rest.
+func preferNoStub(candidates []Candidate, ceiling time.Duration, decision *Decision) []Candidate {
+	if ceiling <= 0 || len(candidates) < 2 {
+		return candidates
+	}
+	shortest := time.Duration(0)
+	for _, candidate := range candidates {
+		if candidate.Duration <= 0 {
+			continue
+		}
+		if shortest == 0 || candidate.Duration < shortest {
+			shortest = candidate.Duration
+		}
+	}
+	if shortest <= 0 {
+		return candidates
+	}
+	clean := make([]Candidate, 0, len(candidates))
+	for _, candidate := range candidates {
+		if candidate.Duration <= 0 {
+			clean = append(clean, candidate)
+			continue
+		}
+		switch remainder := ceiling - candidate.Duration; {
+		case remainder <= 0, remainder >= shortest:
+			clean = append(clean, candidate)
+		}
+	}
+	if len(clean) == 0 || len(clean) == len(candidates) {
+		return candidates
+	}
+	if decision != nil {
+		decision.Note = strings.TrimSpace(decision.Note +
+			" preferring something that lands on the boundary, so the end of this block is not a stub")
+	}
+	return clean
+}
+
 // preferDueLongForm gives a rested giant the floor, within its own category.
 //
 // Rationing decides how OFTEN a six-hour episode may come round; on its own it
@@ -1263,6 +1589,17 @@ func preferDueLongForm(candidates []Candidate, env constraintEnv, decision *Deci
 		decision.Note = strings.TrimSpace(decision.Note + fmt.Sprintf(
 			" a long-form show has rested and there is room for it, so it goes now (%d ordinary items set aside)",
 			dropped))
+	}
+	return out
+}
+
+// filterByRef narrows a candidate set to one specific item.
+func filterByRef(candidates []Candidate, itemRef string) []Candidate {
+	out := make([]Candidate, 0, 1)
+	for _, candidate := range candidates {
+		if candidate.Ref == itemRef {
+			out = append(out, candidate)
+		}
 	}
 	return out
 }
