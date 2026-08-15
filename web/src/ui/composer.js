@@ -257,7 +257,43 @@ export function roleForKind(kind) {
   return kind === "music-playlist" ? "music" : "talk";
 }
 
-export function contentPickerHTML(prefix, options) {
+// pickerListHTML is a filterable list of checkboxes — the multi-select that
+// replaced a one-at-a-time <select>.
+//
+// Adding eleven stations used to be eleven trips through the composer, each
+// one re-rendering the whole channel screen underneath it. The catalogue this
+// picks from is the reason it is a checkbox list rather than a multiple
+// <select>: ctrl-clicking forty podcasts without losing the selection is not
+// something anyone should be asked to do.
+function pickerListHTML(id, label, items, render) {
+  const rows = items.map((item, index) => {
+    const picked = render(item);
+    return '<label class="picker-item" data-name="' + attr(picked.name.toLowerCase()) + '">' +
+      '<input type="checkbox" id="' + attr(id) + index + '" value="' + attr(picked.value) + '"' +
+        ' data-picker="' + attr(id) + '" data-name="' + attr(picked.name) + '">' +
+      '<span>' + escapeHTML(picked.name) + '</span>' +
+    '</label>';
+  }).join("");
+
+  return '<div class="field full picker-field">' +
+    '<div class="picker-head">' +
+      '<span class="field-label">' + escapeHTML(label) + '</span>' +
+      '<span class="picker-count" id="' + attr(id) + '-count">none selected</span>' +
+    '</div>' +
+    '<div class="picker-tools">' +
+      '<input type="search" class="picker-filter" data-picker="' + attr(id) + '" placeholder="// filter">' +
+      '<button type="button" class="btn ghost btn-mini" data-action="picker-all" data-picker="' + attr(id) + '">ALL</button>' +
+      '<button type="button" class="btn ghost btn-mini" data-action="picker-none" data-picker="' + attr(id) + '">NONE</button>' +
+    '</div>' +
+    '<div class="picker-list" id="' + attr(id) + '" data-picker-list="1">' + rows + '</div>' +
+  '</div>';
+}
+
+// contentPickerHTML renders the picker for every kind at once, hiding all but
+// the selected one. `single` forces one pick per submit — the show composer
+// books content INTO a slot, and N sources sharing one window is a different
+// feature from adding N things to the rotation.
+export function contentPickerHTML(prefix, options, single) {
   options = options || {};
   const podcasts = options.podcasts || [];
   const stations = options.stations || [];
@@ -276,8 +312,13 @@ export function contentPickerHTML(prefix, options) {
   const selectField = (id, label, items, render) =>
     '<label class="field full"><span class="field-label">' + escapeHTML(label) + '</span>' +
       '<select id="' + attr(id) + '">' +
-        items.map(render).join("") +
+        items.map((item) => {
+          const picked = render(item);
+          return '<option value="' + attr(picked.value) + '">' + escapeHTML(picked.name) + '</option>';
+        }).join("") +
       '</select></label>';
+
+  const listField = single ? selectField : pickerListHTML;
 
   let html =
     '<div class="composer-row">' +
@@ -290,36 +331,38 @@ export function contentPickerHTML(prefix, options) {
 
   if (podcasts.length > 0) {
     html += group("podcast-subscription",
-      selectField(prefix + "Podcast", "Podcast", podcasts,
-        (p) => '<option value="' + attr(p.id) + '">' + escapeHTML(podcastTitle(p)) + '</option>'));
+      listField(prefix + "Podcast", "Podcasts", podcasts,
+        (p) => ({ name: podcastTitle(p), value: p.id })));
   }
   if (stations.length > 0) {
     html += group("internet-station",
-      selectField(prefix + "Station", "Station", stations,
-        (st) => '<option value="' + attr(st.id) + '">' + escapeHTML(st.name) + '</option>'));
+      listField(prefix + "Station", "Stations", stations,
+        (st) => ({ name: st.name, value: st.id })));
   }
   if (playlists.length > 0) {
     html += group("music-playlist",
-      selectField(prefix + "Playlist", "Playlist", playlists,
-        (pl) => '<option value="' + attr(pl.id) + '">' + escapeHTML(pl.name) + '</option>'));
+      listField(prefix + "Playlist", "Playlists", playlists,
+        (pl) => ({ name: pl.name, value: pl.id })));
   }
   html += group("file-pool",
     textAreaHTML(prefix + "Paths", "Files, folders or globs (one per line)",
       "/mnt/data2tb/commercials\n/mnt/data2tb/oldies/*.mp3", "", "full"));
-  html += group("live-stream",
-    fieldHTML(prefix + "Url", "Stream URL", "https://example.com/live.mp3", "url", "", "full"));
+  html += group("live-stream", single
+    ? fieldHTML(prefix + "Url", "Stream URL", "https://example.com/live.mp3", "url", "", "full")
+    : textAreaHTML(prefix + "Url", "Stream URLs (one per line)",
+        "https://example.com/live.mp3\nhttps://example.com/backup.mp3", "", "full"));
 
   return html;
 }
 
-// composerChannelShow books a programme: content AND its slot, in one go.
+// composerChannelShow books a show: content AND its slot, in one go.
 //
 // It used to be two disjoint forms — create a source, then create a rule that
 // points at it — which meant holding an id in your head between them. A show
 // is one thing, so it is one form.
 export function composerChannelShow(channelID, options) {
   const body =
-    contentPickerHTML("composerShow", options) +
+    contentPickerHTML("composerShow", options, true) +
     '<div class="composer-row">' +
       '<label class="field"><span class="field-label">Days</span><select id="composerShowDays">' +
         weekdayOptionsHTML() +
@@ -336,6 +379,8 @@ export function composerChannelShow(channelID, options) {
 }
 
 // composerChannelContent adds something to the mix: what it is, and its role.
+// Tick as many as you like — everything checked comes in with the same role,
+// each keeping its own name.
 export function composerChannelContent(channelID, options) {
   const body =
     contentPickerHTML("composerContent", options) +
@@ -347,7 +392,8 @@ export function composerChannelContent(channelID, options) {
       '<button class="btn ghost" data-action="composer-toggle" data-composer="channel-content">CANCEL</button>' +
     '</div>';
   return composerHTML("channel-content", "ADD TO THE MIX", body,
-    "// the channel plays new episodes first, then falls back to reruns and music. You pick what each thing is; it works out the order.");
+    "// tick as many as you like — they all come in with the role above, each under its own name. " +
+    "The channel plays new episodes first, then falls back to reruns and music.");
 }
 
 export function weekdayOptionsHTML() {

@@ -110,4 +110,4 @@
           <a class="btn primary" href="/">OPEN DASHBOARD &rarr;</a>
         </div>
       `}function N(){if(m)switch(m.currentStep){case"admin":A();break;case"libraries":O();break;case"scan":L();break;default:D()}}b().catch(e=>{l.innerHTML='<div class="card-head"><span class="caret">&gt;</span> ERROR</div><h2>Setup unavailable</h2><p class="lede">'+r(e.message)+"</p>"})})();
-//# sourceMappingURL=setup-CEjR3d98.js.map
+//# sourceMappingURL=setup-B0CGERxz.js.map

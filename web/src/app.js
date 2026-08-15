@@ -16,8 +16,9 @@ import { connect as connectEvents } from "./ui/events.js";
 import { cancelActiveScan, closeScanPanel, configureScanUI, ensureScanAvailable, handleScanJobEvent, openScanPanel, rememberLibraries, triggerLibraryRepair, triggerLibraryScan, triggerScan, updateRefreshUI, watchScanJob } from "./ui/scan.js";
 import { applyStreamResumeSeek, clearPlayerTarget, flushPlaybackProgress, patchPlayback, playbackGlobalSeconds, playURL, playerTarget, refreshSeekUI, reportPlaybackProgress, resetProgressThrottle, seekFromPointer, setPlayerGlyph } from "./ui/player.js";
 import { closeIdentifyModal, identifyCandidates, identifyContext, openIdentifyModal, runIdentifySearch } from "./ui/identify.js";
-import { channelCard, channelNowPlayingBody, channelScheduleStatusBody, channelScheduleTimeline } from "./ui/channels.js";
+import { channelBalanceBody, channelCard, channelOnAirHeader, channelScheduleStatusBody, channelScheduleTimeline } from "./ui/channels.js";
 import { owedPanel, planPanel, sourceComposer, whyPanel } from "./ui/plan.js";
+import { rankPanel, rankableSource } from "./ui/rank.js";
 import { composerSamoRadioDevice, samoRadioDeviceCard, samoRadioSendBar } from "./ui/samo_radio.js";
 import { composerChannel, composerChannelContent, composerChannelSchedule, composerChannelShow, composerClose, roleForKind, composerLibrary, composerMessage, composerPlaylist, composerPlaylistEdit, composerPlaylistImport, composerPodcastAttachFeed, composerPodcastFeed, composerRadioStation, fieldHTML, toggleComposer } from "./ui/composer.js";
 import { formatDataSize, formatDate, formatDuration, formatUptime, minuteToHHMM, parseHHMM, weekdayMaskToLabel } from "./ui/format.js";
@@ -61,9 +62,18 @@ import { globalScanActionsHTML, libraryKindScanActionsHTML, libraryScanActionsHT
   let audiobooksMode = "titles";
   let podcastsMode = "shows";
   let settingsMode = "libraries";
-  // Default RADIO sub-mode is CHANNELS — personal programmed streams.
-  // INTERNET is for live stream bookmarks.
-  let radioMode = "channels";
+  // Default RADIO sub-mode is INTERNET — the stations you tune into, which is
+  // what the tab is reached for. CHANNELS is the programming surface: you go
+  // there to build something, not to listen, and it costs a click to say so.
+  let radioMode = "internet";
+  // Which section of a channel's programming screen is open. Module state, not
+  // DOM state, because the 8-second poll re-renders the whole view — anything
+  // held in the markup would snap shut under the user every few seconds.
+  let channelSection = "mix";
+  // Collapsed sub-sections inside the plan, and whether the pools the plan
+  // generator writes for booked shows are showing.
+  const planCollapsed = new Set(["behaviour"]);
+  let showAutoPools = false;
   // The plan currently on screen, plus which row an editor is editing. Held
   // here rather than re-fetched per keystroke: the editors mutate this object
   // and PUT the whole document, so the server validates one coherent plan
@@ -72,6 +82,14 @@ import { globalScanActionsHTML, libraryKindScanActionsHTML, libraryScanActionsHT
   let activePlanSources = [];
   let planEditIndex = { block: -1, pool: -1, category: -1 };
   let planEditSourceID = "";
+  // The RANK surface, and what it is mid-way through doing. rankView is what
+  // the tier list was drawn from, kept so a drop can redraw it without a round
+  // trip; rankPickedID is the card lifted by a click; rankDragID is the one
+  // under the pointer; rankSaves counts tier PATCHes still in flight.
+  let rankView = null;
+  let rankPickedID = "";
+  let rankDragID = "";
+  let rankSaves = 0;
   let whyLimit = 1;
   let activeChannelID = "";
   // Which samo-radio device has its settings drawer open, and the device list
@@ -1351,9 +1369,9 @@ import { globalScanActionsHTML, libraryKindScanActionsHTML, libraryScanActionsHT
     stopRadioPolling();
     radioPollTimer = setTimeout(async () => {
       if (activeTab !== "radio") return;
-      // Don't blow away an open composer / form the user is filling in.
-      // Reschedule so we try again on the next tick.
-      if (hasOpenComposerOrModal()) { scheduleRadioPoll(); return; }
+      // Don't blow away an open composer / form the user is filling in, or a
+      // card mid-drag on the tier list. Reschedule so we try again next tick.
+      if (hasOpenComposerOrModal() || rankIsBusy()) { scheduleRadioPoll(); return; }
       await renderRadio(true);
     }, 8000);
   }
@@ -1490,9 +1508,13 @@ import { globalScanActionsHTML, libraryKindScanActionsHTML, libraryScanActionsHT
     });
   }
 
-  // readContentPicker turns the shared picker into a source payload.
+  // readContentPicker turns the shared picker into a LIST of source payloads.
   // Throws with a human message rather than returning a half-built body, so a
   // missing field surfaces in the composer's own status line.
+  //
+  // Always a list, even for one pick: the caller loops either way, and a single
+  // return type is what keeps "add one podcast" and "add eleven stations" the
+  // same code path rather than two that drift.
   function readContentPicker(prefix) {
     const kind = document.getElementById(prefix + "Kind").value;
     const labelInput = document.getElementById(prefix + "Label");
@@ -1500,38 +1522,63 @@ import { globalScanActionsHTML, libraryKindScanActionsHTML, libraryScanActionsHT
 
     // Leaving the label blank promises "use its own name", so the name is
     // resolved here rather than stored empty and rendered as the raw kind
-    // ("PODCAST-SUBSCRIPTION") everywhere it appears afterwards.
+    // ("PODCAST-SUBSCRIPTION") everywhere it appears afterwards. A typed label
+    // only applies to a single pick — stamping one name onto eight sources
+    // would make them indistinguishable in every list that follows.
     const chosen = (id) => {
-      const select = document.getElementById(prefix + id);
-      const option = select.options[select.selectedIndex];
-      return { name: option ? option.text.trim() : "", value: select.value };
+      const list = document.getElementById(prefix + id);
+      if (list && list.dataset.pickerList) {
+        return Array.from(list.querySelectorAll("input[type=checkbox]:checked"))
+          .map((box) => ({ name: box.dataset.name || "", value: box.value }));
+      }
+      const option = list.options[list.selectedIndex];
+      return list.value ? [{ name: option ? option.text.trim() : "", value: list.value }] : [];
     };
-    const built = (config, name) => ({ config: config, kind: kind, label: typed || name });
+    const build = (picks, config) => picks.map((pick) => ({
+      config: config(pick.value),
+      kind: kind,
+      label: picks.length === 1 && typed ? typed : pick.name,
+    }));
 
     if (kind === "podcast-subscription") {
-      const pick = chosen("Podcast");
-      if (!pick.value) throw new Error("pick a podcast");
-      return built({ maxAgeDays: 30, podcastId: pick.value }, pick.name);
+      const picks = chosen("Podcast");
+      if (picks.length === 0) throw new Error("tick at least one podcast");
+      // No maxAgeDays. It used to be stamped on every podcast added here and
+      // the scheduler has never read it — the engine's age bound is
+      // `rerunMaxAgeDays` — so it sat in the config of nineteen sources
+      // reading like a thirty-day limit that was never once applied. A control
+      // the station cannot honour is worse than no control, because it answers
+      // the question "why is it playing something from years ago" with a lie.
+      // How old back catalogue is now scores continuously; see recency in
+      // internal/channels/score.go.
+      return build(picks, (id) => ({ podcastId: id }));
     }
     if (kind === "internet-station") {
-      const pick = chosen("Station");
-      if (!pick.value) throw new Error("pick a station");
-      return built({ stationId: pick.value }, pick.name);
+      const picks = chosen("Station");
+      if (picks.length === 0) throw new Error("tick at least one station");
+      return build(picks, (id) => ({ stationId: id }));
     }
     if (kind === "music-playlist") {
-      const pick = chosen("Playlist");
-      if (!pick.value) throw new Error("pick a playlist");
-      return built({ playlistId: pick.value }, pick.name);
+      const picks = chosen("Playlist");
+      if (picks.length === 0) throw new Error("tick at least one playlist");
+      return build(picks, (id) => ({ playlistId: id }));
     }
     if (kind === "file-pool") {
+      // Every path is one pool, not one source each: a folder of station IDs
+      // and its overflow folder are the same pile of content.
       const paths = document.getElementById(prefix + "Paths").value
         .split("\n").map((line) => line.trim()).filter(Boolean);
       if (paths.length === 0) throw new Error("add at least one path or folder");
-      return built({ paths: paths }, folderName(paths[0]));
+      return [{ config: { paths: paths }, kind: kind, label: typed || folderName(paths[0]) }];
     }
-    const url = document.getElementById(prefix + "Url").value.trim();
-    if (!url) throw new Error("a stream URL is required");
-    return built({ url: url }, hostName(url));
+    const urls = document.getElementById(prefix + "Url").value
+      .split("\n").map((line) => line.trim()).filter(Boolean);
+    if (urls.length === 0) throw new Error("a stream URL is required");
+    return urls.map((url) => ({
+      config: { url: url },
+      kind: kind,
+      label: urls.length === 1 && typed ? typed : hostName(url),
+    }));
   }
 
   // A folder's own name is the last meaningful path segment, so
@@ -1675,104 +1722,272 @@ import { globalScanActionsHTML, libraryKindScanActionsHTML, libraryScanActionsHT
     activePlanSources = sourceItems;
     planEditIndex = { block: -1, pool: -1, category: -1 };
 
-    let html = '<section class="view">' +
+    const mixItems = sourceItems.filter((src) => src.role !== "show");
+    const pending = (owed && owed.pending) || 0;
+    const sourceNames = resolveSourceNames(sourceItems, {
+      podcasts: podcastItems, stations: internetItems, playlists: playlistItems,
+    });
+
+    let html = '<section class="view channel-view">' +
       '<div class="view-head"><h1>' + escapeHTML(ch.name) + '</h1><div class="view-actions">' +
         '<button class="btn primary btn-small" data-action="channel-tune-in" data-id="' + attr(ch.id) + '" data-name="' + attr(ch.name) + '">TUNE IN</button>' +
         '<button class="btn ghost btn-small" data-action="channel-back">BACK</button>' +
         '<button class="btn danger btn-small" data-action="channel-delete" data-id="' + attr(ch.id) + '" data-name="' + attr(ch.name) + '">DELETE</button>' +
       '</div></div>';
 
+    // What is on air, right now, above everything — one band instead of two
+    // panels a screen and a half apart.
+    html += channelOnAirHeader(ch.id, now, scheduleStatus);
     html += samoRadioSendBar(primeSamoRadioDevices(), { type: "channel", ids: [ch.id] });
 
-    // Now playing, with the two skips a listener actually reaches for.
-    html += '<div class="panel panel-wide channel-now">' +
-      '<div class="panel-head"><span>// NOW PLAYING</span>' +
-      '<span>' +
-        '<button class="btn ghost btn-mini" data-action="channel-previous" data-id="' + attr(ch.id) + '">&#8592; BACK</button> ' +
-        '<button class="btn ghost btn-mini" data-action="channel-skip" data-id="' + attr(ch.id) + '" data-scope="item">SKIP &#8594;</button> ' +
-        '<button class="btn ghost btn-mini" data-action="channel-skip" data-id="' + attr(ch.id) + '" data-scope="kind">NEXT MEDIA TYPE</button>' +
-      '</span></div>' +
-      channelNowPlayingBody(now) +
-    '</div>';
+    // One section at a time. The whole surface open at once came to six
+    // thousand pixels — nine screens — and everything you actually came here
+    // to press was below the fold of whatever you were reading.
+    // Rankable sources are counted off the full list, not the mix: a booked
+    // show still publishes episodes, so it is still something the station can
+    // owe you, and leaving it out would make RANK a place where SOME of your
+    // shows can be ranked.
+    const rankableItems = sourceItems.filter(rankableSource);
+    html += channelSectionNav([
+      ["mix", "MIX", mixItems.length],
+      ["rank", "RANK", rankableItems.length],
+      ["program", "PROGRAM", ruleItems.length],
+      ["plan", "PLAN", (activePlan.blocks || []).length],
+      ["owed", "OWED", pending],
+      ["log", "LOG", null],
+    ]);
 
-    // Sources
-    // THE MIX — everything the channel falls back on, in role order. The
-    // running order is the engine's; this panel only says what each thing is.
-    html += '<div class="panel panel-wide">' +
-      '<div class="panel-head"><span>// THE MIX</span>' +
-      '<button class="btn ghost btn-mini" data-action="composer-toggle" data-composer="channel-content">+ ADD CONTENT</button>' +
-      '</div>' +
-      // A channel running its own plan gets its shares FROM that plan.
-      //
-      // This used to read ch.talkShare — the column a derived plan is built
-      // from — so a station whose plan said 100% talk was described as 75%, and
-      // the CHANGE MIX button next to it wrote a value the scheduler no longer
-      // reads. A control that does nothing is worse than no control: it is a
-      // screen telling you that you have changed something you have not.
-      '<div class="panel-sub">' +
-        (planIsCustom
-          ? 'Each CATEGORY has a share of airtime, and whichever is further behind goes next. ' +
-            'This channel runs its own plan, so the shares come from CATEGORIES below' +
-            (planShares ? ' — currently <strong>' + planShares + '</strong>.' : '.')
-          : 'Talk and music each get a share of airtime, and whichever CATEGORY is further behind goes next — ' +
-            'so a long stretch of one is corrected by the other rather than continued. ' +
-            'Currently <strong>' + Math.round((ch.talkShare || 0.75) * 100) + '% talk</strong>. ' +
-            '<button class="btn ghost btn-mini" data-action="channel-talk-share" data-id="' + attr(ch.id) + '" data-share="' + (ch.talkShare || 0.75) + '">CHANGE MIX</button>') +
-      '</div>' +
-      '<div class="panel-sub">' +
-        'Listening day <strong>' + escapeHTML(minuteToHHMM(ch.dayStartMinute ?? 480)) + '–' +
-        escapeHTML(minuteToHHMM(ch.dayEndMinute ?? 1380)) + '</strong>. ' +
-        'A new episode aired outside these hours has not reached you, so it stays new until it airs inside them — ' +
-        'that is what stops overnight releases being spent at 3am. ' +
-        '<button class="btn ghost btn-mini" data-action="channel-listening-day" data-id="' + attr(ch.id) +
-          '" data-start="' + (ch.dayStartMinute ?? 480) + '" data-end="' + (ch.dayEndMinute ?? 1380) + '">CHANGE HOURS</button>' +
-      '</div>' +
-      composerChannelContent(channelID, pickerOptions) +
-      sourceComposer(activePlan.categories || []) +
-      channelSourcesBody(sourceItems.filter((src) => src.role !== "show"), podcastItems, internetItems) +
-    '</div>';
+    if (channelSection === "mix") {
+      // THE MIX — everything the channel falls back on. The running order is
+      // the engine's; this panel only says what each thing is.
+      html += '<div class="panel panel-wide">' +
+        '<div class="panel-head"><span>// THE MIX</span>' +
+        '<button class="btn primary btn-mini" data-action="composer-toggle" data-composer="channel-content">+ ADD CONTENT</button>' +
+        '</div>' +
+        composerChannelContent(channelID, pickerOptions) +
+        sourceComposer(activePlan.categories || []) +
+        channelSourcesBody(mixItems, sourceNames, podcastItems, internetItems, playlistItems) +
+        // The two knobs that govern the mix sit under it, as facts with an
+        // edit button rather than two paragraphs above the thing they describe.
+        //
+        // The share line reads from the plan when there is one. It used to read
+        // ch.talkShare — the column a derived plan is built FROM — so a station
+        // whose plan said 100% talk was described as 75%, next to a CHANGE MIX
+        // button writing a value the scheduler no longer read.
+        '<div class="channel-knobs">' +
+          '<div class="channel-knob">' +
+            '<span class="knob-label">SHARE</span>' +
+            '<span class="knob-value">' +
+              (planIsCustom
+                ? (planShares ? escapeHTML(planShares) : 'set by the plan')
+                : Math.round((ch.talkShare || 0.75) * 100) + '% talk') +
+            '</span>' +
+            (planIsCustom
+              ? '<span class="knob-hint">from CATEGORIES in the plan</span>'
+              : '<button class="btn ghost btn-mini" data-action="channel-talk-share" data-id="' + attr(ch.id) + '" data-share="' + (ch.talkShare || 0.75) + '">CHANGE</button>') +
+          '</div>' +
+          '<div class="channel-knob">' +
+            '<span class="knob-label">LISTENING DAY</span>' +
+            '<span class="knob-value">' + escapeHTML(minuteToHHMM(ch.dayStartMinute ?? 480)) + '–' +
+              escapeHTML(minuteToHHMM(ch.dayEndMinute ?? 1380)) + '</span>' +
+            '<button class="btn ghost btn-mini" data-action="channel-listening-day" data-id="' + attr(ch.id) +
+              '" data-start="' + (ch.dayStartMinute ?? 480) + '" data-end="' + (ch.dayEndMinute ?? 1380) + '">CHANGE</button>' +
+            '<span class="knob-hint">a new episode aired outside these hours stays new</span>' +
+          '</div>' +
+        '</div>' +
+      '</div>';
+    }
 
-    // Schedule rules
-    html += '<div class="panel panel-wide">' +
-      '<div class="panel-head"><span>// PROGRAMME</span>' +
-      '<span>' +
-        '<button class="btn ghost btn-mini" data-action="composer-toggle" data-composer="channel-show">+ ADD SHOW</button> ' +
-        '<button class="btn ghost btn-mini" data-action="composer-toggle" data-composer="channel-schedule">+ SLOT FOR EXISTING</button>' +
-      '</span></div>' +
-      '<div class="panel-sub">Booked slots, in ' + escapeHTML(ch.effectiveTimezone || "UTC") + ' — ' +
-        'a show only airs in its window, and beats everything in the mix. ' +
-        '<button class="btn ghost btn-mini" data-action="channel-timezone" data-id="' + attr(ch.id) + '" data-tz="' + attr(ch.timezone || "") + '" data-effective="' + attr(ch.effectiveTimezone || "UTC") + '">CHANGE CLOCK</button>' +
-      '</div>' +
-      channelScheduleStatusBody(scheduleStatus, channelID) +
-      composerChannelShow(channelID, pickerOptions) +
-      composerChannelSchedule(channelID, sourceItems) +
-      channelScheduleTimeline(ruleItems, sourceLookup) +
-      channelScheduleBody(ruleItems, sourceLookup) +
-    '</div>';
+    if (channelSection === "rank") {
+      // Drawn from the same source rows the mix lists, so a tier set here and
+      // a tier set from a source's SETTINGS are the same field.
+      const podcastLookup = {};
+      podcastItems.forEach((p) => { podcastLookup[p.id] = p; });
+      rankView = {
+        sources: sourceItems,
+        names: sourceNames,
+        podcasts: podcastLookup,
+        surfacings: (activePlan.freshness || {}).surfacings || {},
+      };
+      html += '<div id="rankSurface">' + rankSurfaceHTML() + '</div>';
+    }
 
-    // The station plan: pools, blocks, categories. This is the whole
-    // station-building surface, and it edits exactly the concepts the
-    // scheduler runs on.
-    html += planPanel({ plan: activePlan, custom: planView.custom }, sourceItems, channelID,
-      (scheduleStatus && scheduleStatus.programming && scheduleStatus.programming.unreachable) || []);
+    if (channelSection === "program") {
+      html += '<div class="panel panel-wide">' +
+        '<div class="panel-head"><span>// BOOKED SLOTS</span>' +
+        '<span>' +
+          '<button class="btn primary btn-mini" data-action="composer-toggle" data-composer="channel-show">+ ADD SHOW</button> ' +
+          '<button class="btn ghost btn-mini" data-action="composer-toggle" data-composer="channel-schedule">+ SLOT FOR EXISTING</button>' +
+        '</span></div>' +
+        '<div class="panel-sub">In ' + escapeHTML(ch.effectiveTimezone || "UTC") + ' — ' +
+          'a show only airs in its window, and beats everything in the mix. ' +
+          '<button class="btn ghost btn-mini" data-action="channel-timezone" data-id="' + attr(ch.id) + '" data-tz="' + attr(ch.timezone || "") + '" data-effective="' + attr(ch.effectiveTimezone || "UTC") + '">CHANGE CLOCK</button>' +
+        '</div>' +
+        channelScheduleStatusBody(scheduleStatus, channelID) +
+        composerChannelShow(channelID, pickerOptions) +
+        composerChannelSchedule(channelID, sourceItems) +
+        channelScheduleTimeline(ruleItems, sourceLookup) +
+        channelScheduleBody(ruleItems, sourceLookup, sourceNames) +
+      '</div>';
+    }
 
-    // What the station owes you, and the answer to "why the hell did it play
-    // that" — neither of which should require an SSH session.
-    html += owedPanel((owed && owed.items) || [], owed && owed.pending);
-    html += whyPanel((why && why.items) || []);
+    if (channelSection === "plan") {
+      // The station plan: pools, blocks, categories. This is the whole
+      // station-building surface, and it edits exactly the concepts the
+      // scheduler runs on.
+      html += planPanel({ plan: activePlan, custom: planView.custom }, sourceItems, channelID,
+        (scheduleStatus && scheduleStatus.programming && scheduleStatus.programming.unreachable) || [],
+        {
+          collapsed: planCollapsed,
+          showAutoPools: showAutoPools,
+          sourceNames: sourceNames,
+          // The measured mix belongs beside the targets it is measured against.
+          balance: channelBalanceBody(scheduleStatus && scheduleStatus.programming),
+        });
+    }
 
-    // Recent
-    html += '<div class="panel panel-wide">' +
-      '<div class="panel-head"><span>// RECENT</span><span>' + recentItems.length + '</span></div>' +
-      channelRecentBody(recentItems) +
-    '</div>';
+    if (channelSection === "owed") {
+      html += owedPanel((owed && owed.items) || [], pending);
+    }
+
+    if (channelSection === "log") {
+      // "Why the hell did it play that" and "what did it play" are the same
+      // question asked at two zoom levels, so they are one section.
+      html += whyPanel((why && why.items) || []);
+      html += '<div class="panel panel-wide">' +
+        '<div class="panel-head"><span>// RECENT</span><span>' + recentItems.length + '</span></div>' +
+        channelRecentBody(recentItems) +
+      '</div>';
+    }
 
     html += '</section>';
     main.innerHTML = html;
     if (activeTab === "radio") scheduleRadioPoll();
   }
 
-  function channelSourcesBody(items, podcasts, internetStations) {
+  // channelSectionNav is the index for the programming screen. Counts live on
+  // the pills so a collapsed section still says how much is inside it —
+  // hiding something is only acceptable if you can see that it is there.
+  function channelSectionNav(sections) {
+    return '<div class="pill-bar section-nav">' + sections.map(([id, label, count]) =>
+      '<button class="pill ' + (channelSection === id ? "active" : "") + '"' +
+        ' data-action="channel-section" data-section="' + attr(id) + '">' +
+        escapeHTML(label) +
+        (count ? ' <span class="pill-count">' + count + '</span>' : '') +
+      '</button>').join("") + '</div>';
+  }
+
+  /* -------- RANK --------
+   * The tier list redraws itself from `rankView` on every change rather than
+   * re-running the whole channel view: a drop has to land instantly, and
+   * renderChannelDetail is twelve requests and a full replacement of the
+   * screen you are dragging on. */
+  function rankSurfaceHTML() {
+    if (!rankView) return "";
+    return rankPanel(rankView.sources, rankView.names, {
+      picked: rankPickedID,
+      podcasts: rankView.podcasts,
+      surfacings: rankView.surfacings,
+    });
+  }
+
+  function renderRankSurface() {
+    const host = document.getElementById("rankSurface");
+    if (host) host.innerHTML = rankSurfaceHTML();
+  }
+
+  // A poll landing mid-gesture rips the card out from under the pointer, and
+  // one landing between a drop and its PATCH redraws the tier the server has
+  // not been told about yet.
+  function rankIsBusy() {
+    return Boolean(rankDragID) || Boolean(rankPickedID) || rankSaves > 0;
+  }
+
+  // setSourceTier moves one show to one band. The card moves first and the
+  // request follows: a tier list that waits for a round trip before the card
+  // lands is a tier list nobody drags twice.
+  async function setSourceTier(sourceID, tier) {
+    const src = ((rankView && rankView.sources) || []).find((entry) => entry.id === sourceID);
+    rankPickedID = "";
+    if (!src) { renderRankSurface(); return; }
+    const before = src.config || {};
+    const next = String(tier || "").trim().toUpperCase();
+    if (String(before.tier || "").trim().toUpperCase() === next) { renderRankSurface(); return; }
+
+    // Merged, not replaced: podcastId and the rest of the source's own config
+    // live in this object, and PATCH writes it whole.
+    const config = Object.assign({}, before);
+    if (next) config.tier = next;
+    else delete config.tier;
+    src.config = config;
+    renderRankSurface();
+
+    rankSaves += 1;
+    try {
+      await api("/api/v1/channels/" + encodeURIComponent(activeChannelID) +
+        "/sources/" + encodeURIComponent(sourceID), {
+        method: "PATCH",
+        body: { config: config },
+      });
+    } catch (err) {
+      src.config = before;
+      renderRankSurface();
+      setStatus("ERROR · could not save tier: " + (err.message || "unknown"));
+    } finally {
+      rankSaves -= 1;
+    }
+  }
+
+  const SOURCE_KIND_LABEL = {
+    "podcast-subscription": "PODCAST",
+    "internet-station": "STATION",
+    "music-playlist": "PLAYLIST",
+    "file-pool": "FILES",
+    "live-stream": "LIVE",
+    "scheduled-show": "SHOW",
+  };
+
+  // resolveSourceNames answers "what is this source called" once, for every
+  // screen that has to say so.
+  //
+  // A source stores a label, but rows created before labels were auto-filled
+  // have none — and every list that fell back to the raw kind showed three
+  // playlists as three rows reading "MUSIC-PLAYLIST". The name lives in the
+  // podcast/station/playlist the config points at, so it is looked up here and
+  // handed to the mix list AND the plan, which would otherwise disagree about
+  // what the same source is called.
+  function resolveSourceNames(sources, catalogs) {
+    const pods = {}; (catalogs.podcasts || []).forEach((p) => { pods[p.id] = p; });
+    const inet = {}; (catalogs.stations || []).forEach((s) => { inet[s.id] = s; });
+    const lists = {}; (catalogs.playlists || []).forEach((pl) => { lists[pl.id] = pl; });
+
+    const names = {};
+    (sources || []).forEach((src) => {
+      const cfg = src.config || {};
+      let name = src.label || "";
+      if (!name) {
+        if (src.kind === "podcast-subscription") {
+          const pod = pods[cfg.podcastId || ""];
+          name = pod ? podcastTitle(pod) : "";
+        } else if (src.kind === "internet-station") {
+          const st = inet[cfg.stationId || ""];
+          name = st ? st.name : "";
+        } else if (src.kind === "music-playlist") {
+          const pl = lists[cfg.playlistId || ""];
+          name = pl ? pl.name : "";
+        } else if (src.kind === "live-stream") {
+          name = cfg.url || "";
+        } else if (src.kind === "file-pool" || src.kind === "scheduled-show") {
+          const paths = cfg.paths || (cfg.path ? [cfg.path] : []);
+          name = paths.length > 0 ? folderName(paths[0]) : "";
+        }
+      }
+      names[src.id] = name || SOURCE_KIND_LABEL[src.kind] || (src.kind || "").toUpperCase();
+    });
+    return names;
+  }
+
+  function channelSourcesBody(items, names, podcasts, internetStations, playlists) {
     if (!items || items.length === 0) {
       return '<div class="empty-state">// no sources — add a file pool, podcast subscription, or internet station above</div>';
     }
@@ -1780,66 +1995,96 @@ import { globalScanActionsHTML, libraryKindScanActionsHTML, libraryScanActionsHT
     (podcasts || []).forEach((p) => { podLookup[p.id] = p; });
     const inetLookup = {};
     (internetStations || []).forEach((s) => { inetLookup[s.id] = s; });
-    return '<div class="list">' + items.map((src) => {
-      const kindLabel = (src.kind || "").toUpperCase();
+    const listLookup = {};
+    (playlists || []).forEach((pl) => { listLookup[pl.id] = pl; });
+
+    const KIND_LABEL = SOURCE_KIND_LABEL;
+
+    // Sorted by role so the list reads as the shape of the station rather than
+    // the order things happened to be added in.
+    const ROLE_ORDER = { SHOW: 0, TALK: 1, MUSIC: 2, COMMERCIAL: 3 };
+    const rows = items.slice().sort((a, b) => {
+      const ra = ROLE_ORDER[(a.role || "talk").toUpperCase()] ?? 9;
+      const rb = ROLE_ORDER[(b.role || "talk").toUpperCase()] ?? 9;
+      if (ra !== rb) return ra - rb;
+      return String(names[a.id] || "").localeCompare(String(names[b.id] || ""));
+    });
+
+    return '<div class="list">' + rows.map((src) => {
       const cfg = src.config || {};
+      const kindLabel = KIND_LABEL[src.kind] || (src.kind || "").toUpperCase();
+      const name = names[src.id] || kindLabel;
+      // Detail is only for the things a name cannot carry: where the files
+      // are, and the one case that has to shout — content the source points at
+      // that no longer exists.
       let detail = "";
-      if (src.kind === "podcast-subscription") {
-        const podID = cfg.podcastId || "";
-        const pod = podLookup[podID];
-        detail = pod ? podcastTitle(pod) : ("podcast: " + (podID || "?"));
-      } else if (src.kind === "internet-station") {
-        const stID = cfg.stationId || "";
-        const st = inetLookup[stID];
-        detail = st ? st.name : ("station: " + (stID || "?"));
+      if (src.kind === "podcast-subscription" && !podLookup[cfg.podcastId || ""]) {
+        detail = "missing podcast " + (cfg.podcastId || "?");
+      } else if (src.kind === "internet-station" && !inetLookup[cfg.stationId || ""]) {
+        detail = "missing station " + (cfg.stationId || "?");
+      } else if (src.kind === "music-playlist" && !listLookup[cfg.playlistId || ""]) {
+        detail = "missing playlist " + (cfg.playlistId || "?");
       } else if (src.kind === "live-stream") {
-        detail = cfg.url || '';
+        detail = cfg.url || "";
       } else if (src.kind === "file-pool" || src.kind === "scheduled-show") {
         const paths = cfg.paths || (cfg.path ? [cfg.path] : []);
-        detail = (paths.length > 0 ? paths[0] : '') + (paths.length > 1 ? " · +" + (paths.length - 1) + " more" : "");
+        detail = (paths.length > 0 ? paths[0] : "") + (paths.length > 1 ? " +" + (paths.length - 1) + " more" : "");
       }
+
       // The role IS the running order, so it leads the row. WEIGHT is gone
       // from the summary: it only breaks ties inside a tier now, and showing
       // it here is what made people read it as priority.
       const role = (src.role || "talk").toUpperCase();
       const roleTag = { TALK: "TALK", MUSIC: "MUS", SHOW: "SHOW", COMMERCIAL: "AD" }[role] || "TALK";
-      // What the scheduler will actually do with this, spelled out: the tier
-      // orders what it owes you, the creator is what it keeps apart.
-      const scheduling = [
+      // The kind and what the scheduler will do with it. The role is NOT
+      // repeated here — it is already the tag on the left, and "ENABLED" is
+      // gone from every row because the button beside it says DISABLE. Only
+      // the exception is worth ink.
+      const meta = [
         cfg.category ? "category " + cfg.category : "",
         cfg.tier ? "tier " + String(cfg.tier).toUpperCase() : "",
         cfg.creator ? "by " + cfg.creator : "",
         cfg.family ? "family " + cfg.family : "",
       ].filter(Boolean).join(" · ");
-      // Rows created before the label was auto-filled still exist, so the
-      // resolved content name is the fallback ahead of the raw kind.
-      return '<div class="list-row">' +
+
+      return '<div class="list-row' + (src.enabled ? "" : " off") + '">' +
         '<div class="num">' + roleTag + '</div>' +
-        '<div class="main"><div class="name">' + escapeHTML(src.label || detail || kindLabel) + '</div>' +
-        '<div class="meta">' + escapeHTML(role) + ' · ' + escapeHTML(kindLabel) + (detail ? ' · ' + escapeHTML(detail) : '') + ' · ' + (src.enabled ? 'ENABLED' : 'DISABLED') +
-          (scheduling ? '<br>' + escapeHTML(scheduling) : '') + '</div></div>' +
+        '<div class="main">' +
+          '<div class="name">' + escapeHTML(name || kindLabel) +
+            '<span class="row-chip">' + escapeHTML(kindLabel) + '</span>' +
+            (src.enabled ? "" : '<span class="row-chip off">DISABLED</span>') +
+          '</div>' +
+          (meta || detail
+            ? '<div class="meta">' + escapeHTML(meta || detail) + '</div>'
+            : "") +
+        '</div>' +
         '<div class="actions">' +
           '<button class="btn ghost btn-mini" data-action="plan-source-edit" data-id="' + attr(src.id) + '">SETTINGS</button>' +
           '<button class="btn ghost btn-mini" data-action="channel-source-toggle" data-id="' + attr(src.id) + '" data-enabled="' + (!src.enabled) + '">' + (src.enabled ? 'DISABLE' : 'ENABLE') + '</button>' +
-          '<button class="btn danger btn-mini" data-action="channel-source-delete" data-id="' + attr(src.id) + '" data-name="' + attr(src.label || kindLabel) + '">DELETE</button>' +
+          '<button class="btn danger btn-mini" data-action="channel-source-delete" data-id="' + attr(src.id) + '" data-name="' + attr(name || kindLabel) + '">DELETE</button>' +
         '</div>' +
       '</div>';
     }).join("") + '</div>';
   }
 
-  function channelScheduleBody(rules, sourceLookup) {
+  function channelScheduleBody(rules, sourceLookup, names) {
     if (!rules || rules.length === 0) {
       return '<div class="empty-state">// no schedule rules — the channel plays new episodes, then reruns and music</div>';
     }
+    // Window first: a booked slot is a time before it is anything else, so the
+    // clock leads the row and the day and content follow.
     return '<div class="list">' + rules.map((rule) => {
       const src = sourceLookup[rule.sourceId];
       const days = weekdayMaskToLabel(rule.weekdayMask);
       const window = minuteToHHMM(rule.startMinute) + " → " + minuteToHHMM(rule.endMinute);
-      const label = rule.label || (src ? src.label || src.kind : "Rule");
-      return '<div class="list-row">' +
+      const sourceName = (names || {})[rule.sourceId] || (src ? src.label || src.kind : "unknown source");
+      const label = rule.label || sourceName;
+      return '<div class="list-row' + (rule.enabled ? "" : " off") + '">' +
         '<div class="num">P' + (rule.priority || 100) + '</div>' +
-        '<div class="main"><div class="name">' + escapeHTML(label) + '</div>' +
-        '<div class="meta">' + escapeHTML(days) + ' · ' + escapeHTML(window) + ' · ' + escapeHTML(src ? src.label || src.kind : 'unknown source') + ' · ' + (rule.enabled ? 'ENABLED' : 'DISABLED') + '</div></div>' +
+        '<div class="main"><div class="name">' + escapeHTML(label) +
+          (rule.enabled ? "" : '<span class="row-chip off">DISABLED</span>') + '</div>' +
+        '<div class="meta">' + escapeHTML(window) + ' · ' + escapeHTML(days) +
+          (label === sourceName ? "" : ' · ' + escapeHTML(sourceName)) + '</div></div>' +
         '<div class="actions">' +
           '<button class="btn danger btn-mini" data-action="channel-schedule-delete" data-id="' + attr(rule.id) + '" data-name="' + attr(label) + '">REMOVE</button>' +
         '</div>' +
@@ -2758,20 +3003,39 @@ import { globalScanActionsHTML, libraryKindScanActionsHTML, libraryScanActionsHT
       try { picked = readContentPicker("composerContent"); }
       catch (pickError) { return composerMessage(name, pickError.message, true); }
       const role = document.getElementById("composerContentRole").value;
-      await api("/api/v1/channels/" + encodeURIComponent(channelID) + "/sources", {
-        method: "POST",
-        body: {
-          config: picked.config, enabled: true, kind: picked.kind, label: picked.label,
-          defaultRotation: role !== "show", role: role,
-        },
-      });
+      // Sequential, not Promise.all: the failure a batch actually hits is the
+      // server rejecting one of them, and a partially-applied parallel burst
+      // leaves you guessing which. Whatever landed before the error stays,
+      // and the message names the one that stopped it.
+      let added = 0;
+      for (const item of picked) {
+        try {
+          await api("/api/v1/channels/" + encodeURIComponent(channelID) + "/sources", {
+            method: "POST",
+            body: {
+              config: item.config, enabled: true, kind: item.kind, label: item.label,
+              defaultRotation: role !== "show", role: role,
+            },
+          });
+        } catch (addError) {
+          await viewRadio();
+          return composerMessage(name,
+            "added " + added + " of " + picked.length + " — \"" + item.label + "\" was rejected: " +
+            (addError.message || "unknown error"), true);
+        }
+        added++;
+      }
       composerClose(name);
+      if (added > 1) setStatus("ADDED " + added + " TO THE MIX");
       await viewRadio();
     } else if (name === "channel-show") {
       const channelID = document.querySelector('[data-composer="channel-show"][data-action="composer-submit"]').dataset.channelId;
-      let picked;
-      try { picked = readContentPicker("composerShow"); }
+      let picks;
+      try { picks = readContentPicker("composerShow"); }
       catch (pickError) { return composerMessage(name, pickError.message, true); }
+      // The show picker is single-select: N sources sharing one window is a
+      // rotation inside a slot, which the plan generator has no pool shape for.
+      const picked = picks[0];
       const startMin = parseHHMM(document.getElementById("composerShowStart").value);
       const endMin = parseHHMM(document.getElementById("composerShowEnd").value);
       if (startMin < 0 || endMin < 0) return composerMessage(name, "start and end must be HH:MM, e.g. 16:00", true);
@@ -3046,6 +3310,60 @@ import { globalScanActionsHTML, libraryKindScanActionsHTML, libraryScanActionsHT
   }
 
   /* -------- actions -------- */
+
+  /* Dragging a show between tiers. Delegated on `main` rather than bound to
+   * the cards, because the surface is rebuilt from scratch on every drop and
+   * per-card listeners would not survive it. */
+  main.addEventListener("dragstart", (event) => {
+    const card = event.target.closest && event.target.closest(".tier-card");
+    if (!card) return;
+    rankDragID = card.dataset.sourceId || "";
+    rankPickedID = "";
+    card.classList.add("dragging");
+    if (event.dataTransfer) {
+      event.dataTransfer.effectAllowed = "move";
+      // Firefox refuses to start a drag at all with nothing on the transfer.
+      event.dataTransfer.setData("text/plain", rankDragID);
+    }
+  });
+
+  main.addEventListener("dragover", (event) => {
+    if (!rankDragID) return;
+    const row = event.target.closest && event.target.closest(".tier-row");
+    if (!row) return;
+    // Without this the drop never fires: the default answer to "may I land
+    // here" is no.
+    event.preventDefault();
+    if (event.dataTransfer) event.dataTransfer.dropEffect = "move";
+    if (!row.classList.contains("over")) {
+      main.querySelectorAll(".tier-row.over").forEach((other) => other.classList.remove("over"));
+      row.classList.add("over");
+    }
+  });
+
+  main.addEventListener("dragleave", (event) => {
+    const row = event.target.closest && event.target.closest(".tier-row");
+    if (row && !row.contains(event.relatedTarget)) row.classList.remove("over");
+  });
+
+  main.addEventListener("drop", async (event) => {
+    if (!rankDragID) return;
+    const row = event.target.closest && event.target.closest(".tier-row");
+    if (!row) return;
+    event.preventDefault();
+    const sourceID = rankDragID;
+    rankDragID = "";
+    await setSourceTier(sourceID, row.dataset.tier || "");
+  });
+
+  // Dropping outside a band, or pressing escape mid-drag, still ends the drag
+  // — and the classes it painted on have to come off with it.
+  main.addEventListener("dragend", () => {
+    rankDragID = "";
+    main.querySelectorAll(".tier-card.dragging").forEach((card) => card.classList.remove("dragging"));
+    main.querySelectorAll(".tier-row.over").forEach((row) => row.classList.remove("over"));
+  });
+
   // Live chip preview for any input with data-tags-target. Keeps the
   // comma-separated tag pattern visible without a chip-input library.
   main.addEventListener("input", (event) => {
@@ -3093,13 +3411,62 @@ import { globalScanActionsHTML, libraryKindScanActionsHTML, libraryScanActionsHT
     }
   });
 
+  // ---- the multi-select picker ----
+  //
+  // Filtering hides rows without unticking them, so you can search "kexp",
+  // tick it, search "wfmu", tick that, and submit both. ALL and NONE act on
+  // what is *visible*, which is what makes "filter to NPR, tick ALL" work.
+  function pickerVisibleItems(listID) {
+    const list = document.getElementById(listID);
+    if (!list) return [];
+    return Array.from(list.querySelectorAll(".picker-item")).filter((row) => !row.hidden);
+  }
+
+  function updatePickerCount(listID) {
+    const list = document.getElementById(listID);
+    const out = document.getElementById(listID + "-count");
+    if (!list || !out) return;
+    const total = list.querySelectorAll("input[type=checkbox]").length;
+    const picked = list.querySelectorAll("input[type=checkbox]:checked").length;
+    out.textContent = picked === 0 ? "none of " + total + " selected" : picked + " of " + total + " selected";
+    out.classList.toggle("on", picked > 0);
+    // A typed label cannot name more than one thing, so the field says so
+    // rather than silently applying to the first of eight.
+    const prefix = listID.replace(/(Podcast|Station|Playlist)$/, "");
+    const label = document.getElementById(prefix + "Label");
+    if (label) {
+      const many = picked > 1;
+      label.disabled = many;
+      label.placeholder = many ? "each keeps its own name" : "leave blank to use its own name";
+    }
+  }
+
+  document.addEventListener("input", (event) => {
+    const el = event.target;
+    if (!el || !el.classList || !el.classList.contains("picker-filter")) return;
+    const needle = el.value.trim().toLowerCase();
+    const list = document.getElementById(el.dataset.picker);
+    if (!list) return;
+    list.querySelectorAll(".picker-item").forEach((row) => {
+      row.hidden = needle !== "" && (row.dataset.name || "").indexOf(needle) === -1;
+    });
+  });
+
   // samo-radio's controls are selects and a slider, so they arrive as change
   // events rather than clicks. "change" rather than "input" on the volume
   // slider on purpose: it fires once on release instead of on every pixel of
   // the drag, which would be one HTTP round trip per pixel.
   document.addEventListener("change", async (event) => {
     const el = event.target;
-    if (!el || !el.dataset || !el.dataset.action) return;
+    if (!el || !el.dataset) return;
+    // Ticking a picker box is checked BEFORE the data-action guard below: the
+    // boxes carry data-picker and no data-action, so anything downstream of
+    // that guard never sees them.
+    if (el.dataset.picker && el.type === "checkbox") {
+      updatePickerCount(el.dataset.picker);
+      return;
+    }
+    if (!el.dataset.action) return;
     const action = el.dataset.action;
     // The content picker renders every kind's fields and hides all but one.
     // Swapping visibility beats re-rendering the form, which would throw away
@@ -3393,6 +3760,43 @@ import { globalScanActionsHTML, libraryKindScanActionsHTML, libraryScanActionsHT
         // only place feedback can land.
         el.textContent = "SENT →";
         setTimeout(() => { el.textContent = label; }, 1600);
+      } else if (action === "channel-section") {
+        channelSection = el.dataset.section || "mix";
+        rankPickedID = "";
+        rankDragID = "";
+        await viewRadio();
+        window.scrollTo({ top: 0 });
+      } else if (action === "rank-card") {
+        // Click to lift, click to place — the same two gestures as the drag,
+        // for the touchscreen and the trackpad that HTML5 drag and drop does
+        // not serve. A second click on the lifted card puts it back.
+        const id = el.dataset.sourceId || "";
+        if (!rankPickedID || rankPickedID === id) {
+          rankPickedID = rankPickedID === id ? "" : id;
+          renderRankSurface();
+        } else {
+          const row = el.closest(".tier-row");
+          await setSourceTier(rankPickedID, row ? row.dataset.tier : "");
+        }
+      } else if (action === "rank-drop") {
+        if (!rankPickedID) return;
+        await setSourceTier(rankPickedID, el.dataset.tier || "");
+      } else if (action === "plan-section") {
+        const section = el.dataset.section;
+        if (planCollapsed.has(section)) planCollapsed.delete(section);
+        else planCollapsed.add(section);
+        await viewRadio();
+      } else if (action === "plan-auto-pools") {
+        showAutoPools = !showAutoPools;
+        await viewRadio();
+      } else if (action === "picker-all" || action === "picker-none") {
+        const listID = el.dataset.picker;
+        const on = action === "picker-all";
+        pickerVisibleItems(listID).forEach((row) => {
+          const box = row.querySelector("input[type=checkbox]");
+          if (box) box.checked = on;
+        });
+        updatePickerCount(listID);
       } else if (action === "radio-mode") {
         const mode = el.dataset.mode;
         radioMode = (mode === "internet" || mode === "samo-radio") ? mode : "channels";

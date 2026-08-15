@@ -1,29 +1,29 @@
 {
   "src/app.js": {
-    "file": "app-DLl52ZcU.js",
+    "file": "app-B-_yGWp0.js",
     "name": "app",
     "src": "src/app.js",
     "isEntry": true,
     "css": [
-      "app-Dqa8lh6L.css"
+      "app-T8YYPqBF.css"
     ]
   },
   "src/login.js": {
-    "file": "login-Be5H4Oc0.js",
+    "file": "login-BGL9zOoM.js",
     "name": "login",
     "src": "src/login.js",
     "isEntry": true,
     "css": [
-      "login-DC2c7iY9.css"
+      "login-vzoNfbKt.css"
     ]
   },
   "src/setup.js": {
-    "file": "setup-CEjR3d98.js",
+    "file": "setup-B0CGERxz.js",
     "name": "setup",
     "src": "src/setup.js",
     "isEntry": true,
     "css": [
-      "setup-ugJ78rMc.css"
+      "setup-CyydA5Ap.css"
     ]
   }
 }

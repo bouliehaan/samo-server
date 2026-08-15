@@ -69,7 +69,35 @@ function checkboxHTML(id, label, checked) {
 
 // ---- the plan panel ----------------------------------------------------
 
-export function planPanel(view, sources, channelID, unreachable) {
+// isAutoPool marks the pools the plan generator writes for you, one per booked
+// slot (see derivePlan in internal/channels/plan.go). They are plumbing: you
+// did not name them, editing one does nothing you can predict, and with a full
+// week booked they outnumber the pools you actually wrote.
+function isAutoPool(pool) {
+  return String(pool.id || "").indexOf("slot-") === 0;
+}
+
+// collapsibleSection is the disclosure every part of the plan is wrapped in.
+// The header stays a fixed two lines whether it is open or shut, so the plan
+// reads as an index you can scan before it reads as a form you have to.
+function collapsibleSection(id, title, count, sub, actions, body, collapsed) {
+  return '<div class="plan-section' + (collapsed ? " collapsed" : "") + '">' +
+    '<div class="panel-head">' +
+      '<button class="section-toggle" data-action="plan-section" data-section="' + attr(id) + '">' +
+        '<span class="section-caret">' + (collapsed ? "&#9656;" : "&#9662;") + '</span>' +
+        '<span>// ' + escapeHTML(title) + '</span>' +
+        (count == null ? "" : '<span class="section-count">' + escapeHTML(String(count)) + '</span>') +
+      '</button>' +
+      '<span>' + actions + '</span>' +
+    '</div>' +
+    (collapsed ? "" :
+      (sub ? '<div class="panel-sub">' + sub + '</div>' : "") + body) +
+  '</div>';
+}
+
+export function planPanel(view, sources, channelID, unreachable, ui) {
+  ui = ui || {};
+  const collapsed = ui.collapsed || new Set();
   const plan = (view && view.plan) || {};
   const custom = Boolean(view && view.custom);
   const categories = plan.categories || [];
@@ -99,10 +127,10 @@ export function planPanel(view, sources, channelID, unreachable) {
       (custom ? '<button class="btn danger btn-mini" data-action="plan-reset" data-id="' + attr(channelID) + '">REVERT TO DERIVED</button>' : '') +
     '</span></div>' +
     '<div class="panel-sub">' + escapeHTML(origin) + '</div>' +
-    categoriesSection(categories) +
-    poolsSection(pools, sources) +
-    blocksSection(blocks, plan) +
-    behaviourSection(plan) +
+    categoriesSection(categories, collapsed.has("categories"), ui.balance) +
+    poolsSection(pools, sources, collapsed.has("pools"), ui.showAutoPools, ui.sourceNames) +
+    blocksSection(blocks, plan, collapsed.has("blocks"), ui.sourceNames) +
+    behaviourSection(plan, collapsed.has("behaviour")) +
     blockComposer(plan) +
     poolComposer(plan, sources) +
     categoryComposer() +
@@ -113,15 +141,19 @@ export function planPanel(view, sources, channelID, unreachable) {
 // Categories are the station's own vocabulary for what kind of programming
 // something is. The engine never compares one to a literal, so a station can
 // run comedy, audiobook and old-time-radio as easily as talk and music.
-function categoriesSection(categories) {
+function categoriesSection(categories, collapsed, balance) {
+  // Targets are relative, so the row shows the share the engine reads rather
+  // than the raw number — "1 and 0" is 100%/0%, not 1%/0%.
+  const total = categories.reduce((sum, c) => sum + (Number(c.target) || 0), 0);
   const rows = categories.length === 0
     ? '<div class="empty-state">// no categories — a plan needs at least one</div>'
     : '<div class="list">' + categories.map((category, index) => {
-        const target = Math.round((Number(category.target) || 0) * 100);
+        const raw = Number(category.target) || 0;
+        const share = total > 0 ? Math.round((raw / total) * 100) : 0;
         return '<div class="list-row">' +
-          '<div class="num">' + target + '%</div>' +
+          '<div class="num">' + share + '%</div>' +
           '<div class="main"><div class="name">' + escapeHTML(category.label || category.id) + '</div>' +
-          '<div class="meta">' + escapeHTML(category.id) + ' · target ' + target + '% of airtime</div></div>' +
+          '<div class="meta">' + escapeHTML(category.id) + '</div></div>' +
           '<div class="actions">' +
             '<button class="btn ghost btn-mini" data-action="plan-category-edit" data-index="' + index + '">EDIT</button>' +
             '<button class="btn danger btn-mini" data-action="plan-category-delete" data-index="' + index + '">REMOVE</button>' +
@@ -129,85 +161,104 @@ function categoriesSection(categories) {
         '</div>';
       }).join("") + '</div>';
 
-  return '<div class="plan-section">' +
-    '<div class="panel-head"><span>// CATEGORIES</span>' +
-      '<button class="btn ghost btn-mini" data-action="plan-category-new">+ CATEGORY</button>' +
-    '</div>' +
-    '<div class="panel-sub">What kinds of programming this station has, and what share of airtime each should get. ' +
-      'Targets are relative — they do not have to add up to 100.</div>' +
-    rows +
-  '</div>';
+  return collapsibleSection("categories", "CATEGORIES", categories.length,
+    'What kinds of programming this station has, and what share of airtime each should get.',
+    '<button class="btn ghost btn-mini" data-action="plan-category-new">+ CATEGORY</button>',
+    rows + (balance || ""), collapsed);
 }
 
 // Pools are reusable groupings of content. Blocks reference pools, never
 // sources directly, which is what stops a daypart being welded to one podcast.
-function poolsSection(pools, sources) {
-  const lookup = {};
-  (sources || []).forEach((src) => { lookup[src.id] = src; });
-  const rows = pools.length === 0
-    ? '<div class="empty-state">// no pools — add one and put some of your sources in it</div>'
-    : '<div class="list">' + pools.map((pool, index) => {
-        // A matched pool is a live rule, so it says what it selects rather than
-        // listing a snapshot that goes stale the moment you add anything.
-        if (pool.match) {
-          const rule = [
-            pool.match.category ? "category " + pool.match.category : "",
-            pool.match.role ? "role " + pool.match.role : "",
-            pool.match.kind ? "kind " + pool.match.kind : "",
-          ].filter(Boolean).join(" · ");
-          const matched = (sources || []).filter((src) =>
-            (!pool.match.category || (src.config || {}).category === pool.match.category ||
-              (!(src.config || {}).category && defaultCategoryForRole(src.role) === pool.match.category)) &&
-            (!pool.match.role || src.role === pool.match.role) &&
-            (!pool.match.kind || src.kind === pool.match.kind)).length;
-          return '<div class="list-row">' +
-            '<div class="num">' + matched + '</div>' +
-            '<div class="main"><div class="name">' + escapeHTML(pool.label || pool.id) + '</div>' +
-            '<div class="meta">' + escapeHTML(pool.id) + ' · everything matching ' + escapeHTML(rule) +
-              ' — new content joins automatically</div></div>' +
-            '<div class="actions">' +
-              '<button class="btn ghost btn-mini" data-action="plan-pool-edit" data-index="' + index + '">EDIT</button>' +
-              '<button class="btn danger btn-mini" data-action="plan-pool-delete" data-index="' + index + '">REMOVE</button>' +
-            '</div>' +
-          '</div>';
-        }
-        const members = (pool.sourceIds || []).map((id) => {
-          const src = lookup[id];
-          return src ? (src.label || src.kind) : id;
-        });
-        const summary = members.length === 0 ? "empty" : members.join(", ");
-        return '<div class="list-row">' +
-          '<div class="num">' + (pool.sourceIds || []).length + '</div>' +
-          '<div class="main"><div class="name">' + escapeHTML(pool.label || pool.id) + '</div>' +
-          '<div class="meta">' + escapeHTML(pool.id) + ' · ' + escapeHTML(summary) + '</div></div>' +
-          '<div class="actions">' +
-            '<button class="btn ghost btn-mini" data-action="plan-pool-edit" data-index="' + index + '">EDIT</button>' +
-            '<button class="btn danger btn-mini" data-action="plan-pool-delete" data-index="' + index + '">REMOVE</button>' +
-          '</div>' +
-        '</div>';
-      }).join("") + '</div>';
+function poolsSection(pools, sources, collapsed, showAuto, sourceNames) {
+  const names = sourceNames || {};
+  const nameOf = (id) => names[id] || id;
 
-  return '<div class="plan-section">' +
-    '<div class="panel-head"><span>// CONTENT POOLS</span>' +
-      '<button class="btn ghost btn-mini" data-action="plan-pool-new">+ POOL</button>' +
-    '</div>' +
-    '<div class="panel-sub">Reusable sets of content. Pools may overlap freely — "everything" and "just the music" ' +
-      'are both useful groupings of the same sources.</div>' +
-    rows +
-  '</div>';
+  // Indices are the edit handle, so they are captured before the auto pools
+  // are filtered out — splicing a filtered list would edit the wrong row.
+  const indexed = pools.map((pool, index) => ({ pool: pool, index: index }));
+  const owned = indexed.filter((entry) => !isAutoPool(entry.pool));
+  const auto = indexed.filter((entry) => isAutoPool(entry.pool));
+
+  const row = (entry) => {
+    const pool = entry.pool;
+    // A matched pool is a live rule, so it says what it selects rather than
+    // listing a snapshot that goes stale the moment you add anything.
+    if (pool.match) {
+      const rule = [
+        pool.match.category ? "category " + pool.match.category : "",
+        pool.match.role ? "role " + pool.match.role : "",
+        pool.match.kind ? "kind " + pool.match.kind : "",
+      ].filter(Boolean).join(" · ");
+      const matched = (sources || []).filter((src) =>
+        (!pool.match.category || (src.config || {}).category === pool.match.category ||
+          (!(src.config || {}).category && defaultCategoryForRole(src.role) === pool.match.category)) &&
+        (!pool.match.role || src.role === pool.match.role) &&
+        (!pool.match.kind || src.kind === pool.match.kind)).length;
+      return '<div class="list-row">' +
+        '<div class="num">' + matched + '</div>' +
+        '<div class="main"><div class="name">' + escapeHTML(pool.label || pool.id) +
+          ' <span class="row-chip">AUTO</span></div>' +
+        '<div class="meta">everything matching ' + escapeHTML(rule) +
+          ' — new content joins on its own</div></div>' +
+        '<div class="actions">' +
+          '<button class="btn ghost btn-mini" data-action="plan-pool-edit" data-index="' + entry.index + '">EDIT</button>' +
+          '<button class="btn danger btn-mini" data-action="plan-pool-delete" data-index="' + entry.index + '">REMOVE</button>' +
+        '</div>' +
+      '</div>';
+    }
+    const members = (pool.sourceIds || []).map(nameOf);
+    const summary = members.length === 0 ? "empty" : members.join(", ");
+    return '<div class="list-row">' +
+      '<div class="num">' + (pool.sourceIds || []).length + '</div>' +
+      '<div class="main"><div class="name">' + escapeHTML(pool.label || pool.id) + '</div>' +
+      '<div class="meta">' + escapeHTML(summary) + '</div></div>' +
+      '<div class="actions">' +
+        '<button class="btn ghost btn-mini" data-action="plan-pool-edit" data-index="' + entry.index + '">EDIT</button>' +
+        '<button class="btn danger btn-mini" data-action="plan-pool-delete" data-index="' + entry.index + '">REMOVE</button>' +
+      '</div>' +
+    '</div>';
+  };
+
+  const rows = owned.length === 0
+    ? '<div class="empty-state">// no pools — add one and put some of your sources in it</div>'
+    : '<div class="list">' + owned.map(row).join("") + '</div>';
+
+  // The slot pools are still reachable, just not in the way. Booking a week of
+  // shows should not bury the three pools you wrote under fourteen you didn't.
+  const autoBlock = auto.length === 0 ? "" :
+    '<div class="plan-aside">' +
+      '<button class="btn ghost btn-mini" data-action="plan-auto-pools">' +
+        (showAuto ? "HIDE" : "SHOW") + ' ' + auto.length + ' POOL' + (auto.length === 1 ? "" : "S") +
+        ' WRITTEN FOR BOOKED SHOWS</button>' +
+      (showAuto ? '<div class="list">' + auto.map(row).join("") + '</div>' : "") +
+    '</div>';
+
+  return collapsibleSection("pools", "CONTENT POOLS", owned.length,
+    'Reusable sets of content. Pools may overlap freely — "everything" and "just the music" ' +
+      'are both useful groupings of the same sources.',
+    '<button class="btn ghost btn-mini" data-action="plan-pool-new">+ POOL</button>',
+    rows + autoBlock, collapsed);
 }
 
 // A block is what the station IS for a stretch. Entry can be a clock time, a
 // handover from another block, a condition, or a combination.
-function blocksSection(blocks, plan) {
+function blocksSection(blocks, plan, collapsed, sourceNames) {
   const rows = blocks.length === 0
     ? '<div class="empty-state">// no blocks — a plan needs at least a default one</div>'
     : '<div class="list">' + blocks.map((block, index) => {
         const tag = block.default ? "DEF" : (block.enter && block.enter.hard ? "HARD" : String(index + 1).padStart(2, "0"));
-        return '<div class="list-row">' +
+        // When it runs is the thing you scan a block list for, so it leads the
+        // row on its own line; everything else is the detail underneath.
+        // stacked: a block's summary is content, not a subtitle — clipping it
+        // to one line hides the limits and the cycle, which is most of what
+        // makes one block different from another.
+        return '<div class="list-row stacked">' +
           '<div class="num">' + escapeHTML(tag) + '</div>' +
-          '<div class="main"><div class="name">' + escapeHTML(block.label || block.id) + '</div>' +
-          '<div class="meta">' + escapeHTML(blockSummary(block, plan)) + '</div></div>' +
+          '<div class="main">' +
+            '<div class="name">' + escapeHTML(block.label || block.id) +
+              '<span class="row-when">' + escapeHTML(blockWhen(block, plan)) + '</span></div>' +
+            '<div class="meta">' + escapeHTML(blockPlays(block, plan, sourceNames)) + '</div>' +
+          '</div>' +
           '<div class="actions">' +
             '<button class="btn ghost btn-mini" data-action="plan-block-move" data-index="' + index + '" data-dir="up">↑</button>' +
             '<button class="btn ghost btn-mini" data-action="plan-block-move" data-index="' + index + '" data-dir="down">↓</button>' +
@@ -217,20 +268,20 @@ function blocksSection(blocks, plan) {
         '</div>';
       }).join("") + '</div>';
 
-  return '<div class="plan-section">' +
-    '<div class="panel-head"><span>// PROGRAMMING BLOCKS</span>' +
-      '<button class="btn ghost btn-mini" data-action="plan-block-new">+ BLOCK</button>' +
-    '</div>' +
-    '<div class="panel-sub">A block says what the station is for a stretch of the day. Anchor one to a clock time, ' +
-      'or to <strong>after</strong> another block — anchor the follow-ons and moving a show moves everything after it.</div>' +
-    rows +
-  '</div>';
+  return collapsibleSection("blocks", "PROGRAMMING BLOCKS", blocks.length,
+    'A block says what the station is for a stretch of the day. Anchor one to a clock time, ' +
+      'or to <strong>after</strong> another block — anchor the follow-ons and moving a show moves everything after it.',
+    '<button class="btn ghost btn-mini" data-action="plan-block-new">+ BLOCK</button>',
+    rows, collapsed);
 }
 
-export function blockSummary(block, plan) {
+// blockWhen is the clock half of a block: when it starts, when it ends, what
+// it hands over to. blockPlays is the content half. They used to be one
+// forty-word run-on that nobody read to the end of.
+export function blockWhen(block, plan) {
   const parts = [];
   const enter = block.enter || {};
-  if (block.default) parts.push("default — where everything falls back to");
+  if (block.default) parts.push("default — the fallback");
   if (enter.at) {
     parts.push((enter.hard ? "booked " : "from ") + enter.at + (enter.days && enter.days !== "*" ? " " + enter.days : ""));
     if (enter.hard) parts.push(enter.start || "makeNext");
@@ -245,8 +296,16 @@ export function blockSummary(block, plan) {
   if (exit.atNextAnchor) parts.push("until the next booked slot");
   if (exit.when) parts.push("until " + exit.when);
   if (block.next) parts.push("→ " + blockLabelFor(plan, block.next));
+  return parts.join(" · ");
+}
 
-  const pools = (block.pools || []).map((ref) => ref.pool + (ref.weight && ref.weight !== 1 ? "×" + ref.weight : ""));
+export function blockPlays(block, plan, sourceNames) {
+  const parts = [];
+  // Pool IDs are generated for booked shows, so half of these read as
+  // "slot-csrc_dd86e221ebea4c4a81a486e1" — an identifier that tells the
+  // operator nothing about what the block is going to play.
+  const pools = (block.pools || []).map((ref) =>
+    poolLabelFor(plan, ref.pool, sourceNames) + (ref.weight && ref.weight !== 1 ? "×" + ref.weight : ""));
   if (pools.length > 0) parts.push("plays " + pools.join(" + "));
 
   const limits = block.limits || {};
@@ -276,16 +335,27 @@ function blockLabelFor(plan, id) {
   return match ? (match.label || match.id) : id;
 }
 
-function behaviourSection(plan) {
+function poolLabelFor(plan, id, sourceNames) {
+  const match = (plan.pools || []).find((pool) => pool.id === id);
+  if (!match) return id;
+  // Every generated slot pool is labelled "Slot source", so a week of booked
+  // shows gives five blocks that all claim to play the same thing. The show
+  // itself is the only useful name, and it is the pool's one member.
+  if (isAutoPool(match) && (match.sourceIds || []).length === 1) {
+    const name = (sourceNames || {})[match.sourceIds[0]];
+    if (name) return name;
+  }
+  return match.label || match.id;
+}
+
+function behaviourSection(plan, collapsed) {
   const sep = plan.separation || {};
   const sel = plan.selection || {};
   const horizons = plan.horizons || {};
-  return '<div class="plan-section">' +
-    '<div class="panel-head"><span>// BEHAVIOUR</span>' +
-      '<button class="btn ghost btn-mini" data-action="plan-behaviour-edit">EDIT</button>' +
-    '</div>' +
-    '<div class="panel-sub">How far apart the same thing may be repeated, how far back the balance is measured, ' +
-      'and how much the station is allowed to surprise you.</div>' +
+  return collapsibleSection("behaviour", "BEHAVIOUR", null,
+    'How far apart the same thing may be repeated, how far back the balance is measured, ' +
+      'and how much the station is allowed to surprise you.',
+    '<button class="btn ghost btn-mini" data-action="plan-behaviour-edit">EDIT</button>',
     '<div class="list">' +
       behaviourRow("SEPARATION", "same item " + (sep.item || "8h") +
         " · same source " + (sep.source || "45m") +
@@ -296,8 +366,7 @@ function behaviourSection(plan) {
         "Airtime is measured by overlap, so a long item that started before the window still counts for the part inside it.") +
       behaviourRow("SURPRISE", "top " + Math.round((sel.epsilon != null ? sel.epsilon : 0.15) * 100) + "% of scores compete · search depth " + (sel.searchDepth || 200),
         "Always taking the highest score makes a station predictable. Randomness happens after the rules, never instead of them.") +
-    '</div>' +
-  '</div>';
+    '</div>', collapsed);
 }
 
 function behaviourRow(name, value, hint) {
