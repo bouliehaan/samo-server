@@ -72,24 +72,61 @@ export function channelScheduleTimeline(rules, sourceLookup) {
   return html;
 }
 
-export function channelNowPlayingBody(now) {
+// channelOnAirHeader is the one band that answers "what is happening right
+// now", and it is pinned above everything else.
+//
+// Those facts used to be split across two panels fifteen hundred pixels apart:
+// what is playing sat at the top, while the clock, the block it is playing
+// under, and what is booked next were buried in the middle of the PROGRAM
+// panel behind four lines of balance arithmetic. Reading the station meant
+// scrolling between them and holding one half in your head.
+export function channelOnAirHeader(channelID, now, status) {
+  const cur = (now && now.current) || null;
   const listeners = (now && now.listenerCount) || 0;
-  const listenersChip = '<span class="channel-listeners">' + listeners + ' LISTENER' + (listeners === 1 ? '' : 'S') + '</span>';
-  if (!now || !now.current) {
-    return '<div class="channel-now-body"><div class="empty-state">// no listeners — tune in to start the stream</div>' +
-      '<div class="channel-now-stats">' + listenersChip + '</div></div>';
-  }
-  const cur = now.current;
-  const sub = cur.sourceLabel || cur.kind || "";
-  const startedAt = now.startedAt ? formatDate(now.startedAt) : "";
-  return '<div class="channel-now-body">' +
-    '<div class="channel-now-current">' +
-      '<div class="channel-eyebrow">' + (cur.live ? 'LIVE CUT-IN' : 'NOW') + '</div>' +
-      '<div class="name">' + escapeHTML(cur.title || 'Untitled') + '</div>' +
-      (cur.artist ? '<div class="sub">' + escapeHTML(cur.artist) + '</div>' : '') +
-      '<div class="sub mono">' + escapeHTML(sub) + (startedAt ? ' · STARTED ' + escapeHTML(startedAt) : '') + '</div>' +
+  const programming = (status && status.programming) || null;
+
+  const nowCell = cur
+    ? '<div class="onair-now">' +
+        '<div class="channel-eyebrow">' + (cur.live ? '// LIVE CUT-IN' : '// ON AIR') + '</div>' +
+        '<div class="onair-title">' + escapeHTML(cur.title || 'Untitled') + '</div>' +
+        (cur.artist ? '<div class="onair-sub">' + escapeHTML(cur.artist) + '</div>' : '') +
+        '<div class="onair-sub mono">' + escapeHTML(cur.sourceLabel || cur.kind || '') +
+          (now.startedAt ? ' · SINCE ' + escapeHTML(formatDate(now.startedAt)) : '') + '</div>' +
+      '</div>'
+    : '<div class="onair-now">' +
+        '<div class="channel-eyebrow">// OFF AIR</div>' +
+        '<div class="onair-title dim">nothing is playing</div>' +
+        '<div class="onair-sub mono">STARTS WHEN SOMETHING TUNES IN</div>' +
+      '</div>';
+
+  // The right column is the station's clock and its immediate future: what
+  // block it is in, and what it is about to be interrupted by.
+  const clockCell = status
+    ? '<div class="onair-clock">' +
+        '<div class="onair-time">' + escapeHTML(status.localTime || '??:??') + '</div>' +
+        '<div class="onair-sub mono">' + escapeHTML(status.weekday || '') + ' · ' +
+          escapeHTML(status.timezone || 'UTC') + '</div>' +
+        (programming
+          ? '<div class="onair-sub">' + escapeHTML(programming.blockLabel || programming.blockId || '—') + '</div>'
+          : '') +
+        (programming && programming.nextAnchor
+          ? '<div class="onair-sub mono">NEXT ' + escapeHTML(programming.nextAnchor.label) + ' ' +
+              escapeHTML(programming.nextAnchor.at) + ' · IN ' + escapeHTML(programming.nextAnchor.in) + '</div>'
+          : '<div class="onair-sub mono">NOTHING BOOKED AHEAD</div>') +
+      '</div>'
+    : '';
+
+  const id = attr(channelID);
+  return '<div class="onair' + (cur ? ' live' : '') + '">' +
+    '<div class="onair-grid">' + nowCell + clockCell + '</div>' +
+    '<div class="onair-foot">' +
+      '<div class="onair-transport">' +
+        '<button class="btn ghost btn-mini" data-action="channel-previous" data-id="' + id + '">&#8592; BACK</button>' +
+        '<button class="btn ghost btn-mini" data-action="channel-skip" data-id="' + id + '" data-scope="item">SKIP &#8594;</button>' +
+        '<button class="btn ghost btn-mini" data-action="channel-skip" data-id="' + id + '" data-scope="kind">NEXT MEDIA TYPE</button>' +
+      '</div>' +
+      '<span class="channel-listeners">' + listeners + ' LISTENER' + (listeners === 1 ? '' : 'S') + '</span>' +
     '</div>' +
-    '<div class="channel-now-stats">' + listenersChip + '</div>' +
   '</div>';
 }
 
@@ -100,57 +137,60 @@ export function channelNowPlayingBody(now) {
 // listening end — the clock is in the wrong zone, nothing is booked today, a
 // slot matched but its source could not produce audio — and the only one that
 // used to be visible was none of them.
-// programmingBody shows the balance the rotation is actually working from.
+// channelBalanceBody shows the mix the rotation is actually working from.
 //
 // "Why is it playing this" has as many answers as the algorithm has rules, and
 // none of them were visible: the mix could be nine hours of talk against a 75%
 // target and the panel would say nothing at all. These are the exact numbers
 // the next decision is made from, so a station that sounds wrong can be argued
 // with instead of guessed at.
-function programmingBody(programming) {
+//
+// It lives beside CATEGORIES rather than in the schedule panel, because these
+// numbers are the categories — a target you set next to the share it is
+// actually getting. Split across two screens they were two facts; together
+// they are one, and the gap between them is the thing worth looking at.
+export function channelBalanceBody(programming) {
   if (!programming) return "";
   const categories = programming.categories || [];
+  if (categories.length === 0) return "";
   const off = categories.some((c) => Math.abs((c.actualPercent || 0) - (c.targetPercent || 0)) > 15);
 
-  const mix = categories.length === 0
-    ? "no categories configured"
-    : categories
-        .map((c) => escapeHTML(c.category) + " " + (c.actualPercent || 0) + "%/" + (c.targetPercent || 0) + "%")
-        .join(" · ");
+  const bars = categories.map((c) => {
+    const actual = c.actualPercent || 0;
+    const target = c.targetPercent || 0;
+    const drift = actual - target;
+    const state = Math.abs(drift) > 15 ? " bad" : (Math.abs(drift) > 7 ? " warn" : "");
+    return '<div class="balance-row' + state + '">' +
+      '<span class="balance-name">' + escapeHTML(c.category) + '</span>' +
+      '<span class="balance-track">' +
+        '<span class="balance-fill" style="width:' + Math.min(100, actual) + '%"></span>' +
+        '<span class="balance-target" style="left:' + Math.min(100, target) + '%"></span>' +
+      '</span>' +
+      '<span class="balance-value">' + actual + '% <span class="dim">/ ' + target + '%</span></span>' +
+    '</div>';
+  }).join("");
 
   const limits = (programming.limits || []).map((limit) =>
-    escapeHTML(limit.category) + " run " + limit.runMinutes + "m of " + limit.maxMinutes + "m" +
-    (limit.exceeded ? " — over, so something else goes next" : "")).join(" · ");
+    '<div class="sched-status-detail' + (limit.exceeded ? " bad" : "") + '">' +
+      escapeHTML(limit.category) + " has run " + limit.runMinutes + "m of its " + limit.maxMinutes + "m limit" +
+      (limit.exceeded ? " — over, so something else goes next" : "") +
+    '</div>').join("");
 
-  const room = programming.nextAnchor
-    ? "next booked: " + escapeHTML(programming.nextAnchor.label) + " at " +
-      escapeHTML(programming.nextAnchor.at) + " (in " + escapeHTML(programming.nextAnchor.in) + ") — " +
-      (programming.roomMinutes || 0) + "m of room"
-    : "nothing booked ahead";
-
-  return '<div class="sched-programming' + (off ? " bad" : "") + '">' +
-    '<div class="sched-status-detail">' +
-      "on now: " + escapeHTML(programming.blockLabel || programming.blockId || "—") +
-      (programming.entryReason ? " — " + escapeHTML(programming.entryReason) : "") +
-      (programming.exitReason ? " · ends " + escapeHTML(programming.exitReason) : "") +
-    '</div>' +
-    '<div class="sched-status-detail">' +
-      "mix over the last " + escapeHTML(String(programming.windowHours || 0)) + "h: " + mix +
-      " (actual/target)" +
-    '</div>' +
-    (limits ? '<div class="sched-status-detail">' + limits + '</div>' : "") +
-    '<div class="sched-status-detail">' + room + '</div>' +
-    '<div class="sched-status-detail">' +
-      "listening day " + escapeHTML(String(programming.listeningDay || "")) +
-      " — episodes aired outside it stay new · plan: " +
-      escapeHTML(String(programming.planSource || "derived")) +
-    '</div>' +
+  return '<div class="balance' + (off ? " bad" : "") + '">' +
+    '<div class="balance-head">actual share of the last ' +
+      escapeHTML(String(programming.windowHours || 0)) + 'h, against the target &#9662;</div>' +
+    bars +
+    limits +
   '</div>';
 }
 
+// channelScheduleStatusBody explains what the clock is doing to the schedule.
+// The clock itself, the block on air and the next anchor moved to the on-air
+// header; what is left here is what belongs beside the booked slots.
 export function channelScheduleStatusBody(status, channelID) {
   if (!status) return "";
   const bad = Boolean(status.ruleError || status.playbackError);
+  const programming = status.programming || null;
 
   // The browser is the only party that knows what clock the operator programs
   // against. The server is UTC on purpose and the host is too, so neither can
@@ -164,8 +204,6 @@ export function channelScheduleStatusBody(status, channelID) {
     }
   })();
   const mismatched = status.usingFallbackZone && browserZone && browserZone !== status.timezone;
-  const clock = escapeHTML(status.localTime || "??:??") + " " +
-    escapeHTML(status.weekday || "") + " · " + escapeHTML(status.timezone || "UTC");
 
   let detail = "";
   if (status.activeRule) {
@@ -192,12 +230,16 @@ export function channelScheduleStatusBody(status, channelID) {
       '</div>'
     : "";
 
+  const room = programming && programming.nextAnchor
+    ? '<div class="sched-status-detail">' + (programming.roomMinutes || 0) +
+        'm of room before ' + escapeHTML(programming.nextAnchor.label) + '</div>'
+    : "";
+
   return '<div class="sched-status' + (bad || mismatched ? " bad" : "") + '">' +
     warning +
-    '<div class="sched-status-clock">' + clock + '</div>' +
     '<div class="sched-status-line">' + escapeHTML(status.onAir || "") + '</div>' +
     '<div class="sched-status-detail">' + detail + '</div>' +
-    programmingBody(status.programming) +
+    room +
     (bad ? '<div class="sched-status-error">// ' + escapeHTML(status.ruleError) + '</div>' : "") +
     (status.playbackError
       ? '<div class="sched-status-error">// audio failed' +

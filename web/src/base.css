@@ -256,6 +256,56 @@ html, body {
   padding-right: 36px;
 }
 
+/* Tick boxes have to draw their own tick.
+ *
+ * `appearance: none` above is what gives the text fields their square console
+ * look, but it applies to every input in a .field — and on a checkbox it takes
+ * away the mark as well as the chrome. The box was left changing nothing
+ * visible when you ticked it, which is how you can select eleven podcasts in
+ * the picker and see eleven empty boxes. The platform widget is not the answer
+ * either (rounded, blue, foreign here), so the box is drawn: a hard square that
+ * fills with the accent and carries a mark cut out of it. */
+.field input[type="checkbox"],
+.field input[type="radio"] {
+  width: 17px;
+  height: 17px;
+  flex: none;
+  padding: 0;
+  display: inline-grid;
+  place-content: center;
+  cursor: pointer;
+  transition: background 90ms ease, border-color 90ms ease;
+}
+.field input[type="radio"] { border-radius: 50%; }
+.field input[type="checkbox"]::after,
+.field input[type="radio"]::after {
+  content: "";
+  width: 10px;
+  height: 10px;
+  background: var(--bg);
+  transform: scale(0);
+  transition: transform 90ms ease;
+  clip-path: polygon(13% 47%, 0 62%, 38% 100%, 100% 24%, 84% 9%, 36% 69%);
+}
+.field input[type="radio"]::after {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  clip-path: none;
+}
+.field input[type="checkbox"]:checked,
+.field input[type="radio"]:checked {
+  background: var(--accent);
+  border-color: var(--accent);
+}
+.field input[type="checkbox"]:checked::after,
+.field input[type="radio"]:checked::after { transform: scale(1); }
+.field input[type="checkbox"]:focus-visible,
+.field input[type="radio"]:focus-visible {
+  outline: 1px solid var(--accent);
+  outline-offset: 2px;
+}
+
 .actions {
   display: flex;
   flex-wrap: wrap;
