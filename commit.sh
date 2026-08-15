@@ -66,7 +66,13 @@ fi
 
 if [ "$SKIP_GATES" -eq 0 ]; then
   echo "==> Formatting..."
-  gofmt -l -w .
+  # -print0/-0 because a path with a space would otherwise split into two
+  # arguments and gofmt would fail on both halves. node_modules is excluded
+  # because there IS vendored Go under web/ (flatted ships some), and
+  # reformatting a third-party file is a diff you did not write and would then
+  # commit, since staging below is `git add -A`.
+  find . -name '*.go' -not -path './.git/*' -not -path '*/node_modules/*' -print0 \
+    | xargs -0 gofmt -l -w
 
   echo "==> go vet"
   go vet ./...
