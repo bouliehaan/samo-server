@@ -32,6 +32,7 @@ import (
 	"github.com/bouliehaan/samo-server/internal/events"
 	"github.com/bouliehaan/samo-server/internal/explo"
 	"github.com/bouliehaan/samo-server/internal/files"
+	"github.com/bouliehaan/samo-server/internal/images"
 	"github.com/bouliehaan/samo-server/internal/lastfm"
 	"github.com/bouliehaan/samo-server/internal/libraries"
 	"github.com/bouliehaan/samo-server/internal/log"
@@ -250,6 +251,15 @@ func main() {
 		log.Fatal(err)
 	}
 	filesService := files.New(db, coverService.CoverDir(), podcastCacheService.CacheDir())
+	// Nested under the cover directory so it inherits that read root, and so
+	// clearing covers clears the variants derived from them in one stroke.
+	thumbnailService, err := images.New(filepath.Join(coverService.CoverDir(), "thumbs"))
+	if err != nil {
+		// Non-fatal: without it the image routes serve originals, which is
+		// exactly what they did before variants existed.
+		log.Errorf("thumbnails: disabled (%v)", err)
+		thumbnailService = nil
+	}
 	sourceService := sources.New(db, sources.Options{
 		Covers:              coverService,
 		PodcastCache:        podcastCacheService,
@@ -590,6 +600,7 @@ func main() {
 		Playback:      playbackService,
 		Covers:        coverService,
 		Files:         filesService,
+		Thumbnails:    thumbnailService,
 		Metadata:      metadataService,
 		MetadataApply: metadataApplyService,
 		Playlists:     playlistService,

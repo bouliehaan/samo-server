@@ -10,6 +10,7 @@ import (
 
 	"github.com/bouliehaan/samo-server/internal/catalog"
 	"github.com/bouliehaan/samo-server/internal/files"
+	"github.com/bouliehaan/samo-server/internal/images"
 	"github.com/bouliehaan/samo-server/internal/podcaststream"
 	"github.com/bouliehaan/samo-server/internal/safego"
 )
@@ -387,9 +388,16 @@ func (s *Server) servePodcastCover(w http.ResponseWriter, r *http.Request) {
 	s.serveCatalogImage(w, r, images)
 }
 
-func (s *Server) serveCatalogImage(w http.ResponseWriter, r *http.Request, images []catalog.Image) {
-	if path := firstImagePath(images); path != "" {
+func (s *Server) serveCatalogImage(w http.ResponseWriter, r *http.Request, records []catalog.Image) {
+	if path := firstImagePath(records); path != "" {
 		w.Header().Set("Cache-Control", "public, max-age=31536000, immutable")
+		// `?width=` is a hint, never a requirement: anything that cannot be
+		// resized (an unreadable source, a format the standard library has no
+		// decoder for, art already smaller than the request) falls through to
+		// the original bytes rather than failing the request.
+		if variant, ok := s.thumbnailFor(r, path); ok {
+			path = variant
+		}
 		if err := s.filesService().ServeLocalPath(r.Context(), path, w, r); err != nil {
 			writeFilesError(w, err)
 		}
@@ -399,19 +407,48 @@ func (s *Server) serveCatalogImage(w http.ResponseWriter, r *http.Request, image
 	// supplied one (e.g. cover from a metadata-apply that hasn't been
 	// downloaded yet, or an RSS feed image). Redirect rather than proxy
 	// so the bytes don't round-trip through Samo.
-	if url := firstImageURL(images); url != "" {
+	if url := firstImageURL(records); url != "" {
 		http.Redirect(w, r, url, http.StatusTemporaryRedirect)
 		return
 	}
-	if resolved, ok := s.resolveCatalogImageRecord(r.Context(), images); ok {
+	if resolved, ok := s.resolveCatalogImageRecord(r.Context(), records); ok {
 		s.serveCatalogImage(w, r, []catalog.Image{resolved})
 		return
 	}
 	writeError(w, http.StatusNotFound, "cover not found")
 }
 
-func (s *Server) resolveCatalogImageRecord(ctx context.Context, images []catalog.Image) (catalog.Image, bool) {
-	for _, image := range images {
+// thumbnailFor resolves the on-disk downscale of sourcePath that satisfies the
+// request's `?width=`, rendering it on first use.
+//
+// It reports false whenever the original is the right answer, which is the only
+// safe default: the parameter is advisory, and every failure mode here — no
+// thumbnail service configured, a width outside the ladder, a source outside
+// the library sandbox, an undecodable format, art already small enough — should
+// produce the artwork the client asked for rather than an error.
+func (s *Server) thumbnailFor(r *http.Request, sourcePath string) (string, bool) {
+	if s.thumbnails == nil {
+		return "", false
+	}
+	width, ok := images.NormalizeWidth(r.URL.Query().Get("width"))
+	if !ok {
+		return "", false
+	}
+	// Resolve through the same sandbox that will serve the result, so a path
+	// the files service would refuse is never opened and decoded here either.
+	absolute, info, err := s.filesService().ValidateLocalPath(r.Context(), sourcePath)
+	if err != nil || info.IsDir() {
+		return "", false
+	}
+	variant, err := s.thumbnails.Variant(absolute, info.ModTime().Unix(), info.Size(), width)
+	if err != nil {
+		return "", false
+	}
+	return variant, true
+}
+
+func (s *Server) resolveCatalogImageRecord(ctx context.Context, records []catalog.Image) (catalog.Image, bool) {
+	for _, image := range records {
 		if strings.TrimSpace(image.Path) != "" || strings.TrimSpace(image.URL) != "" {
 			continue
 		}

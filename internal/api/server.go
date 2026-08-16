@@ -22,6 +22,7 @@ import (
 	"github.com/bouliehaan/samo-server/internal/events"
 	"github.com/bouliehaan/samo-server/internal/explo"
 	"github.com/bouliehaan/samo-server/internal/files"
+	"github.com/bouliehaan/samo-server/internal/images"
 	"github.com/bouliehaan/samo-server/internal/lastfm"
 	"github.com/bouliehaan/samo-server/internal/libraries"
 	"github.com/bouliehaan/samo-server/internal/log"
@@ -40,13 +41,16 @@ import (
 )
 
 type ServerOptions struct {
-	DB            *sql.DB
-	APIToken      string
-	Catalog       *catalog.Service
-	Libraries     *libraries.Service
-	Playback      *playback.Service
-	Covers        *covers.Service
-	Files         *files.Service
+	DB        *sql.DB
+	APIToken  string
+	Catalog   *catalog.Service
+	Libraries *libraries.Service
+	Playback  *playback.Service
+	Covers    *covers.Service
+	Files     *files.Service
+	// Thumbnails renders and caches downscaled artwork. Optional: when nil,
+	// image routes serve originals exactly as they did before.
+	Thumbnails    *images.Service
 	Metadata      *metadata.Service
 	MetadataApply *metadata.MetadataApplyService
 	Playlists     *playlists.Service
@@ -93,6 +97,7 @@ type Server struct {
 	playback                         *playback.Service
 	covers                           *covers.Service
 	files                            *files.Service
+	thumbnails                       *images.Service
 	metadata                         *metadata.Service
 	metadataApply                    *metadata.MetadataApplyService
 	playlists                        *playlists.Service
@@ -192,6 +197,7 @@ func NewServer(options ServerOptions) http.Handler {
 		playback:                         options.Playback,
 		covers:                           options.Covers,
 		files:                            options.Files,
+		thumbnails:                       options.Thumbnails,
 		metadata:                         metadataService,
 		metadataApply:                    options.MetadataApply,
 		playlists:                        options.Playlists,
@@ -468,8 +474,16 @@ func (s *Server) routes() {
 	s.handleAPI("POST /api/v1/internet-radio/stations/{id}/cover", s.uploadInternetRadioCover)
 	s.handleAPI("POST /api/v1/internet-radio/stations/probe", s.runInternetRadioProbeCycle)
 
+	// Discovered, never configured — see station_directory.go. Answers
+	// available=false when nothing is running, which is the common case.
+	s.handleAPI("GET /api/v1/station-directory", s.getStationDirectory)
+
 	s.mux.HandleFunc("GET /radio/{id}/playlist.m3u", s.playlist)
 	s.mux.HandleFunc("GET /radio/{id}/stream", s.stream)
+	// Public like the other stream routes: an <audio> element cannot send an
+	// Authorization header. Four path segments, so it does not collide with
+	// /internet-radio/{id}/stream.
+	s.mux.HandleFunc("GET /internet-radio/directory/{id}/stream", s.streamStationDirectoryChannel)
 	s.mux.HandleFunc("GET /internet-radio/{id}/playlist.m3u", s.internetRadioPlaylist)
 	s.mux.HandleFunc("GET /internet-radio/{id}/stream", s.internetRadioStream)
 

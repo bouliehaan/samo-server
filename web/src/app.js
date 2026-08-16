@@ -2573,10 +2573,127 @@ import { globalScanActionsHTML, libraryKindScanActionsHTML, libraryScanActionsHT
     return html;
   }
 
+  // Populated by settingsRadio() from GET /api/v1/station-directory, which is
+  // discovered rather than configured — so this is null on virtually every
+  // install and the panel below simply never renders. Held at module scope so
+  // the filter box can re-render rows without re-fetching.
+  let stationDirectory = null;
+
+  // Genre and "show all" are view state, not data, so they survive the
+  // re-render that follows adding a station — you stay where you were browsing.
+  let stationDirGenre = "";
+  let stationDirShowAll = false;
+
+  // A directory can carry hundreds of stations, and repainting all of them on
+  // every keystroke makes the page feel broken. So the list is capped — but
+  // browsing is never a dead end: the cap always comes with a button that lifts
+  // it, and the genre bar puts most of the catalogue under 40 rows anyway.
+  const STATION_DIR_ROW_CAP = 80;
+
+  function stationDirGenreOf(station) {
+    return ((station && station.genre) || "").trim() || "Unsorted";
+  }
+
+  // Genres come from the data rather than a hardcoded list, so a directory that
+  // supplies different ones — or none, in which case this is a single bar with
+  // everything under "Unsorted" — still works.
+  function stationDirectoryGenres() {
+    const all = (stationDirectory && stationDirectory.stations) || [];
+    const counts = new Map();
+    all.forEach((s) => {
+      const g = stationDirGenreOf(s);
+      counts.set(g, (counts.get(g) || 0) + 1);
+    });
+    return Array.from(counts.entries()).sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]));
+  }
+
+  function stationDirectoryMatches() {
+    const all = (stationDirectory && stationDirectory.stations) || [];
+    const input = document.getElementById("stationDirFilter");
+    const q = ((input && input.value) || "").trim().toLowerCase();
+    return all.filter((s) => {
+      if (stationDirGenre && stationDirGenreOf(s) !== stationDirGenre) return false;
+      if (!q) return true;
+      return (s.name || "").toLowerCase().includes(q) ||
+        String(s.number == null ? "" : s.number).startsWith(q);
+    });
+  }
+
+  function stationDirectoryGenreBar() {
+    const total = ((stationDirectory && stationDirectory.stations) || []).length;
+    let html = '<button class="pill ' + (stationDirGenre === "" ? "active" : "") + '" data-dir-genre="">' +
+      'ALL <span class="pill-count">' + total + '</span></button>';
+    stationDirectoryGenres().forEach((pair) => {
+      html += '<button class="pill ' + (stationDirGenre === pair[0] ? "active" : "") + '" data-dir-genre="' + attr(pair[0]) + '">' +
+        escapeHTML(pair[0]) + ' <span class="pill-count">' + pair[1] + '</span></button>';
+    });
+    return html;
+  }
+
+  function stationDirectoryRows() {
+    const matched = stationDirectoryMatches();
+    if (matched.length === 0) return '<div class="empty-state">// nothing matches that</div>';
+    const cap = stationDirShowAll ? matched.length : STATION_DIR_ROW_CAP;
+    let rows = "";
+    matched.slice(0, cap).forEach((s) => {
+      rows += '<div class="list-row">' +
+        '<div class="num">' + (s.number == null ? "" : s.number) + '</div>' +
+        '<div class="main"><div class="name">' + escapeHTML(s.name) + '</div>' +
+        '<div class="meta">' + escapeHTML(s.description || s.streamUrl) + '</div></div>' +
+        '<div class="actions">' +
+          '<button class="btn primary btn-mini" data-action="station-dir-add" data-name="' + attr(s.name) + '" data-url="' + attr(s.streamUrl) + '">ADD</button>' +
+          // previewUrl, not streamUrl: the browser must play samo's own proxied
+          // URL. streamUrl points at the directory's host, which is loopback
+          // when it is colocated with samo — unreachable from a listener's
+          // machine. streamUrl is still what gets SAVED, since ffmpeg opens
+          // that one server-side.
+          '<button class="btn ghost btn-mini" data-action="play-url" data-url="' + attr(s.previewUrl || s.streamUrl) + '" data-title="' + attr(s.name) + '" data-sub="Station directory">PLAY</button>' +
+        '</div>' +
+      '</div>';
+    });
+    if (matched.length > cap) {
+      rows += '<div class="actions" style="padding:12px 0">' +
+        '<button class="btn ghost" data-dir-showall="1">SHOW ALL ' + matched.length + '</button>' +
+        '</div>';
+    }
+    return rows;
+  }
+
+  // Repaints the bar and the list in place. Deliberately not a viewSettings()
+  // call: that would refetch everything and throw away the filter text.
+  function renderStationDirectory() {
+    const bar = document.getElementById("stationDirGenres");
+    if (bar) bar.innerHTML = stationDirectoryGenreBar();
+    const list = document.getElementById("stationDirList");
+    if (list) list.innerHTML = stationDirectoryRows();
+  }
+
+  function stationDirectoryPanel() {
+    if (!stationDirectory || !stationDirectory.available) return "";
+    const count = ((stationDirectory.stations) || []).length;
+    return '<div class="panel panel-wide" id="stationDirPanel">' +
+      '<div class="panel-head"><span>// station directory</span><span>' + count + '</span></div>' +
+      '<div class="empty-state" style="margin-bottom:12px">// found a station directory on this host at ' +
+        escapeHTML(stationDirectory.baseUrl) + ' — PLAY to audition, ADD to save it as an internet station</div>' +
+      '<div class="pill-bar" id="stationDirGenres" style="margin-bottom:12px">' + stationDirectoryGenreBar() + '</div>' +
+      '<label class="field"><span class="field-label">Filter</span>' +
+        '<input id="stationDirFilter" type="text" placeholder="name or channel number" autocomplete="off"></label>' +
+      '<div class="list" id="stationDirList">' + stationDirectoryRows() + '</div>' +
+    '</div>';
+  }
+
   async function settingsRadio() {
-    const data = await api("/api/v1/internet-radio/stations").catch(() => ({ items: [] }));
+    // Fetched together so a directory probe never adds latency on top of the
+    // station list. A failure here is normal, not exceptional: no directory
+    // running is the default state.
+    const [data, directory] = await Promise.all([
+      api("/api/v1/internet-radio/stations").catch(() => ({ items: [] })),
+      api("/api/v1/station-directory").catch(() => ({ available: false })),
+    ]);
+    stationDirectory = directory || { available: false };
     const stations = (data && data.items) || [];
     let html = '<div class="panel-grid">';
+    html += stationDirectoryPanel();
     html += '<form class="panel panel-wide settings-form" id="internetRadioForm">' +
       '<div class="panel-head"><span>// add internet station</span></div>' +
       '<div class="form-grid">' +
@@ -3140,6 +3257,39 @@ import { globalScanActionsHTML, libraryKindScanActionsHTML, libraryScanActionsHT
           setMessage("libraryMessage", "library attached", false);
           await viewSettings();
         } catch (err) { setMessage("libraryMessage", err.message, true); }
+      });
+    }
+
+    // Live filter over the discovered directory. Re-renders only the list, so
+    // typing never rebuilds the whole settings view or re-hits the server.
+    const stationDirFilter = document.getElementById("stationDirFilter");
+    if (stationDirFilter) {
+      stationDirFilter.addEventListener("input", renderStationDirectory);
+    }
+
+    // Genre and show-all are wired here rather than through the global
+    // data-action handler because that handler re-runs viewSettings(), which
+    // would refetch the directory and wipe the filter text on every click.
+    // Delegated from the containers, which survive their own innerHTML swaps.
+    const stationDirGenres = document.getElementById("stationDirGenres");
+    if (stationDirGenres) {
+      stationDirGenres.addEventListener("click", (event) => {
+        const pill = event.target.closest("[data-dir-genre]");
+        if (!pill) return;
+        stationDirGenre = pill.dataset.dirGenre || "";
+        // A fresh genre starts capped again, so switching back to ALL never
+        // silently paints the whole catalogue.
+        stationDirShowAll = false;
+        renderStationDirectory();
+      });
+    }
+
+    const stationDirList = document.getElementById("stationDirList");
+    if (stationDirList) {
+      stationDirList.addEventListener("click", (event) => {
+        if (!event.target.closest("[data-dir-showall]")) return;
+        stationDirShowAll = true;
+        renderStationDirectory();
       });
     }
 
@@ -4144,6 +4294,16 @@ import { globalScanActionsHTML, libraryKindScanActionsHTML, libraryScanActionsHT
         if (!confirm("Remove rule " + (el.dataset.name || "") + "?")) return;
         await api("/api/v1/channels/" + encodeURIComponent(activeChannelID) + "/schedule/" + encodeURIComponent(el.dataset.id), { method: "DELETE" });
         await viewRadio();
+      } else if (action === "station-dir-add") {
+        await withButton(el, "ADDING...", async () => {
+          await api("/api/v1/internet-radio/stations", {
+            method: "POST",
+            body: { name: el.dataset.name || "", streamUrl: el.dataset.url || "", enabled: true },
+          });
+          setStatus("STATION DIRECTORY · added " + (el.dataset.name || ""));
+          if (activeTab === "settings") await viewSettings();
+          else await viewRadio();
+        });
       } else if (action === "probe-all-radio") {
         await withButton(el, "PROBING...", async () => {
           await api("/api/v1/internet-radio/stations/probe", { method: "POST" });

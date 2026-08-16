@@ -216,6 +216,21 @@ func (s *Service) ServeMediaFileAtSeconds(ctx context.Context, id string, second
 	return serveFileAt(w, r, absolute, info, contentType, item.DurationSeconds, 0)
 }
 
+// setDefaultCacheControl applies the conservative default for media bytes, but
+// only when the caller has not already decided.
+//
+// Audio is served from paths whose contents can legitimately change under a
+// stable URL (a re-tagged file, a replaced download), so an hour in a private
+// cache is right for it. Artwork addressed by content ID is the opposite: the
+// image routes set `public, max-age=31536000, immutable` before delegating
+// here, and overwriting that quietly capped every cover at one hour — the
+// header said immutable on the way in and expired on the way out.
+func setDefaultCacheControl(w http.ResponseWriter) {
+	if w.Header().Get("Cache-Control") == "" {
+		w.Header().Set("Cache-Control", "private, max-age=3600")
+	}
+}
+
 func serveFile(w http.ResponseWriter, r *http.Request, path string, info os.FileInfo, contentType string) error {
 	return serveFileAt(w, r, path, info, contentType, 0, 0)
 }
@@ -242,7 +257,7 @@ func serveFileAt(w http.ResponseWriter, r *http.Request, path string, info os.Fi
 		w.Header().Set("Content-Type", contentType)
 	}
 	w.Header().Set("Accept-Ranges", "bytes")
-	w.Header().Set("Cache-Control", "private, max-age=3600")
+	setDefaultCacheControl(w)
 
 	if startByte > 0 {
 		remaining := info.Size() - startByte
@@ -276,7 +291,7 @@ func serveFileFromByte(w http.ResponseWriter, r *http.Request, path string, info
 		w.Header().Set("Content-Type", contentType)
 	}
 	w.Header().Set("Accept-Ranges", "bytes")
-	w.Header().Set("Cache-Control", "private, max-age=3600")
+	setDefaultCacheControl(w)
 	w.Header().Set("X-Samo-Stream-Offset-Ms", strconv.FormatInt(startMs, 10))
 
 	remaining := info.Size() - startByte
