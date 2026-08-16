@@ -124,14 +124,23 @@ func TestInternetRadioStreamResolvesPlaylistURL(t *testing.T) {
 		t.Fatal(err)
 	}
 
+	// The playlist still has to be resolved to the real stream, but the bytes
+	// are now relayed rather than redirected to: samo sends `media-src 'self'`,
+	// so a 307 to an external origin walks the audio element straight into
+	// samo's own CSP. See internetRadioStream for the full reasoning.
 	req = httptest.NewRequest(http.MethodGet, "/internet-radio/"+station.ID+"/stream", nil)
 	rec = httptest.NewRecorder()
 	handler.ServeHTTP(rec, req)
-	if rec.Code != http.StatusTemporaryRedirect {
-		t.Fatalf("status = %d, want redirect", rec.Code)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d", rec.Code, http.StatusOK)
 	}
-	if location := rec.Header().Get("Location"); location != upstream.URL+"/live.mp3" {
-		t.Fatalf("location = %q, want resolved stream", location)
+	if location := rec.Header().Get("Location"); location != "" {
+		t.Fatalf("location = %q, want no redirect", location)
+	}
+	// Proof the .pls was followed through to /live.mp3 rather than relayed
+	// verbatim: only that endpoint answers with an audio content type.
+	if ct := rec.Header().Get("Content-Type"); ct != "audio/mpeg" {
+		t.Fatalf("content-type = %q, want audio/mpeg from the resolved stream", ct)
 	}
 }
 

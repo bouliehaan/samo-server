@@ -338,7 +338,22 @@ func (s *Server) internetRadioStream(w http.ResponseWriter, r *http.Request) {
 	} else if err != nil {
 		log.Warnf("internet radio stream resolver failed for %s: %v", station.ID, err)
 	}
-	http.Redirect(w, r, streamURL, http.StatusTemporaryRedirect)
+	// Always relay, never redirect.
+	//
+	// This used to 307 the client at the station's real address, which is
+	// cheaper — no bytes through samo — but could not work in samo's own web UI,
+	// ever, for any external station. Samo sends `media-src 'self'` (see
+	// security_headers.go), so the browser refuses to load audio from any origin
+	// but samo's; the redirect walks the audio element straight into samo's own
+	// Content-Security-Policy and the element fails silently. Redirecting also
+	// broke two other cases: an http-only station on an https page (mixed
+	// content), and any station colocated with samo (127.0.0.1 resolves to the
+	// LISTENER's machine).
+	//
+	// Relaying costs samo's bandwidth, which is the honest tradeoff. The
+	// alternative — loosening the CSP to allow arbitrary media origins — trades
+	// away more than it buys.
+	s.proxyAudioStream(w, r, streamURL)
 }
 
 func (s *Server) internetRadioResponse(r *http.Request, station sources.InternetRadioStation) internetRadioStationResponse {

@@ -166,6 +166,39 @@ func TestServeMediaFileReturnsExactSourceBytes(t *testing.T) {
 	}
 }
 
+func TestServeLocalPathKeepsCallerCacheControl(t *testing.T) {
+	ctx := context.Background()
+	root := t.TempDir()
+	libraryDir := filepath.Join(root, "music")
+	if err := os.MkdirAll(libraryDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	coverPath := filepath.Join(libraryDir, "cover.jpg")
+	if err := os.WriteFile(coverPath, []byte("0123456789"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	db := storagetest.Open(t)
+	if _, err := db.ExecContext(ctx, `
+		INSERT INTO libraries (id, name, kind, media_type, path)
+		VALUES ('library-1', 'Music', 'music', '', ?)`, libraryDir); err != nil {
+		t.Fatal(err)
+	}
+
+	service := New(db)
+	rec := httptest.NewRecorder()
+	// Artwork is addressed by content ID, so the image routes declare it
+	// immutable before delegating here. Overwriting that with the one-hour
+	// default silently expired every cover an hour after it was fetched.
+	rec.Header().Set("Cache-Control", "public, max-age=31536000, immutable")
+	if err := service.ServeLocalPath(ctx, coverPath, rec, httptest.NewRequest(http.MethodGet, "/cover", nil)); err != nil {
+		t.Fatal(err)
+	}
+	if got := rec.Header().Get("Cache-Control"); got != "public, max-age=31536000, immutable" {
+		t.Fatalf("cache-control = %q, want the caller's immutable value", got)
+	}
+}
+
 func TestServeMediaFileSetsDirectPlaybackHeaders(t *testing.T) {
 	ctx := context.Background()
 	root := t.TempDir()
