@@ -1488,10 +1488,31 @@ func (s *channelStreamer) skipCurrent() bool {
 	// channel aired it, and the scheduler believes the log: the episode stops
 	// being fresh and sinks to the back of the rerun queue, permanently, over a
 	// few seconds of audio.
+	//
+	// Never for something out of a bag, where forgetting is the far worse
+	// error. A shuffled source has no freshness to burn and no rerun queue to
+	// sink to the back of: the play log IS its queue, the one record that this
+	// song has had its turn. Delete the row and the song is not merely fresh
+	// again, it is UNPLAYED — indistinguishable from the tracks that have never
+	// come round, top of the eligible pile, every pick, for ever. All that
+	// holds it back is the 45-minute skip window, so it returns three times an
+	// hour; and each return is a slot the rest of the playlist does not get.
+	//
+	// Which makes skipping a song the one action guaranteed to make you hear it
+	// more. Measured on a 300-song playlist over two days: the two tracks the
+	// listener skipped were served thirteen and twelve times while everything
+	// else managed two or three. "I keep hearing the same songs and never the
+	// rest of my playlist" is this, and it gets worse every time the button is
+	// pressed.
+	//
+	// A skip is not evidence that nothing aired. It is the one piece of
+	// evidence that somebody was listening — which is exactly how creditSkip
+	// already reads it when settling an obligation.
 	s.currentMu.RLock()
-	logID, startedAt := s.currentLog, s.currentAt
+	logID, startedAt, item := s.currentLog, s.currentAt, s.current
 	s.currentMu.RUnlock()
-	if logID != "" && time.Since(startedAt) < countsAsAired {
+	shuffled := item != nil && item.Shuffled
+	if logID != "" && !shuffled && time.Since(startedAt) < countsAsAired {
 		s.recorder.OnPlayDiscard(logID)
 		s.currentMu.Lock()
 		s.currentLog = ""

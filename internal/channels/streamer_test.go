@@ -356,3 +356,93 @@ func TestJitterTargetIsTheSameDelayAtEveryBitrate(t *testing.T) {
 		t.Errorf("an unset bitrate gave %d chunks, want the %dkbps default of %d", got, defaultBitrateKbps, want)
 	}
 }
+
+// ---- what a skip is allowed to forget ----------------------------------
+
+type recordingRecorder struct {
+	mu        sync.Mutex
+	discarded []string
+}
+
+func (r *recordingRecorder) OnPlayStart(string, PlaybackItem) (string, error) { return "log-1", nil }
+
+func (r *recordingRecorder) OnPlayEnd(string, PlaybackItem, time.Duration, bool, string) {}
+
+func (r *recordingRecorder) OnPlayDiscard(playLogID string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.discarded = append(r.discarded, playLogID)
+}
+
+func (r *recordingRecorder) forgot() []string {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return append([]string(nil), r.discarded...)
+}
+
+// skippingStreamer is a streamer with one item "playing", ready to be skipped.
+func skippingStreamer(t *testing.T, item PlaybackItem, recorder PlayRecorder) *channelStreamer {
+	t.Helper()
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	streamer := newChannelStreamer(
+		Channel{ID: "chan-test", Name: "Test", Codec: "mp3"},
+		Dependencies{}, NewScheduler(Dependencies{}),
+		StreamerOptions{Logger: log.New(io.Discard, "", 0), BaseContext: ctx},
+		recorder,
+	)
+	t.Cleanup(func() { streamer.stopAndWait(context.Background()) })
+
+	copyItem := item
+	streamer.current = &copyItem
+	streamer.currentLog = "log-1"
+	streamer.currentAt = time.Now().UTC()
+	streamer.skipMu.Lock()
+	streamer.skipCancel = func() {}
+	streamer.skipMu.Unlock()
+	return streamer
+}
+
+// Skipping a song must not delete the record that it played.
+//
+// The play log is a freshness record for a podcast and a QUEUE for a playlist,
+// and forgetting an airing means opposite things to the two. For a track it
+// means the song is no longer merely fresh, it is unplayed — level with the
+// records that have never come round, so it sits at the top of the eligible
+// pile and returns the moment the 45-minute skip window lapses. Three times an
+// hour, for ever, and every return is a slot the rest of the playlist does not
+// get. Measured over two days of a 300-song playlist, the two skipped tracks
+// were served thirteen and twelve times against two or three for everything
+// else — so the one button that means "not this" was the only reliable way to
+// hear something more.
+func TestSkippingASongDoesNotForgetThatItPlayed(t *testing.T) {
+	recorder := &recordingRecorder{}
+	streamer := skippingStreamer(t, PlaybackItem{
+		Title: "Saturday", ItemRef: "track:t7", SourceID: "mus1",
+		Kind: SourceMusicPlaylist, Category: "music", Shuffled: true,
+	}, recorder)
+
+	if !streamer.skipCurrent() {
+		t.Fatal("skip did not take")
+	}
+	if forgot := recorder.forgot(); len(forgot) > 0 {
+		t.Fatalf("skipping a track forgot its airing (%v) — it rejoins the pool as never-played", forgot)
+	}
+}
+
+// A podcast episode keeps the old answer: three seconds of audio must not cost
+// you the episode, because for a strand the log is what freshness reads.
+func TestSkippingAnEpisodeStillForgetsAGlancingAiring(t *testing.T) {
+	recorder := &recordingRecorder{}
+	streamer := skippingStreamer(t, PlaybackItem{
+		Title: "Ep 12", ItemRef: "episode:e12", SourceID: "pod1",
+		Kind: SourcePodcastSubscription, Category: "talk",
+	}, recorder)
+
+	if !streamer.skipCurrent() {
+		t.Fatal("skip did not take")
+	}
+	if forgot := recorder.forgot(); len(forgot) != 1 {
+		t.Fatalf("a glancing airing of an episode should be forgotten, discarded = %v", forgot)
+	}
+}

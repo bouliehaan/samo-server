@@ -502,6 +502,9 @@ func (s *Server) routes() {
 	s.handleAPI("GET /api/v1/channels/{id}/schedule", s.listChannelScheduleRules)
 	s.handleAPI("POST /api/v1/channels/{id}/schedule", s.createChannelScheduleRule)
 	s.handleAPI("DELETE /api/v1/channels/{id}/schedule/{ruleId}", s.deleteChannelScheduleRule)
+	// Artwork, same shape as the internet-radio station upload it sits beside.
+	s.handleAPI("POST /api/v1/channels/{id}/cover", s.uploadChannelCover)
+	s.handleAPI("DELETE /api/v1/channels/{id}/cover", s.deleteChannelCover)
 	s.handleAPI("GET /api/v1/channels/{id}/now", s.channelNowPlaying)
 	s.handleAPI("GET /api/v1/channels/{id}/recent", s.channelRecentPlays)
 	s.handleAPI("GET /api/v1/channels/{id}/schedule/status", s.channelScheduleStatus)
@@ -524,6 +527,18 @@ func (s *Server) routes() {
 	// header. Same pattern as /api/v1/music/tracks/{id}/stream.
 	s.mux.HandleFunc("GET /channels/{id}/playlist.m3u", s.requireUser(s.channelPlaylist))
 	s.mux.HandleFunc("GET /channels/{id}/stream", s.requireUser(s.channelStream))
+	// The same pipe under the API namespace, for Samo's own clients.
+	//
+	// Identical handler and identical auth — handleAPI IS requireUser. What
+	// differs is the prefix, and to a client that prefix is load-bearing: the
+	// desktop and phone both decide "is this a Samo stream URL I can re-home
+	// and re-token" by looking for /api/v1/ in the path. A listener URL
+	// without it is one nobody can mint a fresh stream token for, so a channel
+	// left on for longer than a token lives dies on the next reconnect with no
+	// way back. Serving the audio from both places costs a route and makes a
+	// channel an ordinary Samo stream to every client that already knows how
+	// to hold one open.
+	s.handleAPI("GET /api/v1/channels/{id}/stream", s.channelStream)
 
 	// samo-radio: headless players wired into a physical audio output. Every
 	// client reaches a device through here rather than talking to it directly,

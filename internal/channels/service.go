@@ -165,6 +165,12 @@ func (s *Service) CreateChannel(ctx context.Context, input CreateChannelInput) (
 	return InsertChannel(ctx, s.db, input)
 }
 
+// SetCover points the channel at an uploaded cover, or clears it with an empty
+// id so the generated tile takes over again.
+func (s *Service) SetCover(ctx context.Context, id, coverID string) (Channel, error) {
+	return SetChannelCover(ctx, s.db, id, coverID)
+}
+
 func (s *Service) UpdateChannel(ctx context.Context, id string, input UpdateChannelInput) (Channel, error) {
 	ch, err := UpdateChannel(ctx, s.db, id, input)
 	if err != nil {
@@ -282,6 +288,35 @@ func (s *Service) NowPlaying(ctx context.Context, channelID string) (NowPlaying,
 		}
 	}
 	return np, nil
+}
+
+// LiveNow is what a channel is putting out this second, read only from the
+// running streamer.
+//
+// The difference from NowPlaying is what it does NOT do: no channel load, no
+// play log, no database at all — one map lookup and a read lock. That is what
+// makes it safe to call for every channel while answering a list request, so a
+// client can render "what is on" for a rack of stations in one round trip
+// instead of one request per station.
+//
+// Absent when nothing is streaming: a channel with no encoder running is not
+// airing anything, and saying otherwise would put the last thing it played on
+// screen as though it were live.
+func (s *Service) LiveNow(channelID string) (item PlaybackItem, startedAt time.Time, listeners int, ok bool) {
+	if s == nil {
+		return PlaybackItem{}, time.Time{}, 0, false
+	}
+	s.mu.Lock()
+	streamer, running := s.streamers[channelID]
+	s.mu.Unlock()
+	if !running {
+		return PlaybackItem{}, time.Time{}, 0, false
+	}
+	current, at, _, present := streamer.Now()
+	if !present {
+		return PlaybackItem{}, time.Time{}, streamer.ListenerCount(), false
+	}
+	return current, at, streamer.ListenerCount(), true
 }
 
 // PreviewNext returns what would play right now, without starting ffmpeg and

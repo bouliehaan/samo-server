@@ -424,6 +424,7 @@ func (e *Engine) Materialise(ctx context.Context, candidate Candidate) (Playback
 		SourceLabel: src.Label,
 		ItemRef:     candidate.Ref,
 		Category:    candidate.Category,
+		Shuffled:    candidate.Traits.Shuffled,
 	}
 	switch src.Kind {
 	case SourcePodcastSubscription:

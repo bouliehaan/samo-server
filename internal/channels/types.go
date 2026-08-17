@@ -123,10 +123,16 @@ type Channel struct {
 	// in the channel's own timezone. Everything the station believes about
 	// "new" depends on these, because a podcast that drops at 04:00 and airs at
 	// 04:20 has not reached anyone.
-	DayStartMinute int       `json:"dayStartMinute"`
-	DayEndMinute   int       `json:"dayEndMinute"`
-	CreatedAt      time.Time `json:"createdAt"`
-	UpdatedAt      time.Time `json:"updatedAt"`
+	DayStartMinute int `json:"dayStartMinute"`
+	DayEndMinute   int `json:"dayEndMinute"`
+	// CoverID is the UPLOADED cover, empty when nobody has set one. It is not
+	// the same question as "what artwork does this channel have": a channel
+	// with no upload still has a generated tile, filled in on the way out by
+	// the API. Keeping the column empty is what lets a custom cover be removed
+	// and fall back rather than being replaced by another custom one.
+	CoverID   string    `json:"-"`
+	CreatedAt time.Time `json:"createdAt"`
+	UpdatedAt time.Time `json:"updatedAt"`
 
 	// Hydrated companions for the detail view. Empty on list endpoints
 	// where the caller paginates separately.
@@ -212,6 +218,17 @@ type PlaybackItem struct {
 	// time a three-hour episode finishes the station is somewhere else, and the
 	// credit belongs to where it began.
 	Exposure float64 `json:"-"`
+	// Shuffled means this came out of a bag rather than off a strand, carried
+	// from the source that produced it.
+	//
+	// It is here for one question: may this airing be FORGOTTEN. For a strand
+	// the play log is a freshness record, and a row left behind for three
+	// seconds of audio costs you the episode. For a bag the play log is the
+	// queue itself — a track is held back by its own playlist's turn and by
+	// nothing else — so deleting the row does not cost a few minutes, it takes
+	// the song out of the rotation's memory entirely and it comes round for
+	// ever. Two opposite answers, and the item has to know which it is.
+	Shuffled bool `json:"-"`
 	// IsRuleDriven means a hard anchor was on air when this was picked. The
 	// streamer skips its preemption watchdog for anchored items so they don't
 	// preempt themselves on every tick.

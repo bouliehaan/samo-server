@@ -236,7 +236,7 @@ func TestScheduledProgrammingCountsTowardTheBalance(t *testing.T) {
 
 	scoring := s.engine.scoreEnv(context.Background(), s.now, ProgrammingIntent{
 		Targets: map[CategoryID]float64{"talk": 0.75, "music": 0.25},
-	}, nil)
+	}, nil, nil)
 	if scoring.airtime.ByCategory["talk"] < 3*time.Hour {
 		t.Fatalf("booked programming did not reach the balance: talk = %s", scoring.airtime.ByCategory["talk"])
 	}
