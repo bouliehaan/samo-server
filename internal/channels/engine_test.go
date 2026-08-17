@@ -249,7 +249,7 @@ func TestCategoryBalanceBeatsPerSourceDeficit(t *testing.T) {
 
 	scoring := s.engine.scoreEnv(context.Background(), s.now, ProgrammingIntent{
 		Targets: map[CategoryID]float64{"talk": 0.75, "music": 0.25},
-	}, nil)
+	}, nil, nil)
 	talk := scoring.categoryDeficit("talk")
 	music := scoring.categoryDeficit("music")
 	if talk >= music {
@@ -280,7 +280,7 @@ func TestWeightSplitsWithinCategoryOnly(t *testing.T) {
 	shares := s.engine.sourceShares(ProgrammingIntent{
 		Pools:   s.engine.Plan.Blocks[0].Pools,
 		Targets: map[CategoryID]float64{"talk": 0.75, "music": 0.25},
-	})
+	}, nil)
 	if got, want := shares["pod1"], 0.5625; got < want-0.001 || got > want+0.001 {
 		t.Fatalf("pod1 share = %.4f, want %.4f (3/4 of the 75%% talk share)", got, want)
 	}
@@ -1047,7 +1047,7 @@ func TestInterstitialAirtimeIsOutsideTheFormatBalance(t *testing.T) {
 
 	scoring := s.engine.scoreEnv(context.Background(), s.now, ProgrammingIntent{
 		Targets: map[CategoryID]float64{"talk": 0.75, "music": 0.25},
-	}, nil)
+	}, nil, nil)
 	if got := scoring.airtime.ByCategory["talk"]; got > 31*time.Minute {
 		t.Fatalf("talk airtime = %s; the 30 minutes of spots should not count toward it", got)
 	}

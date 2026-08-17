@@ -1,6 +1,7 @@
 package api
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"io"
@@ -8,11 +9,88 @@ import (
 	"net/url"
 	"strconv"
 	"strings"
+	"time"
 
+	"github.com/bouliehaan/samo-server/internal/artwork"
 	"github.com/bouliehaan/samo-server/internal/channels"
+	"github.com/bouliehaan/samo-server/internal/log"
 )
 
 // ----- admin CRUD ------------------------------------------------------
+
+// channelListEntry is a channel plus what it is airing right now.
+//
+// The live half is what turns a list of names into a rack of stations a
+// listener can choose between, and it is the same shape an internet radio
+// station carries (`nowPlaying`) so a client can render either without knowing
+// which it is holding. It comes from the running streamer only — no database
+// work per channel — so listing stays one query no matter how many there are.
+type channelListEntry struct {
+	channels.Channel
+	NowPlaying    *channelNowAiring `json:"nowPlaying,omitempty"`
+	ListenerCount int               `json:"listenerCount"`
+	CoverID       string            `json:"coverId,omitempty"`
+}
+
+type channelNowAiring struct {
+	Title     string `json:"title,omitempty"`
+	Artist    string `json:"artist,omitempty"`
+	Kind      string `json:"kind,omitempty"`
+	StartedAt string `json:"startedAt,omitempty"`
+}
+
+// channelResponse is the one shape every channel route answers with, so the
+// list, the detail and the cover upload cannot drift apart.
+func (s *Server) channelResponse(ctx context.Context, ch channels.Channel) channelListEntry {
+	entry := channelListEntry{Channel: ch, CoverID: s.channelCoverID(ctx, ch)}
+	if item, startedAt, listeners, ok := s.channels.LiveNow(ch.ID); ok {
+		entry.ListenerCount = listeners
+		entry.NowPlaying = &channelNowAiring{
+			Title:     item.Title,
+			Artist:    item.Artist,
+			Kind:      item.Kind,
+			StartedAt: startedAt.UTC().Format(time.RFC3339),
+		}
+	} else {
+		entry.ListenerCount = listeners
+	}
+	return entry
+}
+
+// channelCoverID answers "what artwork does this channel have", which is never
+// "none".
+//
+// An uploaded cover wins. Failing that, the channel gets its generated tile —
+// stored on demand rather than at create time, so channels that predate covers
+// pick one up on the next list without a backfill. StoreGenerated derives the
+// id from the key and dedupes by checksum, so this is one cheap lookup after
+// the first call and the same channel always gets the same tile.
+//
+// A failure here is not worth failing a list over: the client falls back to
+// whatever it draws for a coverless item, which is exactly where this started.
+func (s *Server) channelCoverID(ctx context.Context, ch channels.Channel) string {
+	if id := strings.TrimSpace(ch.CoverID); id != "" {
+		return id
+	}
+	// s.covers directly rather than coversService(), which PANICS when covers
+	// are not configured. That is a reasonable answer on an upload route, where
+	// the request cannot be honoured at all; it is the wrong one here, where a
+	// server with no cover store should list its channels perfectly happily and
+	// just not have tiles for them.
+	if s.covers == nil {
+		return ""
+	}
+	tile := artwork.ChannelTile(ch.ID)
+	if len(tile) == 0 {
+		return ""
+	}
+	image, err := s.covers.StoreGenerated(ctx, "channel-placeholder:"+ch.ID, tile, "image/png")
+	if err != nil {
+		log.Warnf("channels: generated cover failed for %s: %v", ch.ID, err)
+		return ""
+	}
+	return image.ID
+}
 
 func (s *Server) listChannels(w http.ResponseWriter, r *http.Request) {
 	if s.channels == nil {
@@ -24,7 +102,11 @@ func (s *Server) listChannels(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"items": items, "total": len(items)})
+	entries := make([]channelListEntry, 0, len(items))
+	for _, channel := range items {
+		entries = append(entries, s.channelResponse(r.Context(), channel))
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"items": entries, "total": len(entries)})
 }
 
 func (s *Server) getChannel(w http.ResponseWriter, r *http.Request) {
@@ -38,7 +120,74 @@ func (s *Server) getChannel(w http.ResponseWriter, r *http.Request) {
 		writeChannelError(w, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, ch)
+	writeJSON(w, http.StatusOK, s.channelResponse(r.Context(), ch))
+}
+
+// uploadChannelCover replaces a channel's artwork with an uploaded image.
+//
+// Deliberately the same shape as the internet-radio station upload — same form
+// field, same size ceiling, same admin gate — because it is the same gesture
+// from the same web UI, and a station and a channel differing in how you give
+// them a cover would be a difference with no reason behind it.
+func (s *Server) uploadChannelCover(w http.ResponseWriter, r *http.Request) {
+	if s.channels == nil {
+		writeError(w, http.StatusServiceUnavailable, "channels disabled")
+		return
+	}
+	if _, ok := s.requireAdmin(w, r); !ok {
+		return
+	}
+	id := strings.TrimSpace(r.PathValue("id"))
+	if id == "" {
+		writeError(w, http.StatusBadRequest, "channel id is required")
+		return
+	}
+
+	r.Body = http.MaxBytesReader(w, r.Body, 6<<20)
+	if err := r.ParseMultipartForm(6 << 20); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid multipart form")
+		return
+	}
+	file, header, err := r.FormFile("cover")
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "cover file is required")
+		return
+	}
+	defer file.Close()
+
+	contentType := ""
+	if header != nil {
+		contentType = header.Header.Get("Content-Type")
+	}
+	image, err := s.coversService().StoreFromUpload(r.Context(), "channel:"+id, contentType, file)
+	if err != nil {
+		writeCoverUploadError(w, err)
+		return
+	}
+	ch, err := s.channels.SetCover(r.Context(), id, image.ID)
+	if err != nil {
+		writeChannelError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, s.channelResponse(r.Context(), ch))
+}
+
+// deleteChannelCover drops a custom cover, which puts the generated tile back
+// rather than leaving the channel blank.
+func (s *Server) deleteChannelCover(w http.ResponseWriter, r *http.Request) {
+	if s.channels == nil {
+		writeError(w, http.StatusServiceUnavailable, "channels disabled")
+		return
+	}
+	if _, ok := s.requireAdmin(w, r); !ok {
+		return
+	}
+	ch, err := s.channels.SetCover(r.Context(), strings.TrimSpace(r.PathValue("id")), "")
+	if err != nil {
+		writeChannelError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, s.channelResponse(r.Context(), ch))
 }
 
 func (s *Server) createChannel(w http.ResponseWriter, r *http.Request) {

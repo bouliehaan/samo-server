@@ -888,6 +888,14 @@ main.app-main {
   transition: opacity 120ms ease;
 }
 .channel-card:hover::before { opacity: 1; }
+/* Channel artwork leads the card — it is the station's face, and every channel
+   has one (uploaded, or the generated tile), so there is no empty state here to
+   design around. Larger than a station's 74px thumbnail because this one is the
+   thing you are being asked to replace. */
+.channel-card .channel-cover {
+  width: 96px;
+  height: 96px;
+}
 .channel-eyebrow {
   font-family: var(--mono);
   font-size: 0.9rem;

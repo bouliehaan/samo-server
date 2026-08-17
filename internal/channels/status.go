@@ -192,7 +192,10 @@ func (s *Service) programmingStatus(ctx context.Context, channelID string, sched
 		}
 	}
 
-	scoring := engine.scoreEnv(ctx, now, intent, tail)
+	// No candidate set: this readout only wants the airtime totals, and
+	// enumerating the whole library to fill in per-source shares nobody here
+	// reads would put a catalogue walk behind a status poll.
+	scoring := engine.scoreEnv(ctx, now, intent, tail, nil)
 	preview := Decision{}
 	preview.applyBalance(intent.Targets, scoring.airtime)
 	status.Categories = preview.Targets

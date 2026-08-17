@@ -213,6 +213,51 @@ func TestPlaylistAdminDeletesServerOwnedPlaylist(t *testing.T) {
 	}
 }
 
+// Delete grew the admin override for bootstrap-owned rows but Update did not,
+// so a server-owned playlist was visible everywhere, deletable by an admin, and
+// writable by nobody: adding a song to it 403'd "playlist owner required" on
+// every client. An admin may edit any non-system playlist; non-admins stay
+// locked out, matching TestPlaylistAdminDeletesServerOwnedPlaylist.
+func TestPlaylistAdminEditsServerOwnedPlaylist(t *testing.T) {
+	ctx := context.Background()
+	db := storagetest.Open(t)
+	if _, err := db.ExecContext(ctx, `
+		INSERT INTO users (id, username, role, created_at) VALUES
+		  ('user-admin', 'jake', 'admin', '2026-05-23 21:26:34'),
+		  ('user-plain', 'norm', 'user', '2026-05-24 08:00:00')`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.ExecContext(ctx, `
+		INSERT INTO music_tracks (id, title, duration_seconds)
+		VALUES ('track-1', 'One', 120), ('track-2', 'Two', 180)`); err != nil {
+		t.Fatal(err)
+	}
+
+	service := New(db)
+	imported, err := service.Create(ctx, users.BootstrapUserID, CreateInput{
+		Name:     "Cool Christmas",
+		TrackIDs: []string{"track-1"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	tracks := []string{"track-1", "track-2"}
+	if _, err := service.Update(ctx, "user-plain", imported.ID, UpdateInput{TrackIDs: tracks}); !errors.Is(err, ErrForbidden) {
+		t.Fatalf("non-admin update err = %v, want ErrForbidden", err)
+	}
+	updated, err := service.Update(ctx, "user-admin", imported.ID, UpdateInput{TrackIDs: tracks})
+	if err != nil {
+		t.Fatalf("admin update err = %v", err)
+	}
+	if len(updated.TrackIDs) != 2 || updated.TrackCount != 2 {
+		t.Fatalf("after admin update, trackIDs = %v count = %d, want 2", updated.TrackIDs, updated.TrackCount)
+	}
+	if updated.OwnerID != users.BootstrapUserID {
+		t.Fatalf("owner = %q, want the row to stay server-owned", updated.OwnerID)
+	}
+}
+
 // Deleting a playlist must stick: the scanner re-imports every on-disk .m3u
 // each full scan, which would silently resurrect deliberately deleted
 // playlists. A delete writes a name-keyed tombstone the scan path honors; a

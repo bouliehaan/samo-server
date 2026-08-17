@@ -534,7 +534,7 @@ func (e *Engine) playBreak(
 
 	intent := e.buildIntent(block, timeline, tail, env)
 	candidates := e.Enumerate(ctx, intent, env)
-	scoring := e.scoreEnv(ctx, now, intent, tail)
+	scoring := e.scoreEnv(ctx, now, intent, tail, candidates)
 	constraints := e.constraintEnv(ctx, now, intent, tail, candidates)
 	planned := e.planBreak(ctx, policy, env, scoring, constraints, intent.Window)
 	if planned.Empty() {
@@ -744,7 +744,7 @@ func (e *Engine) selectIn(
 	survivors = preferDueLongForm(survivors, cenv, &out.decision)
 	survivors = preferNoStub(survivors, intent.PlayCeiling, &out.decision)
 
-	scoring := e.scoreEnv(ctx, now, intent, tail)
+	scoring := e.scoreEnv(ctx, now, intent, tail, candidates)
 	scoring.adoptSeparation(cenv)
 	out.decision.applyBalance(intent.Targets, scoring.airtime)
 	scored := scoreCandidates(survivors, scoring)
@@ -997,7 +997,20 @@ func (e *Engine) constraintEnv(
 	}
 }
 
-func (e *Engine) scoreEnv(ctx context.Context, now time.Time, intent ProgrammingIntent, tail []PlayTailEntry) scoreEnv {
+// scoreEnv gathers what preference is computed from.
+//
+// The candidate set comes in because a source's share of its category depends
+// on how much that source is offering — see sourceShares. It is the ENUMERATED
+// set rather than the survivors: how deep a playlist is, is a fact about the
+// shelf, and re-deriving it from whatever happens to be eligible this second
+// would make every source's target wobble with the separation windows.
+func (e *Engine) scoreEnv(
+	ctx context.Context,
+	now time.Time,
+	intent ProgrammingIntent,
+	tail []PlayTailEntry,
+	candidates []Candidate,
+) scoreEnv {
 	airtime, err := e.History.Airtime(ctx, e.Plan.balanceHorizon(), now)
 	if err != nil {
 		airtime = AirtimeWindow{BySource: map[string]SourceAirtime{}, ByCategory: map[CategoryID]time.Duration{}}
@@ -1026,7 +1039,7 @@ func (e *Engine) scoreEnv(ctx context.Context, now time.Time, intent Programming
 		window:            intent.Window,
 		targetDuration:    intent.TargetDuration,
 		targets:           intent.Targets,
-		sourceShare:       e.sourceShares(intent),
+		sourceShare:       e.sourceShares(intent, candidates),
 		airtime:           airtime,
 		lastByRef:         lastByRef,
 		lastBySource:      lastBySource,
@@ -1066,7 +1079,27 @@ func (e *Engine) scoreEnv(ctx context.Context, now time.Time, intent Programming
 
 // sourceShares splits each category's target between the sources that can serve
 // it, by weight. Category first, source second — the order is the whole point.
-func (e *Engine) sourceShares(intent ProgrammingIntent) map[string]float64 {
+//
+// Weight alone is the right split for a strand and the wrong one for a bag.
+//
+// Two podcasts are two shows, and a show with five hundred back episodes does
+// not deserve more of the week than one with twenty: you subscribed to the
+// show, not to its archive. Two playlists are not two shows. They are one shelf
+// that arrived in two boxes, and giving each box the same airtime means airtime
+// per RECORD comes out inversely proportional to how much you put in the box —
+// twelve tracks beside four hundred get the same half of the hour, so each of
+// the twelve is heard thirty-three times as often as each of the four hundred.
+// Nothing in the rotation is broken when that happens. Every song still comes
+// round in its own queue, the shuffle is still a shuffle, the record of every
+// decision still adds up; the twelve are simply being asked to fill a share
+// they are far too small for, over and over, all day. That is the whole of "I
+// keep hearing the same songs".
+//
+// So a bag is weighted by what it actually holds. This only ever redistributes
+// BETWEEN the shuffled sources — their collective share of the category is
+// exactly what it was, strands are untouched — and a weight the operator set
+// still multiplies in, so "play this playlist twice as much" keeps working.
+func (e *Engine) sourceShares(intent ProgrammingIntent, candidates []Candidate) map[string]float64 {
 	byCategory := map[CategoryID][]Source{}
 	seen := map[string]bool{}
 	for _, ref := range intent.Pools {
@@ -1083,6 +1116,7 @@ func (e *Engine) sourceShares(intent ProgrammingIntent) map[string]float64 {
 			byCategory[category] = append(byCategory[category], src)
 		}
 	}
+	depth := shuffledDepth(candidates)
 	out := map[string]float64{}
 	for category, group := range byCategory {
 		total := 0.0
@@ -1095,8 +1129,57 @@ func (e *Engine) sourceShares(intent ProgrammingIntent) map[string]float64 {
 		for _, src := range group {
 			out[src.ID] = intent.Targets[category] * sourceWeight(src) / total
 		}
+		splitBagsByDepth(out, group, depth)
 	}
 	return out
+}
+
+// shuffledDepth is how much each bag is actually holding, in the same currency
+// as the shares being divided up.
+//
+// Running time rather than a track count, because what gets split is airtime:
+// twenty ten-minute pieces and fifty four-minute ones are the same three hours
+// and want the same three hours. Items of unknown length count as typical — the
+// same guess turnsForShuffledSources makes, so one unprobed file cannot shrink
+// a playlist's claim on the day.
+func shuffledDepth(candidates []Candidate) map[string]time.Duration {
+	typical := typicalDuration(candidates)
+	out := map[string]time.Duration{}
+	for _, candidate := range candidates {
+		if !candidate.Traits.Shuffled || candidate.Ref == "" {
+			continue
+		}
+		length := candidate.Duration
+		if length <= 0 {
+			length = typical
+		}
+		out[candidate.SourceID] += length
+	}
+	return out
+}
+
+// splitBagsByDepth re-divides the shuffled sources' share of one category by how
+// much each of them holds, and leaves every other source exactly as it was.
+func splitBagsByDepth(shares map[string]float64, group []Source, depth map[string]time.Duration) {
+	pooled, weighted := 0.0, 0.0
+	for _, src := range group {
+		if !TraitsFor(src).Shuffled {
+			continue
+		}
+		pooled += shares[src.ID]
+		weighted += sourceWeight(src) * float64(depth[src.ID])
+	}
+	// One bag, or none, or nothing on the shelves to measure. There is nothing
+	// to redistribute and the even split is already the answer.
+	if pooled <= 0 || weighted <= 0 {
+		return
+	}
+	for _, src := range group {
+		if !TraitsFor(src).Shuffled {
+			continue
+		}
+		shares[src.ID] = pooled * sourceWeight(src) * float64(depth[src.ID]) / weighted
+	}
 }
 
 func sourceWeight(src Source) float64 {

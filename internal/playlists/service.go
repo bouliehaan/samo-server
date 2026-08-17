@@ -100,7 +100,17 @@ func (s *Service) Update(ctx context.Context, ownerID, id string, input UpdateIn
 		return catalog.MusicPlaylist{}, ErrSystemPlaylist
 	}
 	if err := assertOwner(ownerID, current.OwnerID); err != nil {
-		return catalog.MusicPlaylist{}, err
+		// Admins may edit any NON-system playlist, for the same reason Delete
+		// allows it: filesystem imports and migrated rows land under the
+		// internal bootstrap account no human can authenticate as. Every
+		// surface shows those playlists (PlaylistVisibleToUser treats a
+		// bootstrap owner as public) and an admin can delete them, so without
+		// this override they were the one thing nobody could write to —
+		// adding a song 403'd "playlist owner required" on desktop and mobile.
+		admin, adminErr := s.requesterIsAdmin(ctx, ownerID)
+		if adminErr != nil || !admin {
+			return catalog.MusicPlaylist{}, err
+		}
 	}
 
 	name := current.Name

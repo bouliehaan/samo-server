@@ -1,0 +1,13 @@
+-- Channels get artwork of their own.
+--
+-- A channel is a station somebody built, and it was the only thing in the
+-- catalog with no way to give it a face: every client fell back to a blank
+-- tile, which is what a missing item looks like rather than what a station
+-- looks like.
+--
+-- Empty means "nothing uploaded", NOT "no artwork" — the API answers with a
+-- generated tile in that case (internal/artwork), so a channel is never blank
+-- and uploading one is a replacement rather than a first cover. Keeping the
+-- column empty rather than writing the generated id into it is what preserves
+-- the difference between the two, so removing a custom cover can fall back.
+ALTER TABLE channels ADD COLUMN IF NOT EXISTS cover_id TEXT NOT NULL DEFAULT '';

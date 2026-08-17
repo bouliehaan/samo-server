@@ -196,9 +196,9 @@ func LoadChannel(ctx context.Context, db *sql.DB, id string) (Channel, error) {
 	var createdAt, updatedAt string
 	var enabled int
 	err := db.QueryRowContext(ctx, `
-		SELECT id, name, description, codec, bitrate_kbps, sample_rate_hz, enabled, timezone, talk_share, day_start_minute, day_end_minute, created_at, updated_at
+		SELECT id, name, description, codec, bitrate_kbps, sample_rate_hz, enabled, timezone, talk_share, day_start_minute, day_end_minute, cover_id, created_at, updated_at
 		FROM channels WHERE id = ?`, id).Scan(
-		&ch.ID, &ch.Name, &ch.Description, &ch.Codec, &ch.BitrateKbps, &ch.SampleRateHz, &enabled, &ch.Timezone, &ch.TalkShare, &ch.DayStartMinute, &ch.DayEndMinute, &createdAt, &updatedAt,
+		&ch.ID, &ch.Name, &ch.Description, &ch.Codec, &ch.BitrateKbps, &ch.SampleRateHz, &enabled, &ch.Timezone, &ch.TalkShare, &ch.DayStartMinute, &ch.DayEndMinute, &ch.CoverID, &createdAt, &updatedAt,
 	)
 	if errors.Is(err, sql.ErrNoRows) {
 		return Channel{}, ErrNotFound
@@ -212,9 +212,32 @@ func LoadChannel(ctx context.Context, db *sql.DB, id string) (Channel, error) {
 	return ch, nil
 }
 
+// SetChannelCover points a channel at an uploaded cover, or clears it with an
+// empty id so the generated tile takes over again.
+//
+// Separate from UpdateChannel because it is reached by a different route with
+// a different body (a multipart upload, not JSON), and because clearing it is
+// a real operation rather than an omitted field.
+func SetChannelCover(ctx context.Context, db *sql.DB, id, coverID string) (Channel, error) {
+	id = strings.TrimSpace(id)
+	if id == "" {
+		return Channel{}, ErrInvalidID
+	}
+	result, err := db.ExecContext(ctx, `
+		UPDATE channels SET cover_id = ?, updated_at = ? WHERE id = ?`,
+		strings.TrimSpace(coverID), time.Now().UTC().Format(time.RFC3339), id)
+	if err != nil {
+		return Channel{}, fmt.Errorf("set channel cover: %w", err)
+	}
+	if affected, err := result.RowsAffected(); err == nil && affected == 0 {
+		return Channel{}, ErrNotFound
+	}
+	return LoadChannel(ctx, db, id)
+}
+
 func ListChannels(ctx context.Context, db *sql.DB) ([]Channel, error) {
 	rows, err := db.QueryContext(ctx, `
-		SELECT id, name, description, codec, bitrate_kbps, sample_rate_hz, enabled, timezone, talk_share, day_start_minute, day_end_minute, created_at, updated_at
+		SELECT id, name, description, codec, bitrate_kbps, sample_rate_hz, enabled, timezone, talk_share, day_start_minute, day_end_minute, cover_id, created_at, updated_at
 		FROM channels ORDER BY name COLLATE NOCASE`)
 	if err != nil {
 		return nil, fmt.Errorf("list channels: %w", err)
@@ -225,7 +248,7 @@ func ListChannels(ctx context.Context, db *sql.DB) ([]Channel, error) {
 		var ch Channel
 		var createdAt, updatedAt string
 		var enabled int
-		if err := rows.Scan(&ch.ID, &ch.Name, &ch.Description, &ch.Codec, &ch.BitrateKbps, &ch.SampleRateHz, &enabled, &ch.Timezone, &ch.TalkShare, &ch.DayStartMinute, &ch.DayEndMinute, &createdAt, &updatedAt); err != nil {
+		if err := rows.Scan(&ch.ID, &ch.Name, &ch.Description, &ch.Codec, &ch.BitrateKbps, &ch.SampleRateHz, &enabled, &ch.Timezone, &ch.TalkShare, &ch.DayStartMinute, &ch.DayEndMinute, &ch.CoverID, &createdAt, &updatedAt); err != nil {
 			return nil, fmt.Errorf("scan channel: %w", err)
 		}
 		ch.Enabled = enabled == 1

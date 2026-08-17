@@ -299,3 +299,221 @@ func TestNoHandfulOfSongsDominates(t *testing.T) {
 		t.Fatalf("five songs took %.0f%% of a 200-song stretch: %v", share*100, top)
 	}
 }
+
+// mixedPlaylist is n interchangeable tracks of ordinary, varied lengths.
+//
+// Deliberately not elvisPlaylist: the question here is what happens BETWEEN
+// playlists, and one artist dominating inside one of them would only make the
+// numbers harder to read.
+func mixedPlaylist(prefix string, n int) []catalog.MusicTrack {
+	tracks := make([]catalog.MusicTrack, 0, n)
+	for i := 0; i < n; i++ {
+		tracks = append(tracks, track(
+			prefix+"-"+strconv.Itoa(i),
+			"Song "+strconv.Itoa(i),
+			"Artist "+strconv.Itoa(i%90),
+			140+(i*37)%280, // 2:20 to 7:00
+		))
+	}
+	return tracks
+}
+
+// manyPlaylistStation is what a personal channel looks like when somebody ticks
+// every box in the playlist picker: five bags of wildly different sizes.
+func manyPlaylistStation(t *testing.T) (*station, []string, map[string]int) {
+	t.Helper()
+	sizes := map[string]int{"pl1": 400, "pl2": 150, "pl3": 60, "pl4": 25, "pl5": 12}
+	names := []string{"pl1", "pl2", "pl3", "pl4", "pl5"}
+	playlists := map[string][]catalog.MusicTrack{}
+	sources := make([]Source, 0, len(names))
+	ids := make([]string, 0, len(names))
+	for index, name := range names {
+		playlists[name] = mixedPlaylist(name, sizes[name])
+		id := "mus" + strconv.Itoa(index+1)
+		ids = append(ids, id)
+		sources = append(sources, musicSource(id, name, name))
+	}
+	plan := Plan{
+		Version:    PlanVersion,
+		Categories: []CategoryDef{{ID: "music", Label: "Music", Target: 1}},
+		Pools:      []Pool{{ID: "music", SourceIDs: ids}},
+		Blocks: []Block{{
+			ID: "general", Label: "General rotation", Default: true,
+			Pools: []PoolRef{{Pool: "music", Weight: 1}},
+		}},
+	}
+	bySize := map[string]int{}
+	for index, name := range names {
+		bySize[ids[index]] = sizes[name]
+	}
+	return newStation(t, plan, sources, &stubCatalog{playlists: playlists},
+		time.Date(2026, 8, 10, 9, 0, 0, 0, time.UTC)), ids, bySize
+}
+
+// Adding a second playlist must not turn the first one into background music.
+//
+// Every source used to get the same slice of its category, which is the right
+// answer for two podcasts and a badly wrong one for two playlists. A show with
+// five hundred back episodes does not deserve more of the week than one with
+// twenty; a shelf with four hundred records absolutely does deserve more of the
+// hour than a shelf with twelve. Equal airtime per SOURCE means airtime per
+// RECORD inversely proportional to how much you put in — so the twelve-track
+// playlist took a fifth of the day and each of its songs came round twelve
+// times while four hundred records waited for their first spin.
+//
+// Nothing about the rotation looked broken while that happened, which is what
+// made it hard to see: each playlist still ran a clean queue, no song repeated
+// inside its own turn, and every decision still justified itself. The twelve
+// were simply being asked to fill a share they were far too small for, all day.
+func TestASmallPlaylistDoesNotDrownOutABigOne(t *testing.T) {
+	s, ids, size := manyPlaylistStation(t)
+
+	total := 0
+	for _, count := range size {
+		total += count
+	}
+	plays := map[string]int{}
+	const picks = 1200
+	for i := 0; i < picks; i++ {
+		plays[s.play().SourceID]++
+	}
+
+	perTrack := map[string]float64{}
+	for _, id := range ids {
+		perTrack[id] = float64(plays[id]) / float64(size[id])
+		t.Logf("%s: %3d tracks (%.1f%% of the library) took %.1f%% of the airtime — %.2f plays per track",
+			id, size[id], float64(size[id])/float64(total)*100,
+			float64(plays[id])/picks*100, perTrack[id])
+	}
+
+	// The claim, stated as a ratio so it does not depend on the exact sizes: a
+	// record on the small shelf may not be heard several times over for every
+	// once a record on the big shelf is heard. Not equality — a small bag holds
+	// a larger fraction of itself in hand so there is something to choose
+	// between (minQueueChoices), so it does turn over a little faster.
+	least, most := perTrack[ids[0]], perTrack[ids[0]]
+	for _, id := range ids {
+		if perTrack[id] < least {
+			least = perTrack[id]
+		}
+		if perTrack[id] > most {
+			most = perTrack[id]
+		}
+	}
+	if least <= 0 {
+		t.Fatalf("a whole playlist never aired: %v", perTrack)
+	}
+	if spread := most / least; spread > 3 {
+		t.Fatalf("songs on the smallest playlist are heard %.1fx as often as songs on the biggest one", spread)
+	}
+}
+
+// A playlist's share of the hour is its share of the shelf.
+//
+// The ratio test above catches the disaster; this one states the intent. Shares
+// are measured in RUNNING TIME rather than track count, so twenty ten-minute
+// pieces and fifty four-minute ones have the same claim on the day — which is
+// why the band has to be generous enough to absorb the difference between a
+// playlist's track share and its runtime share.
+func TestAPlaylistGetsItsShareOfTheShelf(t *testing.T) {
+	s, ids, size := manyPlaylistStation(t)
+
+	total := 0
+	for _, count := range size {
+		total += count
+	}
+	plays := map[string]int{}
+	const picks = 1200
+	for i := 0; i < picks; i++ {
+		plays[s.play().SourceID]++
+	}
+
+	for _, id := range ids {
+		shelf := float64(size[id]) / float64(total)
+		air := float64(plays[id]) / picks
+		if air < shelf/2 || air > shelf*2 {
+			t.Fatalf("%s is %.1f%% of the library and took %.1f%% of the airtime",
+				id, shelf*100, air*100)
+		}
+	}
+}
+
+// Depth decides the split between BAGS and nothing else.
+//
+// A podcast is a strand, not a bag: you subscribed to the show, and an archive
+// of five hundred episodes is not a reason to hear that show more often than one
+// with twenty. Only sources whose items are interchangeable get weighted by how
+// many of them there are, and an explicit weight still means what it says.
+func TestOnlyShuffledSourcesAreWeightedByDepth(t *testing.T) {
+	now := time.Date(2026, 8, 10, 9, 0, 0, 0, time.UTC)
+	sources := []Source{
+		podcastSource("pod1", "Deep Archive", "p1"),
+		podcastSource("pod2", "New Show", "p2"),
+		musicSource("mus1", "Big", "pl1"),
+		musicSource("mus2", "Small", "pl2"),
+	}
+	deep := make([]catalog.PodcastEpisode, 0, 200)
+	for i := 0; i < 200; i++ {
+		deep = append(deep, episode("d"+strconv.Itoa(i), "Deep "+strconv.Itoa(i),
+			now.Add(-time.Duration(i)*24*time.Hour), 40))
+	}
+	cat := &stubCatalog{
+		episodes: map[string][]catalog.PodcastEpisode{
+			"p1": deep,
+			"p2": {episode("n1", "New 1", now.Add(-24*time.Hour), 40)},
+		},
+		playlists: map[string][]catalog.MusicTrack{
+			"pl1": mixedPlaylist("big", 300),
+			"pl2": mixedPlaylist("small", 100),
+		},
+	}
+	plan := Plan{
+		Version: PlanVersion,
+		Categories: []CategoryDef{
+			{ID: "talk", Label: "Talk", Target: 0.5},
+			{ID: "music", Label: "Music", Target: 0.5},
+		},
+		Pools: []Pool{
+			{ID: "talk", SourceIDs: []string{"pod1", "pod2"}},
+			{ID: "music", SourceIDs: []string{"mus1", "mus2"}},
+		},
+		Blocks: []Block{{
+			ID: "general", Label: "General rotation", Default: true,
+			Pools: []PoolRef{{Pool: "talk", Weight: 1}, {Pool: "music", Weight: 1}},
+		}},
+	}
+	s := newStation(t, plan, sources, cat, now)
+	intent := ProgrammingIntent{
+		Pools:   plan.Blocks[0].Pools,
+		Targets: map[CategoryID]float64{"talk": 0.5, "music": 0.5},
+	}
+	shares := s.engine.sourceShares(intent, s.candidates())
+
+	// Two shows, half the day between them, regardless of archive depth.
+	for _, id := range []string{"pod1", "pod2"} {
+		if got := shares[id]; got < 0.249 || got > 0.251 {
+			t.Fatalf("%s share = %.4f, want 0.25 — a strand is not weighted by its depth", id, got)
+		}
+	}
+	// Two shelves, half the day between them, split by what is on them. 300
+	// tracks against 100 of the same lengths is three to one.
+	if got, want := shares["mus1"], 0.375; got < want-0.01 || got > want+0.01 {
+		t.Fatalf("the 300-track playlist got %.4f of the day, want about %.4f", got, want)
+	}
+	if got, want := shares["mus2"], 0.125; got < want-0.01 || got > want+0.01 {
+		t.Fatalf("the 100-track playlist got %.4f of the day, want about %.4f", got, want)
+	}
+	// And the two halves are still halves.
+	if sum := shares["mus1"] + shares["mus2"]; sum < 0.499 || sum > 0.501 {
+		t.Fatalf("music's collective share moved to %.4f — depth may only redistribute within a category", sum)
+	}
+
+	// An explicit weight still means what it says: twice the share of a shelf
+	// the same size, on top of whatever depth already earned it.
+	sources[3].Weight = 3
+	weighted := newStation(t, plan, sources, cat, now)
+	shares = weighted.engine.sourceShares(intent, weighted.candidates())
+	if got, want := shares["mus2"], 0.25; got < want-0.01 || got > want+0.01 {
+		t.Fatalf("weight 3 on the 100-track playlist gave it %.4f, want about %.4f", got, want)
+	}
+}

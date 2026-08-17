@@ -264,6 +264,27 @@ import { globalScanActionsHTML, libraryKindScanActionsHTML, libraryScanActionsHT
     return body;
   }
 
+  async function uploadChannelCover(channelID, file) {
+    if (!channelID || !file) return;
+    const form = new FormData();
+    form.append("cover", file);
+    const headers = {};
+    if (token) headers["Authorization"] = "Bearer " + token;
+    const res = await fetch("/api/v1/channels/" + encodeURIComponent(channelID) + "/cover", {
+      method: "POST",
+      headers: headers,
+      body: form,
+    });
+    if (res.status === 401) {
+      localStorage.removeItem(tokenKey);
+      loginRedirect();
+      throw new Error("unauthorized");
+    }
+    const body = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(body.error || ("upload failed: " + res.status));
+    return body;
+  }
+
   async function uploadPodcastCover(podcastID, file) {
     if (!podcastID || !file) return;
     const form = new FormData();
@@ -1671,7 +1692,7 @@ import { globalScanActionsHTML, libraryKindScanActionsHTML, libraryScanActionsHT
       html += '<div class="empty-state">// no channels yet — create one above and add podcast subscriptions, file pools, and live cut-ins</div>';
     } else {
       html += '<div class="channel-grid">';
-      items.forEach((ch) => { html += channelCard(ch); });
+      items.forEach((ch) => { html += channelCard(ch, isAdmin()); });
       html += '</div>';
     }
     html += '</div></section>';
@@ -3541,6 +3562,7 @@ import { globalScanActionsHTML, libraryKindScanActionsHTML, libraryScanActionsHT
     if (!el || !el.classList || !el.classList.contains("radio-cover-input")) return;
     const file = el.files && el.files[0];
     if (!file) return;
+    const channelID = el.dataset.channelId || "";
     const podcastID = el.dataset.podcastId || "";
     const playlistID = el.dataset.playlistId || "";
     const stationID = el.dataset.stationId || "";
@@ -3553,6 +3575,9 @@ import { globalScanActionsHTML, libraryKindScanActionsHTML, libraryScanActionsHT
         await openPodcast(podcastID, Date.now());
       } else if (stationID) {
         await uploadRadioCover(stationID, file);
+        if (activeTab === "radio") await viewRadio();
+      } else if (channelID) {
+        await uploadChannelCover(channelID, file);
         if (activeTab === "radio") await viewRadio();
       }
     } catch (err) {

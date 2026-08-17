@@ -2,10 +2,29 @@
 
 import { formatDate, minuteToHHMM } from "./format.js";
 import { attr, escapeHTML } from "./html.js";
+import { radioCoverURL } from "./stream.js";
 
-export function channelCard(ch) {
+// The artwork slot: click to replace, exactly as a station's works.
+//
+// Never "empty" — a channel with no upload still has a generated tile behind
+// this, so the hint reads REPLACE rather than UPLOAD. Only an admin gets the
+// input; everyone else gets the same square without the file picker.
+function channelCoverSlot(ch, canEdit) {
+  const image = radioCoverURL(ch);
+  const style = image ? 'style="background-image:url(&quot;' + attr(image) + '&quot;)"' : "";
+  if (!canEdit) {
+    return '<div class="radio-cover-upload channel-cover" ' + style + '></div>';
+  }
+  return '<label class="radio-cover-upload channel-cover" ' + style + ' title="Upload artwork for this channel">' +
+    '<input type="file" class="radio-cover-input" accept="image/*" data-channel-id="' + attr(ch.id) + '">' +
+    '<span class="radio-cover-hint">REPLACE</span>' +
+  '</label>';
+}
+
+export function channelCard(ch, canEdit) {
   const codec = (ch.codec || "mp3").toUpperCase() + " · " + (ch.bitrateKbps || 192) + "K";
   return '<div class="channel-card">' +
+    channelCoverSlot(ch, canEdit) +
     '<div class="channel-card-meta">' +
       '<div class="channel-eyebrow">// CHANNEL</div>' +
       '<h3 class="name">' + escapeHTML(ch.name) + '</h3>' +
