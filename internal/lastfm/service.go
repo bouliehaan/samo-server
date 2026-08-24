@@ -16,6 +16,7 @@ import (
 	"github.com/bouliehaan/samo-server/internal/catalog"
 	"github.com/bouliehaan/samo-server/internal/playback"
 	"github.com/bouliehaan/samo-server/internal/safego"
+	"github.com/bouliehaan/samo-server/internal/scrobble"
 )
 
 const (
@@ -23,8 +24,6 @@ const (
 	queueKindScrobble   = "scrobble"
 	queueKindLove       = "love"
 	queueKindUnlove     = "unlove"
-
-	sourceStream = "stream"
 )
 
 type Service struct {
@@ -407,7 +406,7 @@ func (s *Service) HandlePlaybackPut(
 }
 
 func (s *Service) HandleScrobbleEvent(ctx context.Context, userID string, track catalog.MusicTrack, input ScrobbleEventInput) (ScrobbleEventResponse, error) {
-	event, err := parseScrobbleEvent(input.Event)
+	event, err := scrobble.ParseEvent(input.Event)
 	if err != nil {
 		return ScrobbleEventResponse{}, err
 	}
@@ -443,7 +442,7 @@ func (s *Service) processPlayback(ctx context.Context, input PlaybackInput, dura
 	if _, err := loadSession(ctx, s.db, input.UserID); err != nil {
 		return result
 	}
-	submission, err := trackSubmission(input.Track, durationOverride)
+	submission, err := scrobble.TrackSubmissionFrom(input.Track, durationOverride)
 	if err != nil {
 		s.logger("last.fm skipping track %s: %v", input.Track.ID, err)
 		return result
@@ -464,16 +463,16 @@ func (s *Service) processPlayback(ctx context.Context, input PlaybackInput, dura
 		return result
 	}
 
-	update, earned := settle(current, observationFrom(input, submission.DurationSeconds), s.playID())
+	update, earned := scrobble.Settle(current, scrobble.ObservationFrom(input, submission.DurationSeconds), s.playID())
 	if update.Started && input.StartedAt != nil && !input.StartedAt.IsZero() {
 		// An explicit client event may declare when the play really began.
 		update.Play.StartedAt = input.StartedAt.UTC()
 	}
 
 	if earned {
-		submission.Timestamp = scrobbleTimestamp(update.Play.StartedAt, input.ObservedAt)
+		submission.Timestamp = scrobble.ScrobbleTimestamp(update.Play.StartedAt, input.ObservedAt, scrobbleClampAge)
 		submission.PlayedSeconds = update.Play.ListenedSeconds
-		submission.DedupeKey = scrobbleDedupeKey(submission.TrackID, submission.Artist, submission.Track, submission.Timestamp)
+		submission.DedupeKey = scrobble.DedupeKey(submission.TrackID, submission.Artist, submission.Track, submission.Timestamp)
 		s.logger("last.fm scrobbling: track=%q artist=%q listened=%d/%d source=%s",
 			submission.Track, submission.Artist, update.Play.ListenedSeconds, submission.DurationSeconds, playbackSource(input))
 		queued, owned, err := s.scrobble(ctx, input.UserID, submission, playbackSource(input))
@@ -527,7 +526,7 @@ func (s *Service) announceNowPlaying(ctx context.Context, update playUpdate, sub
 			return false
 		}
 	}
-	if !shouldAnnounceNowPlaying(update, pointer, otherAdvancedAt, input.ObservedAt) {
+	if !scrobble.ShouldAnnounceNowPlaying(update, pointer, otherAdvancedAt, input.ObservedAt) {
 		return false
 	}
 
@@ -607,13 +606,13 @@ func (s *Service) SubmitScrobble(ctx context.Context, userID string, track catal
 	if _, err := loadSession(ctx, s.db, userID); err != nil {
 		return err
 	}
-	submission, err := trackSubmission(track, 0)
+	submission, err := scrobble.TrackSubmissionFrom(track, 0)
 	if err != nil {
 		return err
 	}
-	submission.Timestamp = scrobbleTimestamp(playedAt.UTC(), s.clock())
+	submission.Timestamp = scrobble.ScrobbleTimestamp(playedAt.UTC(), s.clock(), scrobbleClampAge)
 	submission.PlayedSeconds = playedSeconds
-	submission.DedupeKey = scrobbleDedupeKey(submission.TrackID, submission.Artist, submission.Track, submission.Timestamp)
+	submission.DedupeKey = scrobble.DedupeKey(submission.TrackID, submission.Artist, submission.Track, submission.Timestamp)
 	_, _, err = s.scrobble(ctx, userID, submission, normalizeSubmissionSource(source, "manual"))
 	return err
 }
@@ -622,7 +621,7 @@ func (s *Service) SubmitNowPlaying(ctx context.Context, userID string, track cat
 	if !s.Enabled() {
 		return ErrDisabled
 	}
-	submission, err := trackSubmission(track, 0)
+	submission, err := scrobble.TrackSubmissionFrom(track, 0)
 	if err != nil {
 		return err
 	}

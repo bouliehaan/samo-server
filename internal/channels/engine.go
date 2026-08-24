@@ -957,7 +957,20 @@ func (e *Engine) constraintEnv(
 	if err != nil {
 		lastGiant = map[string]LongFormAiring{}
 	}
-	airings, lastAirings, err := e.History.ItemAirings(ctx, 24*time.Hour, now)
+	// "Today" means the LISTENING day — the same day maxPerDay, exposure and
+	// credit are already keyed to.
+	//
+	// This used to be a rolling twenty-four hours, which has no boundary to roll
+	// over: at 09:30 it still reached back to 09:30 YESTERDAY and charged last
+	// night's airing to this morning's allowance. That turned a rule which says
+	// it only COUNTS into a second "not yet" rule carrying a twenty-four hour
+	// number — three times item separation's eight — which is exactly the drift
+	// mayAirAgain warns must not happen between the two. It also meant an
+	// overnight airing nobody heard could spend an episode's only slot before
+	// the listener woke up.
+	airingDay, airingLoc := e.listeningDay(), e.location()
+	airings, lastAirings, err := e.History.AiredInListeningDay(
+		ctx, listeningDayElapsed(airingDay, airingLoc, now), airingDay, airingLoc, now)
 	if err != nil {
 		airings, lastAirings = map[string]int{}, map[string]time.Time{}
 	}

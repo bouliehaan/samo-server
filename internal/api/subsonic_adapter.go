@@ -65,7 +65,7 @@ func (a subsonicScrobbleAdapter) Scrobble(ctx context.Context, userID, trackID s
 	if submission {
 		source = "stream"
 	}
-	a.server.notifyMusicTrackLastFM(
+	a.server.notifyMusicTrackScrobblers(
 		userID, track.ID,
 		catalog.PlaybackState{}, catalog.PlaybackState{},
 		nil, source, 0,

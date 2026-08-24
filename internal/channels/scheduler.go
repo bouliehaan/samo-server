@@ -51,6 +51,9 @@ type InternetStation struct {
 	ID        string
 	Name      string
 	StreamURL string
+	// ArtworkURL is the station's own picture, for the card that has to show
+	// something the moment it tunes — before anyone knows what track is on.
+	ArtworkURL string
 }
 
 // LocalCachedFile mirrors the podcastcache.CachedFile fields the
@@ -155,6 +158,18 @@ type EpisodeProgress struct {
 // every listener on the server.
 type EpisodeProgressLookup interface {
 	EpisodeProgress(ctx context.Context, episodeIDs []string) (map[string]EpisodeProgress, error)
+}
+
+// EpisodeAiringRecorder writes back what the STATION itself got through.
+//
+// The counterpart to EpisodeProgressLookup, and the reason the pair exists: the
+// gate that keeps a podcast source off something already heard reads playback
+// state, but nothing was ever writing it for the radio. An episode could air in
+// full, or be skipped, and still look untouched — so it stayed eligible and came
+// round again. The station records its own listening through this, under its own
+// identity, which is what makes "what has the radio not played yet" answerable.
+type EpisodeAiringRecorder interface {
+	RecordEpisodeAiring(ctx context.Context, episodeID string, progressSeconds int, completed bool) error
 }
 
 // listenedFraction is how far through an episode counts as heard when it was
@@ -536,12 +551,19 @@ func (e *Engine) resolveInternetStation(ctx context.Context, src Source) (Playba
 		return PlaybackItem{}, errors.New("internet station has no stream url")
 	}
 	return PlaybackItem{
-		URL:         streamURL,
-		Title:       firstNonEmpty(src.Label, station.Name, "Internet station"),
+		URL: streamURL,
+		// The station's name, not the source label. This is a starting value —
+		// the now-playing endpoint replaces it with the actual track as soon as
+		// the station says what it is — and of the two, the station's own name
+		// is the one a listener would recognise while they wait. The label
+		// survives on SourceLabel, which is where "which block picked this"
+		// belongs.
+		Title:       firstNonEmpty(station.Name, src.Label, "Internet station"),
 		Kind:        SourceInternetStation,
 		SourceID:    src.ID,
 		SourceLabel: firstNonEmpty(src.Label, station.Name),
 		ItemRef:     "station:" + station.ID,
+		ArtworkURL:  station.ArtworkURL,
 		Live:        true,
 	}, nil
 }

@@ -49,10 +49,11 @@ type constraintEnv struct {
 	// separationByCreator loosens the creator window for anyone who makes up a
 	// large share of the library — see fitSeparationToLibrary.
 	separationByCreator map[string]time.Duration
-	// separationTurn is how long one turn of a shuffled source takes, keyed by
-	// source. For those, this replaces the configured item window entirely —
-	// see turnsForShuffledSources.
-	separationTurn map[string]time.Duration
+	// turnReadiness is how far through its source's queue each item of a
+	// shuffled source has travelled: 0 the moment it airs, 1 once the rest of
+	// the bag has had its turn. For those items this replaces the configured
+	// item window entirely — see queueReadiness.
+	turnReadiness map[string]float64
 	// separationFitted marks an env whose windows have already been sized to
 	// the library, so the decision path can fit once and hand the same numbers
 	// to the rules and to scoring instead of each deciding for itself.
@@ -161,15 +162,30 @@ func standardConstraints() []constraint {
 				// Continuous rather than a special case: no credit means no
 				// separation, half credit means half the window, a full airing
 				// means the whole thing.
-				window := env.separationItem
-				// A shuffled source is separated by its own queue instead. Eight
-				// hours is the wrong answer in both directions: on a three-hundred
-				// song playlist it lets a song come round with two hundred others
-				// still unplayed, and on a twenty-song one it holds nineteen
-				// tracks hostage for an afternoon.
-				if turn, ok := env.separationTurn[c.SourceID]; ok && turn > 0 {
-					window = turn
+				// A shuffled source is separated by its own queue instead of
+				// by any clock at all.
+				//
+				// The queue used to be expressed as a wall-clock window equal to
+				// the playlist's running time. That is only the same question on
+				// a station that plays NOTHING BUT that playlist — which is what
+				// every rotation test happened to be. Where music is what plays
+				// between talk, seventeen hours of wall clock contains about two
+				// hours of music: the window expires having heard forty songs,
+				// the whole playlist becomes eligible again with three hundred of
+				// them still unplayed, and the same record comes round every day.
+				//
+				// A bag is emptied by DRAWING FROM IT, not by waiting. So the
+				// rule counts songs, and a track is held until the rest of its
+				// playlist has actually aired — however long the station takes to
+				// get through it.
+				if readiness, ok := env.turnReadiness[queueKey(c.SourceID, c.Ref)]; ok {
+					if readiness >= 1 {
+						return true, ""
+					}
+					return false, fmt.Sprintf(
+						"only %d%% of the way through its playlist's turn", int(readiness*100))
 				}
+				window := env.separationItem
 				if c.Owed {
 					window = time.Duration(float64(window) * c.Credit)
 					if window <= 0 {
@@ -299,8 +315,23 @@ func standardConstraints() []constraint {
 				// event that, by the station's own exposure model, did not
 				// happen. Credit is the count of airings that actually landed,
 				// so that is the number the cap has to read.
+				// Credit may only ever LOWER this, never raise it.
+				//
+				// env.airings is the LISTENING-DAY count and is the authority on
+				// "how many times today". Credit is exposure accumulated over an
+				// obligation's whole life, which is days — so letting it set the
+				// count charged last night's airing to this morning, for ever.
+				// On anything long enough to get a single airing a day that is
+				// not a daily cap, it is a permanent ban wearing one, and it
+				// also meant an episode owed a SECOND surfacing could never
+				// have it and the obligation could never settle.
+				//
+				// What credit still buys is the partial airing the comment above
+				// is about: five minutes of forty-five is 0.11, and a
+				// preemption nobody heard must not spend a whole day's
+				// allowance. That is a reduction, and it survives.
 				count := env.airings[c.Ref]
-				if c.Owed {
+				if c.Owed && int(c.Credit) < count {
 					count = int(c.Credit)
 				}
 				seconds := int(c.Duration / time.Second)
@@ -614,7 +645,7 @@ func fitSeparationToLibrary(env constraintEnv, candidates []Candidate) constrain
 	}
 	env.separationFamily = fit(env.separationFamily, len(families))
 	env.separationItem = fit(env.separationItem, items)
-	env.separationTurn = turnsForShuffledSources(candidates, typical)
+	env.turnReadiness = queueReadiness(candidates, env.lastByRef)
 	return env
 }
 
@@ -643,48 +674,89 @@ const queueTailShare = 0.10
 // route.
 const minQueueChoices = 3
 
-// turnsForShuffledSources is how long a shuffled source may hold each of its
-// items back — its full running time, less the tail kept in hand.
+// queueKey identifies one item within one source's bag.
 //
-// Summed rather than counted, because a playlist is not uniform and the turn is
-// how long it actually RUNS. Items of unknown length count as typical, which is
-// the best available guess and keeps one unprobed file from shortening the
-// queue for everything else.
-func turnsForShuffledSources(candidates []Candidate, typical time.Duration) map[string]time.Duration {
-	total := map[string]time.Duration{}
-	count := map[string]int{}
+// Keyed on both, not the ref alone: the same file may legitimately sit in two
+// sources, and they are separate bags that turn over at their own rates.
+func queueKey(sourceID, ref string) string { return sourceID + "\x00" + ref }
+
+// queueReadiness is how far through its source's queue each item has travelled,
+// 0 the moment it airs and 1 once the rest of the bag has had its turn.
+//
+// This is the shuffle bag, and it is computed by RANK rather than by any
+// duration: order a source's items by when each last aired, and the most
+// recently played (items - tail) of them are still in the bag. Nothing about
+// how long the station took to get through them enters into it, which is the
+// whole point — a playlist that is a station's entire output and one that fills
+// two minutes between talk segments turn over at wildly different speeds in
+// wall-clock terms and at exactly the same speed in songs.
+//
+// Needs no new query, no stored cursor and no shuffle seed: what has played is
+// already in lastByRef, and an item nobody has ever played is simply at the
+// back of the queue where it belongs. Anything that fell off the end of the
+// history horizon reads as never-played, which is the right answer — a track
+// last heard thirty days ago has unquestionably had its turn.
+func queueReadiness(candidates []Candidate, lastByRef map[string]time.Time) map[string]float64 {
+	type entry struct {
+		key  string
+		ref  string
+		last time.Time
+	}
+	bySource := map[string][]entry{}
 	for _, candidate := range candidates {
 		if !candidate.Traits.Shuffled || candidate.Ref == "" {
 			continue
 		}
-		length := candidate.Duration
-		if length <= 0 {
-			length = typical
-		}
-		total[candidate.SourceID] += length
-		count[candidate.SourceID]++
+		bySource[candidate.SourceID] = append(bySource[candidate.SourceID], entry{
+			key:  queueKey(candidate.SourceID, candidate.Ref),
+			ref:  candidate.Ref,
+			last: lastByRef[candidate.Ref],
+		})
 	}
-	if len(total) == 0 {
+	if len(bySource) == 0 {
 		return nil
 	}
-	turns := make(map[string]time.Duration, len(total))
-	for sourceID, runtime := range total {
-		items := count[sourceID]
-		if items <= minQueueChoices {
+	out := map[string]float64{}
+	for _, items := range bySource {
+		if len(items) <= minQueueChoices {
 			// Fewer records than the tail we would hold back. Nothing here can
 			// be kept apart from itself for a turn, so nothing is.
 			continue
 		}
-		tail := int(float64(items) * queueTailShare)
+		tail := int(float64(len(items)) * queueTailShare)
 		if tail < minQueueChoices {
 			tail = minQueueChoices
 		}
-		turns[sourceID] = time.Duration(float64(runtime) * float64(items-tail) / float64(items))
+		turn := len(items) - tail
+		// Newest first. The tiebreak on ref keeps this reproducible: everything
+		// that has never aired shares the zero time, and their order among
+		// themselves must not depend on how the pools were enumerated.
+		sort.Slice(items, func(i, j int) bool {
+			if !items[i].last.Equal(items[j].last) {
+				return items[i].last.After(items[j].last)
+			}
+			return items[i].ref < items[j].ref
+		})
+		for rank, item := range items {
+			if item.last.IsZero() {
+				// Never aired, so it cannot be waiting its turn again. Stated
+				// rather than left to the arithmetic, because a bag with more
+				// unplayed cards than the turn is long would otherwise rank some
+				// of them as though they had just been drawn.
+				out[item.key] = 1
+				continue
+			}
+			readiness := float64(rank) / float64(turn)
+			if readiness > 1 {
+				readiness = 1
+			}
+			out[item.key] = readiness
+		}
 	}
-	if len(turns) == 0 {
+	if len(out) == 0 {
 		return nil
 	}
-	return turns
+	return out
 }
 
 // typicalDuration is the median length of what is on offer, which is the right

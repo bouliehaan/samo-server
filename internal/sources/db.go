@@ -88,6 +88,8 @@ func scanInternetRadioStation(row scanner) (InternetRadioStation, error) {
 		&station.Language,
 		&tagsJSON,
 		&enabled,
+		&station.MetadataURL,
+		&station.MetadataArtworkURL,
 		&lastCheckedAt,
 		&createdAt,
 		&updatedAt,

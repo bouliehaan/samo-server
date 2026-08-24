@@ -430,9 +430,15 @@ func TestSkippingASongDoesNotForgetThatItPlayed(t *testing.T) {
 	}
 }
 
-// A podcast episode keeps the old answer: three seconds of audio must not cost
-// you the episode, because for a strand the log is what freshness reads.
-func TestSkippingAnEpisodeStillForgetsAGlancingAiring(t *testing.T) {
+// A skipped episode keeps its row too, for the reason the old answer missed.
+//
+// Forgetting a glancing airing was meant to stop three seconds of audio costing
+// you a fresh episode. What it actually did was leave the episode looking
+// unaired and — since nothing wrote playback state either — unheard, so it came
+// back, which is the outcome the discard existed to prevent. A skip is the
+// listener saying they are done with this one: Service.markSkipHeard retires it
+// deliberately, which frees the log to say what actually happened.
+func TestSkippingAnEpisodeDoesNotForgetThatItPlayed(t *testing.T) {
 	recorder := &recordingRecorder{}
 	streamer := skippingStreamer(t, PlaybackItem{
 		Title: "Ep 12", ItemRef: "episode:e12", SourceID: "pod1",
@@ -442,7 +448,7 @@ func TestSkippingAnEpisodeStillForgetsAGlancingAiring(t *testing.T) {
 	if !streamer.skipCurrent() {
 		t.Fatal("skip did not take")
 	}
-	if forgot := recorder.forgot(); len(forgot) != 1 {
-		t.Fatalf("a glancing airing of an episode should be forgotten, discarded = %v", forgot)
+	if forgot := recorder.forgot(); len(forgot) > 0 {
+		t.Fatalf("skipping an episode forgot its airing (%v) — it returns looking never-played", forgot)
 	}
 }

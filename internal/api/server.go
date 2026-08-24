@@ -25,6 +25,7 @@ import (
 	"github.com/bouliehaan/samo-server/internal/images"
 	"github.com/bouliehaan/samo-server/internal/lastfm"
 	"github.com/bouliehaan/samo-server/internal/libraries"
+	"github.com/bouliehaan/samo-server/internal/listenbrainz"
 	"github.com/bouliehaan/samo-server/internal/log"
 	"github.com/bouliehaan/samo-server/internal/loudness"
 	"github.com/bouliehaan/samo-server/internal/metadata"
@@ -61,6 +62,7 @@ type ServerOptions struct {
 	Radio         *radio.Service
 	Sources       *sources.Service
 	LastFM        *lastfm.Service
+	ListenBrainz  *listenbrainz.Service
 	Explo         *explo.Service
 	ArtistImages  *artistimages.Service
 	Events        *events.Hub
@@ -109,6 +111,7 @@ type Server struct {
 	radio                            *radio.Service
 	sources                          *sources.Service
 	lastfm                           *lastfm.Service
+	listenbrainz                     *listenbrainz.Service
 	explo                            *explo.Service
 	artistImages                     *artistimages.Service
 	artistMeta                       *artistmeta.Service
@@ -209,6 +212,7 @@ func NewServer(options ServerOptions) http.Handler {
 		radio:                            radioService,
 		sources:                          options.Sources,
 		lastfm:                           options.LastFM,
+		listenbrainz:                     options.ListenBrainz,
 		explo:                            options.Explo,
 		artistImages:                     options.ArtistImages,
 		events:                           eventHub,
@@ -336,17 +340,28 @@ func (s *Server) routes() {
 	s.handleAPI("POST /api/v1/lastfm/auth/complete", s.completeLastFMAuth)
 	s.handleAPI("DELETE /api/v1/lastfm/auth/session", s.disconnectLastFM)
 
+	// ListenBrainz needs no application credentials, so there is no config
+	// endpoint here — a user's token is the whole connection.
+	s.handleAPI("GET /api/v1/listenbrainz/status", s.getListenBrainzStatus)
+	s.handleAPI("POST /api/v1/listenbrainz/connect", s.connectListenBrainz)
+	s.handleAPI("DELETE /api/v1/listenbrainz/connect", s.disconnectListenBrainz)
+
 	s.handleAPI("GET /api/v1/explo/config", s.getExploConfig)
 	s.handleAPI("PUT /api/v1/explo/config", s.updateExploConfig)
 	s.handleAPI("DELETE /api/v1/explo/config", s.clearExploConfig)
 	s.handleAPI("GET /api/v1/explo/directories", s.browseExploDirectories)
 	s.handleAPI("POST /api/v1/explo/reprocess", s.postExploReprocess)
+	s.handleAPI("POST /api/v1/explo/keep", s.postExploKeep)
 	// User-level (auth-only, no admin): the Explo tab's gate and its ledger.
 	s.handleAPI("GET /api/v1/explo/status", s.getExploStatus)
 	s.handleAPI("GET /api/v1/explo/tracks", s.getExploTracks)
 	s.handleAPI("POST /api/v1/lastfm/queue/flush", s.flushLastFMQueue)
 	s.handleAPI("GET /api/v1/lastfm/queue", s.listLastFMQueue)
 	s.handleAPI("GET /api/v1/lastfm/history", s.listLastFMHistory)
+
+	s.handleAPI("POST /api/v1/listenbrainz/queue/flush", s.flushListenBrainzQueue)
+	s.handleAPI("GET /api/v1/listenbrainz/queue", s.listListenBrainzQueue)
+	s.handleAPI("GET /api/v1/listenbrainz/history", s.listListenBrainzHistory)
 
 	s.handleAPI("POST /api/v1/scrobble/events", s.postScrobbleEvent)
 

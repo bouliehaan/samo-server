@@ -40,25 +40,34 @@ type AddPodcastFeedInput struct {
 }
 
 type InternetRadioStation struct {
-	ID            string                   `json:"id"`
-	Name          string                   `json:"name"`
-	Description   string                   `json:"description,omitempty"`
-	StreamURL     string                   `json:"streamUrl"`
-	HomepageURL   string                   `json:"homepageUrl,omitempty"`
-	ImageURL      string                   `json:"imageUrl,omitempty"`
-	CoverID       string                   `json:"coverId,omitempty"`
-	ContentType   string                   `json:"contentType,omitempty"`
-	Codec         string                   `json:"codec,omitempty"`
-	Bitrate       int                      `json:"bitrate,omitempty"`
-	Country       string                   `json:"country,omitempty"`
-	Language      string                   `json:"language,omitempty"`
-	Tags          []string                 `json:"tags,omitempty"`
-	Enabled       bool                     `json:"enabled"`
-	LastCheckedAt *time.Time               `json:"lastCheckedAt,omitempty"`
-	CreatedAt     *time.Time               `json:"createdAt,omitempty"`
-	UpdatedAt     *time.Time               `json:"updatedAt,omitempty"`
-	NowPlaying    *InternetRadioNowPlaying `json:"nowPlaying,omitempty"`
-	Probe         ProbeSchedule            `json:"probe"`
+	ID          string   `json:"id"`
+	Name        string   `json:"name"`
+	Description string   `json:"description,omitempty"`
+	StreamURL   string   `json:"streamUrl"`
+	HomepageURL string   `json:"homepageUrl,omitempty"`
+	ImageURL    string   `json:"imageUrl,omitempty"`
+	CoverID     string   `json:"coverId,omitempty"`
+	ContentType string   `json:"contentType,omitempty"`
+	Codec       string   `json:"codec,omitempty"`
+	Bitrate     int      `json:"bitrate,omitempty"`
+	Country     string   `json:"country,omitempty"`
+	Language    string   `json:"language,omitempty"`
+	Tags        []string `json:"tags,omitempty"`
+	Enabled     bool     `json:"enabled"`
+	// MetadataURL is a JSON endpoint that says what this station is airing
+	// right now. Empty for the ordinary station, whose now-playing line comes
+	// from the ICY probe below; see the 0024 migration for why a station that
+	// publishes one is worth asking instead.
+	MetadataURL string `json:"metadataUrl,omitempty"`
+	// MetadataArtworkURL is where that station's CURRENT picture lives, when
+	// the JSON does not carry one itself. Its contents change with the track,
+	// which is what separates it from ImageURL's fixed logo.
+	MetadataArtworkURL string                   `json:"metadataArtworkUrl,omitempty"`
+	LastCheckedAt      *time.Time               `json:"lastCheckedAt,omitempty"`
+	CreatedAt          *time.Time               `json:"createdAt,omitempty"`
+	UpdatedAt          *time.Time               `json:"updatedAt,omitempty"`
+	NowPlaying         *InternetRadioNowPlaying `json:"nowPlaying,omitempty"`
+	Probe              ProbeSchedule            `json:"probe"`
 }
 
 type InternetRadioNowPlaying struct {
@@ -69,18 +78,20 @@ type InternetRadioNowPlaying struct {
 }
 
 type AddInternetRadioStationInput struct {
-	Name        string   `json:"name"`
-	Description string   `json:"description,omitempty"`
-	StreamURL   string   `json:"streamUrl"`
-	HomepageURL string   `json:"homepageUrl,omitempty"`
-	ImageURL    string   `json:"imageUrl,omitempty"`
-	ContentType string   `json:"contentType,omitempty"`
-	Codec       string   `json:"codec,omitempty"`
-	Bitrate     int      `json:"bitrate,omitempty"`
-	Country     string   `json:"country,omitempty"`
-	Language    string   `json:"language,omitempty"`
-	Tags        []string `json:"tags,omitempty"`
-	Enabled     *bool    `json:"enabled,omitempty"`
+	Name               string   `json:"name"`
+	Description        string   `json:"description,omitempty"`
+	StreamURL          string   `json:"streamUrl"`
+	HomepageURL        string   `json:"homepageUrl,omitempty"`
+	ImageURL           string   `json:"imageUrl,omitempty"`
+	MetadataURL        string   `json:"metadataUrl,omitempty"`
+	MetadataArtworkURL string   `json:"metadataArtworkUrl,omitempty"`
+	ContentType        string   `json:"contentType,omitempty"`
+	Codec              string   `json:"codec,omitempty"`
+	Bitrate            int      `json:"bitrate,omitempty"`
+	Country            string   `json:"country,omitempty"`
+	Language           string   `json:"language,omitempty"`
+	Tags               []string `json:"tags,omitempty"`
+	Enabled            *bool    `json:"enabled,omitempty"`
 }
 
 type UpdateInternetRadioStationInput struct {
@@ -88,6 +99,8 @@ type UpdateInternetRadioStationInput struct {
 	Description          *string  `json:"description,omitempty"`
 	HomepageURL          *string  `json:"homepageUrl,omitempty"`
 	ImageURL             *string  `json:"imageUrl,omitempty"`
+	MetadataURL          *string  `json:"metadataUrl,omitempty"`
+	MetadataArtworkURL   *string  `json:"metadataArtworkUrl,omitempty"`
 	Country              *string  `json:"country,omitempty"`
 	Language             *string  `json:"language,omitempty"`
 	Tags                 []string `json:"tags,omitempty"`

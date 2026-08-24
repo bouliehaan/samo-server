@@ -17,8 +17,16 @@ type ServiceOptions struct {
 	Catalog          CatalogReader
 	Cache            EpisodeCacheLookup
 	InternetStations InternetStationLookup
+	// LiveStations reports what a relayed station is airing, so a channel
+	// carrying one says what is on rather than which block put it there. Nil
+	// leaves every relayed item labelled with its source, as before.
+	LiveStations LiveStationLookup
 	// Listened keeps podcast sources off episodes somebody already heard.
 	Listened EpisodeProgressLookup
+	// Airings records what the station itself played, so Listened has
+	// something to read back. Nil leaves the radio's own listening invisible,
+	// which is the behaviour that let an aired episode stay "unheard".
+	Airings EpisodeAiringRecorder
 	// DefaultLocation is the wall clock schedules are read in when a channel
 	// does not name its own.
 	DefaultLocation *time.Location
@@ -46,7 +54,9 @@ type Service struct {
 	catalog          CatalogReader
 	cache            EpisodeCacheLookup
 	internetStations InternetStationLookup
+	liveStations     LiveStationLookup
 	listened         EpisodeProgressLookup
+	airings          EpisodeAiringRecorder
 	defaultLocation  *time.Location
 	defaultTalkShare float64
 	skips            *SkipRegistry
@@ -73,7 +83,9 @@ func NewService(opts ServiceOptions) *Service {
 		catalog:          opts.Catalog,
 		cache:            opts.Cache,
 		internetStations: opts.InternetStations,
+		liveStations:     opts.LiveStations,
 		listened:         opts.Listened,
+		airings:          opts.Airings,
 		defaultLocation:  opts.DefaultLocation,
 		defaultTalkShare: opts.DefaultTalkShare,
 		skips:            NewSkipRegistry(nil),
@@ -281,7 +293,7 @@ func (s *Service) NowPlaying(ctx context.Context, channelID string) (NowPlaying,
 	if ok {
 		np.ListenerCount = streamer.ListenerCount()
 		if item, startedAt, _, present := streamer.Now(); present {
-			cur := item
+			cur := withLiveMetadata(ctx, s.liveStations, item, false)
 			np.Current = &cur
 			t := startedAt
 			np.StartedAt = &t
@@ -316,6 +328,9 @@ func (s *Service) LiveNow(channelID string) (item PlaybackItem, startedAt time.T
 	if !present {
 		return PlaybackItem{}, time.Time{}, streamer.ListenerCount(), false
 	}
+	// Cached only: this path is called once per channel while a list renders,
+	// and the no-I/O promise above is the whole reason it exists.
+	current = withLiveMetadata(context.Background(), s.liveStations, current, true)
 	return current, at, streamer.ListenerCount(), true
 }
 
@@ -508,7 +523,7 @@ func (s *Service) streamerFor(ctx context.Context, channelID string) (*channelSt
 		Logger:      s.logger,
 		BaseContext: s.baseCtx,
 		Loudness:    s.loudness,
-	}, &serviceRecorder{db: s.db, baseCtx: s.baseCtx, logger: s.logger})
+	}, &serviceRecorder{db: s.db, baseCtx: s.baseCtx, logger: s.logger, airings: s.airings})
 	s.streamers[channelID] = streamer
 	return streamer, nil
 }
@@ -555,6 +570,7 @@ type serviceRecorder struct {
 	db      *sql.DB
 	baseCtx context.Context
 	logger  *log.Logger
+	airings EpisodeAiringRecorder
 }
 
 const playLogWriteTimeout = 5 * time.Second
@@ -593,15 +609,19 @@ func (r *serviceRecorder) OnPlayDiscard(playLogID string) {
 // is what makes an overnight play leave an episode still owed, a five-minute
 // preemption leave it mostly owed, and a full daytime airing settle it.
 func (r *serviceRecorder) OnPlayEnd(channelID string, item PlaybackItem, played time.Duration, completed bool, playLogID string) {
-	if r.db == nil {
-		return
-	}
 	ctx, cancel := r.writeCtx()
 	defer cancel()
-	if playLogID != "" {
+	if r.db != nil && playLogID != "" {
 		_ = RecordPlayEnd(ctx, r.db, playLogID)
 	}
-	if item.ItemRef == "" || item.Exposure <= 0 {
+	// Before the exposure check, and guarded on its own dependency rather than
+	// the play log's: whether an episode went out is a fact about the airing,
+	// not about how much the block it ran in counts for, and the station's
+	// playback ledger is written through a different service than this handle.
+	if completed {
+		r.recordAiring(ctx, item, played)
+	}
+	if r.db == nil || item.ItemRef == "" || item.Exposure <= 0 {
 		return
 	}
 	credit := item.Exposure * playedFraction(item, played, completed)
@@ -611,6 +631,43 @@ func (r *serviceRecorder) OnPlayEnd(channelID string, item PlaybackItem, played 
 	if err := NewSQLObligations(r.db, channelID).Credit(ctx, item.ItemRef, credit, time.Now().UTC()); err != nil {
 		r.logf("channel %s: could not credit %s: %v", channelID, item.ItemRef, err)
 	}
+}
+
+// recordAiring tells the station's own playback row that an episode went out.
+//
+// Only a CLEAN end counts. An airing cut short — a booked show taking the slot,
+// the play window closing — is still owed, and obligations already track that
+// proportionally; writing progress for it would trip the "already heard" gate on
+// two minutes of a three-hour episode and retire something nobody got through.
+// A skip is the other way in, and it is deliberate rather than partial: see
+// Service.markSkipHeard.
+func (r *serviceRecorder) recordAiring(ctx context.Context, item PlaybackItem, played time.Duration) {
+	episodeID := episodeIDOf(item)
+	if r.airings == nil || episodeID == "" {
+		return
+	}
+	progress := int(played.Seconds())
+	if item.DurationSeconds > 0 && progress > item.DurationSeconds {
+		progress = item.DurationSeconds
+	}
+	if err := r.airings.RecordEpisodeAiring(ctx, episodeID, progress, true); err != nil {
+		r.logf("channel: could not record airing of %s: %v", episodeID, err)
+	}
+}
+
+// episodeIDOf is the podcast episode an item IS, or "" when it is not one.
+//
+// Candidates carry an "episode:"-namespaced ref so item refs cannot collide with
+// track ids or file paths; playback state is keyed on the bare episode id.
+func episodeIDOf(item PlaybackItem) string {
+	if item.Kind != SourcePodcastSubscription {
+		return ""
+	}
+	id, ok := strings.CutPrefix(item.ItemRef, "episode:")
+	if !ok {
+		return ""
+	}
+	return strings.TrimSpace(id)
 }
 
 // playedFraction is how much of an item went out, 0..1.
@@ -737,6 +794,7 @@ func (s *Service) Skip(ctx context.Context, channelID string, scope SkipScope) (
 		if item.ItemRef != "" {
 			s.skips.SuppressRef(item.ItemRef)
 			s.creditSkip(ctx, channelID, item)
+			s.markSkipHeard(ctx, item)
 		}
 		if item.SourceID != "" {
 			s.skips.Suppress(item.SourceID, skipSourceStepAside)
@@ -774,12 +832,35 @@ func (s *Service) creditSkip(ctx context.Context, channelID string, item Playbac
 	}
 }
 
+// markSkipHeard retires an episode the listener chose to skip.
+//
+// Crediting the obligation only ever bought "not right now": the suppression
+// window lapses, and because nothing wrote playback state the episode came back
+// looking untouched — the same one, indefinitely. A skip is not a partial airing
+// that might land better later. It is the listener saying they have had as much
+// of this as they want, which is exactly what the already-heard gate is for.
+//
+// Recorded as complete rather than as elapsed seconds because feed episodes
+// routinely report no duration at all, and a fraction of an unknown length
+// cannot clear any threshold.
+func (s *Service) markSkipHeard(ctx context.Context, item PlaybackItem) {
+	episodeID := episodeIDOf(item)
+	if s.airings == nil || episodeID == "" {
+		return
+	}
+	if err := s.airings.RecordEpisodeAiring(ctx, episodeID, item.DurationSeconds, true); err != nil {
+		if s.logger != nil {
+			s.logger.Printf("channel: could not record a skip of %s: %v", episodeID, err)
+		}
+	}
+}
+
 // Previous replays the last thing that actually aired.
 //
 // A live channel has no back-buffer to rewind into, so "previous" means
 // re-airing the previous item from the top. The play log is the only record of
-// what that was, which is also why a skipped item is removed from it: you
-// should not land back on something you just skipped past.
+// what that was, and anything under an active skip is passed over on the way
+// back: you should not land back on something you just skipped past.
 func (s *Service) Previous(ctx context.Context, channelID string) (bool, error) {
 	if s == nil || s.db == nil {
 		return false, ErrNotFound
@@ -802,6 +883,13 @@ func (s *Service) Previous(ctx context.Context, channelID string) (bool, error) 
 	for _, entry := range recent {
 		// Skip over the row for whatever is on right now.
 		if playing && entry.ItemRef == current.ItemRef {
+			continue
+		}
+		// And over anything the listener just skipped past. A skipped podcast
+		// episode used to fall out of the log entirely, which is what kept
+		// "previous" off it; the row survives now, so the skip registry has to
+		// say so instead.
+		if entry.ItemRef != "" && s.skips.RefSuppressed(entry.ItemRef) {
 			continue
 		}
 		if entry.SourceID == "" {

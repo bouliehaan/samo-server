@@ -33,6 +33,7 @@ SAMO_PODCAST_DIRS=/srv/media/podcasts
 SAMO_SCAN_ON_START=true
 SAMO_WATCH_LIBRARIES=true
 SAMO_WATCH_DEBOUNCE=3s
+SAMO_WATCH_RESYNC=30s
 ```
 
 Multiple directories use the OS path-list separator. On Linux and macOS that means `:`.
@@ -47,21 +48,40 @@ Defaults:
 - `SAMO_SCAN_ON_START` defaults to `false`
 - `SAMO_WATCH_LIBRARIES` defaults to `true`
 - `SAMO_WATCH_DEBOUNCE` defaults to `3s`
+- `SAMO_WATCH_RESYNC` defaults to `30s`
 - if no library directories are set, startup only migrates and loads the existing database
 
 ## File Watching
 
-When `SAMO_WATCH_LIBRARIES` is enabled, Samo recursively watches configured library folders for new writes. Events are debounced so copying a multi-file album or audiobook triggers one scan after the writes settle.
+When `SAMO_WATCH_LIBRARIES` is enabled, Samo recursively watches configured library folders and scans what changes on its own. Drop a folder in and it shows up — running a scan by hand is never a requirement. Events are debounced (`SAMO_WATCH_DEBOUNCE`) so copying a multi-file album or audiobook triggers one scan after the writes settle.
 
 The watcher responds to:
 
+- **whole folders arriving**, however they arrive. Dragging or `mv`-ing a folder in from the same disk is a rename: the kernel reports one event for the folder and nothing for the files inside, because they were never written here. The folder itself counts as the change, so the drop is picked up either way
 - audio files
 - `.opf` sidecars
 - `desc.txt`, `description.txt`, `summary.txt`
 - `reader.txt`, `narrator.txt`, `narrators.txt`
 - local cover images: `jpg`, `jpeg`, `png`, `webp`
 
+Additions and edits trigger an incremental scan of just the folders that changed. **Removals trigger a scan of the whole library instead** — a subpath-scoped scan only adds and updates, because the phases that mark files missing and prune stale rows are skipped when a scan is scoped to subpaths.
+
+Dot-directories are never watched or scanned, so a NAS `.Trash-1000`, `.Spotlight-V100`, or a half-written staging folder cannot kick off work. `.ndignore` rules apply to the watcher exactly as they do to a manual scan.
+
+### Staying attached
+
+Every `SAMO_WATCH_RESYNC` the watcher re-reads the library list and repairs its own coverage:
+
+- a server that boots before any library is configured keeps looking, so a library added later from the UI starts being watched without a restart
+- a library that is added, removed, or repointed rebuilds the watches
+- a library path that does not exist yet — an unmounted share, a folder you have not created — is retried in place until it appears
+- one unreadable or missing library never stops the others from being watched, and hitting the kernel's watch limit partway through a large library leaves the rest watched rather than giving up entirely
+
+Watcher activity is logged at `info`, so `SAMO_LOG_LEVEL=info` (the default) shows what it attached to and what it scanned. If auto-pickup is not working, that log says so.
+
 After a watch-triggered scan, Samo reloads the catalog from the database and updates the in-memory API catalog, so clients can see new files without a server restart.
+
+Note that a deleted file is flagged missing rather than erased, and a library whose walk finds zero files is never pruned — both guard against an unmounted drive wiping the catalog. That is the same outcome a manual scan produces.
 
 ## Scanner Requirements
 

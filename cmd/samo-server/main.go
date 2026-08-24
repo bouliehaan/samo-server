@@ -35,6 +35,7 @@ import (
 	"github.com/bouliehaan/samo-server/internal/images"
 	"github.com/bouliehaan/samo-server/internal/lastfm"
 	"github.com/bouliehaan/samo-server/internal/libraries"
+	"github.com/bouliehaan/samo-server/internal/listenbrainz"
 	"github.com/bouliehaan/samo-server/internal/log"
 	"github.com/bouliehaan/samo-server/internal/loudness"
 	"github.com/bouliehaan/samo-server/internal/metadata"
@@ -320,6 +321,13 @@ func main() {
 	if err := lastfmService.LoadConfig(ctx); err != nil {
 		log.Warnf("last.fm config load failed: %v", err)
 	}
+	// ListenBrainz has no application credentials to load: each user's token
+	// is the entire connection, so the service is ready as soon as it exists.
+	listenbrainzService := listenbrainz.NewService(listenbrainz.ServiceOptions{
+		DB:      db,
+		APIRoot: cfg.ListenBrainzAPIRoot,
+		Logger:  log.Printf,
+	})
 	artistImageService := artistimages.NewService(artistimages.ServiceOptions{
 		DB:      db,
 		LastFM:  lastfmService,
@@ -371,6 +379,27 @@ func main() {
 		ReloadCatalog: reloadCatalog,
 		PlaylistName:  cfg.ExploPlaylistName,
 		Logger:        log.Printf,
+		// Keep (copy a drop into the library with its identified metadata
+		// written into the file) needs ffmpeg to remux, the catalog to read
+		// the effective — override-aware — metadata, and a scan to make the
+		// new copy visible without waiting for a full sweep.
+		FFmpegPath: tools.FFmpeg,
+		TrackByID:  catalogService.MusicTrack,
+		ScanSubpaths: func(ctx context.Context, paths []string) error {
+			page, err := libraryService.List(ctx, 100, 0)
+			if err != nil {
+				return err
+			}
+			for _, library := range page.Items {
+				if library.Kind != "music" {
+					continue
+				}
+				_, err := libraryService.ScanLibrarySubpaths(
+					ctx, library.ID, libraries.TriggerAPI, libraries.ScanModeQuick, paths)
+				return err
+			}
+			return fmt.Errorf("no music library to scan")
+		},
 	})
 	// Overlay any admin config persisted via the web UI onto the env defaults.
 	if err := exploService.LoadConfig(ctx); err != nil {
@@ -567,7 +596,9 @@ func main() {
 		Catalog:          catalogService,
 		Cache:            podcastCacheAdapter{service: podcastCacheService},
 		InternetStations: internetStationAdapter{service: sourceService},
+		LiveStations:     liveStationAdapter{service: sourceService},
 		Listened:         channelListenedAdapter{service: playbackService},
+		Airings:          channelAiringAdapter{service: playbackService},
 		DefaultLocation:  scheduleLocation,
 		DefaultTalkShare: envTalkShare(),
 		FFmpegPath:       tools.FFmpeg,
@@ -611,6 +642,7 @@ func main() {
 		Radio:         radioService,
 		Sources:       sourceService,
 		LastFM:        lastfmService,
+		ListenBrainz:  listenbrainzService,
 		Explo:         exploService,
 		ArtistImages:  artistImageService,
 		Events:        eventHub,
@@ -637,6 +669,22 @@ func main() {
 		bg("last.fm queue poller", func() {
 			if err := poller.Run(ctx); err != nil && err != context.Canceled {
 				log.Warnf("last.fm queue poller stopped: %v", err)
+			}
+		})
+	}
+
+	// Started regardless of whether anyone is connected right now: a user can
+	// paste a token at any moment, and the poller is what eventually delivers
+	// every listen an outage held back.
+	if cfg.ListenBrainzPoll {
+		poller := listenbrainz.NewPoller(listenbrainz.PollerOptions{
+			Service: listenbrainzService,
+			Tick:    cfg.ListenBrainzPollTick,
+			Logger:  log.Printf,
+		})
+		bg("listenbrainz queue poller", func() {
+			if err := poller.Run(ctx); err != nil && err != context.Canceled {
+				log.Warnf("listenbrainz queue poller stopped: %v", err)
 			}
 		})
 	}
@@ -685,9 +733,16 @@ func main() {
 				}
 				return roots, nil
 			},
+			ScanLibrary: func(ctx context.Context, libraryID string) (libraries.ScanResult, error) {
+				return libraryService.ScanLibrary(ctx, libraryID, libraries.TriggerFilesystem, "")
+			},
 			ScanInProgress: libraryService.ScanInProgress,
 			Debounce:       cfg.WatchDebounce,
-			Logger:         log.StdLogger(log.LevelDebug),
+			Resync:         cfg.WatchResync,
+			// Info, not debug: a watcher that silently stops attaching is
+			// indistinguishable from a quiet library. These lines are how you
+			// find out auto-pickup is broken without opening the UI.
+			Logger: log.StdLogger(log.LevelInfo),
 		})
 		bg("library watcher", func() {
 			if err := watcher.Run(ctx); err != nil && err != context.Canceled {
@@ -722,6 +777,9 @@ func main() {
 		log.Infof("last.fm scrobbling: enabled")
 	} else {
 		log.Infof("last.fm scrobbling: disabled (set SAMO_LASTFM_API_KEY and SAMO_LASTFM_SHARED_SECRET)")
+	}
+	if listenbrainzService.Enabled() {
+		log.Infof("listenbrainz scrobbling: enabled (%s; each user connects a personal token)", listenbrainzService.DefaultAPIRoot())
 	}
 
 	_, portStr, err := net.SplitHostPort(actualAddr)
@@ -911,6 +969,40 @@ func (a channelListenedAdapter) EpisodeProgress(
 	return out, nil
 }
 
+// channelAiringAdapter records the station's own listening.
+//
+// The radio is a listener in its own right rather than a stand-in for any
+// person, so it writes under the reserved server account. That is what lets the
+// already-heard gate see what the station has been through — the same gate that
+// reads across every listener — without marking episodes played in anybody's
+// client, on a channel the whole house shares.
+type channelAiringAdapter struct {
+	service *playback.Service
+}
+
+func (a channelAiringAdapter) RecordEpisodeAiring(
+	ctx context.Context,
+	episodeID string,
+	progressSeconds int,
+	completed bool,
+) error {
+	if a.service == nil {
+		return nil
+	}
+	patch := playback.PatchInput{
+		Completed:          &completed,
+		TouchLastPlayedAt:  true,
+		IncrementPlayCount: completed,
+	}
+	if progressSeconds > 0 {
+		patch.ProgressSeconds = &progressSeconds
+	}
+	_, err := a.service.Patch(
+		ctx, users.BootstrapUserID, playback.TargetPodcastEpisode, episodeID, patch,
+	)
+	return err
+}
+
 type internetStationAdapter struct {
 	service *sources.Service
 }
@@ -924,8 +1016,61 @@ func (a internetStationAdapter) GetInternetRadioStation(ctx context.Context, sta
 		return channels.InternetStation{}, err
 	}
 	return channels.InternetStation{
-		ID:        station.ID,
-		Name:      station.Name,
-		StreamURL: station.StreamURL,
+		ID:         station.ID,
+		Name:       station.Name,
+		StreamURL:  station.StreamURL,
+		ArtworkURL: stationArtworkURL(station),
 	}, nil
+}
+
+// stationArtworkURL is the station's own picture, preferring the cover uploaded
+// into samo over the logo a directory supplied.
+//
+// The uploaded one is local, already the right shape, and does not depend on
+// somebody else's CDN still being up years after the station was added.
+func stationArtworkURL(station sources.InternetRadioStation) string {
+	if coverID := strings.TrimSpace(station.CoverID); coverID != "" {
+		return "/api/v1/media/covers/" + coverID + "/image"
+	}
+	return strings.TrimSpace(station.ImageURL)
+}
+
+// liveStationAdapter exposes the sources service's live now-playing cache
+// through channels.LiveStationLookup, so a channel relaying a station can
+// report the track rather than the block that chose it.
+type liveStationAdapter struct {
+	service *sources.Service
+}
+
+func (a liveStationAdapter) LiveStationMetadata(ctx context.Context, stationID string) (channels.LiveStationNowPlaying, bool) {
+	if a.service == nil {
+		return channels.LiveStationNowPlaying{}, false
+	}
+	live, ok := a.service.LiveStationMetadata(ctx, stationID)
+	if !ok {
+		return channels.LiveStationNowPlaying{}, false
+	}
+	return liveStationNowPlaying(live), true
+}
+
+func (a liveStationAdapter) CachedStationMetadata(stationID string) (channels.LiveStationNowPlaying, bool) {
+	if a.service == nil {
+		return channels.LiveStationNowPlaying{}, false
+	}
+	live, ok := a.service.CachedStationMetadata(stationID)
+	if !ok {
+		return channels.LiveStationNowPlaying{}, false
+	}
+	return liveStationNowPlaying(live), true
+}
+
+// liveStationNowPlaying narrows the sources answer to the fields a card needs.
+// The freshness bookkeeping the cache carries is its own business.
+func liveStationNowPlaying(live sources.LiveNowPlaying) channels.LiveStationNowPlaying {
+	return channels.LiveStationNowPlaying{
+		Title:      live.Title,
+		Artist:     live.Artist,
+		Album:      live.Album,
+		ArtworkURL: live.ArtworkURL,
+	}
 }

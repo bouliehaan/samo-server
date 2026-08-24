@@ -1,4 +1,4 @@
-package lastfm
+package scrobble
 
 // The listen engine.
 //
@@ -24,7 +24,6 @@ import (
 	"time"
 
 	"github.com/bouliehaan/samo-server/internal/catalog"
-	"github.com/bouliehaan/samo-server/internal/playback"
 )
 
 const (
@@ -35,7 +34,7 @@ const (
 
 	// A position at or below this, after having played well past it, is a
 	// restart (repeat-one, seek-to-top, or the next play of the same track)
-	// rather than a rewind within the current play.
+	// rather than a rewind within the current Play.
 	restartPositionSeconds = 5
 
 	// Wall-clock jitter tolerated when crediting listening. Clients report on a
@@ -68,29 +67,21 @@ const (
 	// still playing. Suppress that announcement while another track is
 	// demonstrably still advancing.
 	nowPlayingPrefetchGuard = 45 * time.Second
-
-	// Last.fm rejects scrobbles older than two weeks. maxScrobbleAge is the
-	// point past which delivery is abandoned; scrobbleClampAge is where an
-	// older timestamp is pinned, deliberately inside it so a clamped listen
-	// does not land exactly on the drop boundary and get discarded on its way
-	// out.
-	maxScrobbleAge   = 13 * 24 * time.Hour
-	scrobbleClampAge = maxScrobbleAge - 12*time.Hour
 )
 
-// observationKind is what a request tells us about the play, beyond position.
-type observationKind int
+// ObservationKind is what a request tells us about the play, beyond position.
+type ObservationKind int
 
 const (
-	obsProgress observationKind = iota // routine position report
-	obsStart                           // client explicitly declared a new play
-	obsFinish                          // the track reached its end
-	obsSkip                            // the listener abandoned the track
+	ObsProgress ObservationKind = iota // routine position report
+	ObsStart                           // client explicitly declared a new play
+	ObsFinish                          // the track reached its end
+	ObsSkip                            // the listener abandoned the track
 )
 
-// observation is one report about one track at one instant.
-type observation struct {
-	Kind        observationKind
+// Observation is one report about one track at one instant.
+type Observation struct {
+	Kind        ObservationKind
 	Position    int
 	HasPosition bool
 	Duration    int
@@ -107,8 +98,8 @@ type observation struct {
 	Begins bool
 }
 
-// play is the durable state of one listen of one track.
-type play struct {
+// Play is the durable state of one listen of one track.
+type Play struct {
 	UserID          string
 	TrackID         string
 	PlayID          string
@@ -123,9 +114,9 @@ type play struct {
 	Exists          bool
 }
 
-// playUpdate is the result of folding one observation into a play.
-type playUpdate struct {
-	Play     play
+// PlayUpdate is the result of folding one observation into a play.
+type PlayUpdate struct {
+	Play     Play
 	Started  bool // a new play began
 	Advanced bool // real listening was credited
 	Finished bool // the play ended
@@ -133,9 +124,9 @@ type playUpdate struct {
 	Begins   bool // the observation was an explicit start of playback
 }
 
-// settle folds one observation into a play and reports whether the result has
+// Settle folds one observation into a play and reports whether the result has
 // earned a scrobble. Everything the service adds around this is durability.
-func settle(current play, obs observation, newPlayID string) (playUpdate, bool) {
+func Settle(current Play, obs Observation, newPlayID string) (PlayUpdate, bool) {
 	update := applyObservation(current, obs, newPlayID)
 	if update.Finished {
 		update.Play.Closed = true
@@ -144,20 +135,20 @@ func settle(current play, obs observation, newPlayID string) (playUpdate, bool) 
 }
 
 // applyObservation folds obs into current and returns the next state.
-func applyObservation(current play, obs observation, newPlayID string) playUpdate {
-	if !current.Exists || current.Closed || obs.Kind == obsStart ||
+func applyObservation(current Play, obs Observation, newPlayID string) PlayUpdate {
+	if !current.Exists || current.Closed || obs.Kind == ObsStart ||
 		isRestart(current, obs) || isIdle(current, obs) ||
 		(obs.Begins && atEndOfTrack(current)) {
-		return finalize(playUpdate{Play: beginPlay(current, obs, newPlayID), Started: true}, current, obs)
+		return finalize(PlayUpdate{Play: beginPlay(current, obs, newPlayID), Started: true}, current, obs)
 	}
-	return finalize(playUpdate{Play: current}, current, obs)
+	return finalize(PlayUpdate{Play: current}, current, obs)
 }
 
 // atEndOfTrack reports whether a play is sitting at the end of its track. Such
 // a play cannot be continued: pressing play on it is a new listen, not a
 // resumption, and continuing it would leave the listener with no "now playing"
 // at all until their client's next position report.
-func atEndOfTrack(p play) bool {
+func atEndOfTrack(p Play) bool {
 	return p.Exists && p.DurationSeconds > 0 &&
 		p.LastPosition >= p.DurationSeconds-endOfTrackGraceSeconds
 }
@@ -165,7 +156,7 @@ func atEndOfTrack(p play) bool {
 // beginPlay starts a fresh play at the observed position. Listening starts at
 // zero no matter where the position is: resuming at 4:07 of a 4:08 track means
 // nothing has been heard yet.
-func beginPlay(current play, obs observation, playID string) play {
+func beginPlay(current Play, obs Observation, playID string) Play {
 	position := 0
 	if obs.HasPosition {
 		position = obs.Position
@@ -174,7 +165,7 @@ func beginPlay(current play, obs observation, playID string) play {
 	if obs.Duration > 0 {
 		duration = obs.Duration
 	}
-	return play{
+	return Play{
 		UserID:          current.UserID,
 		TrackID:         current.TrackID,
 		PlayID:          playID,
@@ -190,7 +181,7 @@ func beginPlay(current play, obs observation, playID string) play {
 // state. `previous` supplies the position and instant the observation is
 // measured against; for a play that just began they are the play's own, so
 // nothing is credited.
-func finalize(update playUpdate, previous play, obs observation) playUpdate {
+func finalize(update PlayUpdate, previous Play, obs Observation) PlayUpdate {
 	next := update.Play
 	update.Begins = obs.Begins
 	if obs.Duration > 0 {
@@ -214,7 +205,7 @@ func finalize(update playUpdate, previous play, obs observation) playUpdate {
 	// all. Treat a finish as an observation AT the end so the last unreported
 	// stretch is credited — still bounded by wall clock, so skipping to the end
 	// credits nothing.
-	if obs.Kind == obsFinish && !obs.Trusted && !update.Stale &&
+	if obs.Kind == ObsFinish && !obs.Trusted && !update.Stale &&
 		next.DurationSeconds > 0 && position < next.DurationSeconds {
 		position = next.DurationSeconds
 	}
@@ -232,7 +223,7 @@ func finalize(update playUpdate, previous play, obs observation) playUpdate {
 
 	// An explicit `complete` event is the client asserting the track played
 	// through; honour its own account of how much was heard.
-	if obs.Kind == obsFinish && obs.Trusted {
+	if obs.Kind == ObsFinish && obs.Trusted {
 		claimed := obs.Position
 		if next.DurationSeconds > 0 && (claimed <= 0 || claimed > next.DurationSeconds) {
 			claimed = next.DurationSeconds
@@ -246,7 +237,7 @@ func finalize(update playUpdate, previous play, obs observation) playUpdate {
 	}
 
 	switch {
-	case obs.Kind == obsFinish, obs.Kind == obsSkip:
+	case obs.Kind == ObsFinish, obs.Kind == ObsSkip:
 		update.Finished = true
 	case !update.Started && next.DurationSeconds > 0 &&
 		next.LastPosition >= next.DurationSeconds-endOfTrackGraceSeconds:
@@ -286,14 +277,14 @@ func creditFor(contentGap, wallGap int) int {
 // isRestart reports whether the position jumped back to the very start of a
 // track that had played well past it — repeat-one, seek-to-top, or simply
 // playing it again.
-func isRestart(current play, obs observation) bool {
-	if !obs.HasPosition || obs.Kind == obsFinish || obs.Kind == obsSkip {
+func isRestart(current Play, obs Observation) bool {
+	if !obs.HasPosition || obs.Kind == ObsFinish || obs.Kind == ObsSkip {
 		return false
 	}
 	return current.LastPosition > restartPositionSeconds && obs.Position <= restartPositionSeconds
 }
 
-func isIdle(current play, obs observation) bool {
+func isIdle(current Play, obs Observation) bool {
 	if current.LastObservedAt.IsZero() {
 		return false
 	}
@@ -301,7 +292,7 @@ func isIdle(current play, obs observation) bool {
 }
 
 // qualifiesForScrobble applies Last.fm's listen rules to MEASURED listening.
-func qualifiesForScrobble(p play) bool {
+func qualifiesForScrobble(p Play) bool {
 	if p.Scrobbled {
 		return false
 	}
@@ -324,12 +315,12 @@ func scrobbleThreshold(durationSeconds int) int {
 	return maxScrobbleThreshold
 }
 
-// nowPlayingPointer is the track a user was last announced — or last attempted
+// NowPlayingPointer is the track a user was last announced — or last attempted
 // to be announced — as playing. A zero SentAt records an attempt that failed:
 // the pointer still moves, so the failure is audited once rather than on every
 // position report, while the refresh throttle stays disengaged so the next
 // report retries immediately.
-type nowPlayingPointer struct {
+type NowPlayingPointer struct {
 	TrackID string
 	PlayID  string
 	SentAt  time.Time
@@ -337,14 +328,14 @@ type nowPlayingPointer struct {
 }
 
 // announcedFor reports whether Last.fm currently shows this play.
-func (p nowPlayingPointer) announcedFor(current play) bool {
+func (p NowPlayingPointer) announcedFor(current Play) bool {
 	return p.Exists && p.TrackID == current.TrackID && p.PlayID == current.PlayID && !p.SentAt.IsZero()
 }
 
-// shouldAnnounceNowPlaying decides whether this observation should update
+// ShouldAnnounceNowPlaying decides whether this observation should update
 // Last.fm's "now playing". otherAdvancedAt is the last time a DIFFERENT track
 // of the same user credited real listening.
-func shouldAnnounceNowPlaying(update playUpdate, pointer nowPlayingPointer, otherAdvancedAt time.Time, at time.Time) bool {
+func ShouldAnnounceNowPlaying(update PlayUpdate, pointer NowPlayingPointer, otherAdvancedAt time.Time, at time.Time) bool {
 	p := update.Play
 	if update.Stale || p.Closed {
 		return false
@@ -366,23 +357,27 @@ func shouldAnnounceNowPlaying(update playUpdate, pointer nowPlayingPointer, othe
 	return false
 }
 
-// scrobbleTimestamp is the instant Last.fm records the play at: when the track
-// started, clamped into the window Last.fm accepts.
-func scrobbleTimestamp(startedAt, now time.Time) time.Time {
+// ScrobbleTimestamp is the instant a service records the play at: when the
+// track started, clamped into the window that service still accepts.
+//
+// clampAge is the service's own policy — Last.fm refuses anything older than
+// two weeks, while ListenBrainz accepts historical listens — so a zero or
+// negative clampAge means "no clamp" and the true start time survives.
+func ScrobbleTimestamp(startedAt, now time.Time, clampAge time.Duration) time.Time {
 	if startedAt.IsZero() || startedAt.After(now) {
 		return now
 	}
-	if now.Sub(startedAt) > scrobbleClampAge {
-		return now.Add(-scrobbleClampAge)
+	if clampAge > 0 && now.Sub(startedAt) > clampAge {
+		return now.Add(-clampAge)
 	}
 	return startedAt
 }
 
-// scrobbleDedupeKey identifies a scrobble by what it claims, not by which code
+// DedupeKey identifies a scrobble by what it claims, not by which code
 // path produced it, so the same play can never be submitted twice however it
 // is rediscovered. Track plus start-second is unique in practice: two distinct
 // plays of one track cannot begin in the same second.
-func scrobbleDedupeKey(trackID, artist, track string, timestamp time.Time) string {
+func DedupeKey(trackID, artist, track string, timestamp time.Time) string {
 	sum := sha256.Sum256([]byte(strings.Join([]string{
 		strings.TrimSpace(trackID),
 		strings.ToLower(strings.TrimSpace(artist)),
@@ -412,13 +407,13 @@ func sanitizePosition(seconds, durationSeconds int) (int, bool) {
 	return seconds, true
 }
 
-// observationFrom translates a request into an observation.
-func observationFrom(input PlaybackInput, durationSeconds int) observation {
-	obs := observation{
+// ObservationFrom translates a request into an observation.
+func ObservationFrom(input PlaybackInput, durationSeconds int) Observation {
+	obs := Observation{
 		Duration: durationSeconds,
 		At:       input.ObservedAt,
 		Trusted:  input.Event == EventComplete,
-		Begins:   input.Source == sourceStream || input.Event == EventStart,
+		Begins:   input.Source == SourceStream || input.Event == EventStart,
 		Kind:     observationKindFrom(input),
 	}
 	if obs.At.IsZero() {
@@ -432,29 +427,29 @@ func observationFrom(input PlaybackInput, durationSeconds int) observation {
 	return obs
 }
 
-func observationKindFrom(input PlaybackInput) observationKind {
+func observationKindFrom(input PlaybackInput) ObservationKind {
 	switch input.Event {
 	case EventStart:
-		return obsStart
+		return ObsStart
 	case EventSkip:
-		return obsSkip
+		return ObsSkip
 	case EventComplete:
-		return obsFinish
+		return ObsFinish
 	case EventProgress:
-		return obsProgress
+		return ObsProgress
 	}
 	if skipped(input) {
-		return obsSkip
+		return ObsSkip
 	}
 	if completed(input) {
-		return obsFinish
+		return ObsFinish
 	}
 	// A stream open is deliberately NOT a start: players reopen the same stream
 	// several times per track for range requests and rebuffering, and treating
 	// each as a new play would reset measured listening until nothing ever
 	// reached the threshold. It is just a position report; if it lands back at
 	// the top of a finished track, isRestart picks that up.
-	return obsProgress
+	return ObsProgress
 }
 
 func skipped(input PlaybackInput) bool {
@@ -488,7 +483,7 @@ func reportedPosition(input PlaybackInput) (int, bool) {
 	if input.Patch != nil && input.Patch.ProgressSeconds != nil {
 		return *input.Patch.ProgressSeconds, true
 	}
-	if input.Event != "" || input.Source == sourceStream {
+	if input.Event != "" || input.Source == SourceStream {
 		return input.After.ProgressSeconds, true
 	}
 	if input.After.ProgressSeconds > 0 || input.Before.ProgressSeconds > 0 {
@@ -497,8 +492,8 @@ func reportedPosition(input PlaybackInput) (int, bool) {
 	return 0, false
 }
 
-// trackSubmission snapshots the metadata Last.fm needs for a track.
-func trackSubmission(track catalog.MusicTrack, durationOverride int) (TrackSubmission, error) {
+// TrackSubmissionFrom snapshots the metadata Last.fm needs for a track.
+func TrackSubmissionFrom(track catalog.MusicTrack, durationOverride int) (TrackSubmission, error) {
 	artist := strings.TrimSpace(track.DisplayArtist)
 	if artist == "" && len(track.ArtistNames) > 0 {
 		artist = strings.Join(track.ArtistNames, ", ")
@@ -521,36 +516,25 @@ func trackSubmission(track catalog.MusicTrack, durationOverride int) (TrackSubmi
 		duration = 0
 	}
 	return TrackSubmission{
-		TrackID:              track.ID,
-		Artist:               artist,
-		Track:                title,
-		Album:                strings.TrimSpace(track.AlbumTitle),
-		DurationSeconds:      duration,
+		TrackID:         track.ID,
+		Artist:          artist,
+		Track:           title,
+		Album:           strings.TrimSpace(track.AlbumTitle),
+		AlbumArtist:     strings.TrimSpace(strings.Join(track.AlbumArtistNames, ", ")),
+		TrackNumber:     track.TrackNumber,
+		DurationSeconds: duration,
+		// MusicBrainz IDs are what let a service match a listen to the real
+		// recording instead of guessing from the text. Last.fm only takes the
+		// recording id; ListenBrainz takes all of them.
 		MusicBrainzRecording: strings.TrimSpace(track.ExternalIDs.MusicBrainzRecordingID),
+		MusicBrainzRelease:   strings.TrimSpace(track.ExternalIDs.MusicBrainzReleaseID),
+		MusicBrainzArtist:    strings.TrimSpace(track.ExternalIDs.MusicBrainzArtistID),
+		MusicBrainzTrack:     strings.TrimSpace(track.ExternalIDs.MusicBrainzTrackID),
 	}, nil
 }
 
-func loveStateChanged(before, after catalog.PlaybackState, patch *playback.PatchInput) (loved bool, unloved bool) {
-	beforeLoved := before.Favorite || before.Starred
-	afterLoved := after.Favorite || after.Starred
-	if patch != nil {
-		if patch.Favorite != nil {
-			afterLoved = *patch.Favorite || after.Starred
-		}
-		if patch.Starred != nil {
-			afterLoved = after.Favorite || *patch.Starred
-		}
-	}
-	if !beforeLoved && afterLoved {
-		return true, false
-	}
-	if beforeLoved && !afterLoved {
-		return false, true
-	}
-	return false, false
-}
-
-func parseScrobbleEvent(raw string) (ScrobbleEvent, error) {
+// ParseEvent validates an explicit client event name.
+func ParseEvent(raw string) (ScrobbleEvent, error) {
 	switch ScrobbleEvent(strings.ToLower(strings.TrimSpace(raw))) {
 	case EventStart:
 		return EventStart, nil

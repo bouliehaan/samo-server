@@ -52,6 +52,20 @@ func (s *Service) UpdateInternetRadioStation(ctx context.Context, id string, inp
 			return InternetRadioStation{}, err
 		}
 	}
+	metadataURL := current.MetadataURL
+	if input.MetadataURL != nil {
+		metadataURL, err = normalizeOptionalHTTPURL(*input.MetadataURL)
+		if err != nil {
+			return InternetRadioStation{}, err
+		}
+	}
+	metadataArtworkURL := current.MetadataArtworkURL
+	if input.MetadataArtworkURL != nil {
+		metadataArtworkURL, err = normalizeOptionalHTTPURL(*input.MetadataArtworkURL)
+		if err != nil {
+			return InternetRadioStation{}, err
+		}
+	}
 	country := current.Country
 	if input.Country != nil {
 		country = strings.TrimSpace(*input.Country)
@@ -99,6 +113,8 @@ func (s *Service) UpdateInternetRadioStation(ctx context.Context, id string, inp
 		    description = ?,
 		    homepage_url = ?,
 		    image_url = ?,
+		    metadata_url = ?,
+		    metadata_artwork_url = ?,
 		    country = ?,
 		    language = ?,
 		    tags_json = ?,
@@ -108,7 +124,7 @@ func (s *Service) UpdateInternetRadioStation(ctx context.Context, id string, inp
 		    next_probe_at = ?,
 		    updated_at = CURRENT_TIMESTAMP
 		WHERE id = ?`,
-		name, description, homepageURL, imageURL, country, language,
+		name, description, homepageURL, imageURL, metadataURL, metadataArtworkURL, country, language,
 		jsonText(tags), boolInt(enabled), boolInt(probeEnabled), interval, nextProbeAt, id)
 	if err != nil {
 		return InternetRadioStation{}, fmt.Errorf("update internet radio station: %w", err)

@@ -23,6 +23,20 @@ import (
 // harness
 // ---------------------------------------------------------------------------
 
+// epoch anchors every clock in this suite. The listen engine's own tests live
+// in internal/scrobble; these exercise what Last.fm adds around it.
+var epoch = time.Date(2026, 7, 12, 17, 44, 0, 0, time.UTC)
+
+func trackOf(seconds int) catalog.MusicTrack {
+	return catalog.MusicTrack{
+		ID:              "track-1",
+		Title:           "Signal One",
+		ArtistNames:     []string{"The Static"},
+		AlbumTitle:      "Night Broadcasts",
+		DurationSeconds: seconds,
+	}
+}
+
 // clock drives the listen engine and the retry schedule from the test.
 type clock struct {
 	mu  sync.Mutex

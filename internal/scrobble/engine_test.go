@@ -1,4 +1,4 @@
-package lastfm
+package scrobble
 
 import (
 	"fmt"
@@ -11,13 +11,21 @@ import (
 
 var epoch = time.Date(2026, 7, 12, 17, 44, 0, 0, time.UTC)
 
+// Last.fm's two-week window, mirrored here so the harness stamps timestamps
+// the way that service does. Clamping is now the caller's policy, not the
+// engine's, because ListenBrainz accepts historical listens.
+const (
+	testMaxAge   = 13 * 24 * time.Hour
+	testClampAge = testMaxAge - 12*time.Hour
+)
+
 // listener replays a sequence of requests through the listen engine exactly the
 // way the service does, and counts what would be sent upstream.
 type listener struct {
 	t         *testing.T
 	track     catalog.MusicTrack
-	play      play
-	pointer   nowPlayingPointer
+	play      Play
+	pointer   NowPlayingPointer
 	plays     int
 	scrobbles int
 	announces []string
@@ -29,32 +37,32 @@ func newListener(t *testing.T, track catalog.MusicTrack) *listener {
 	return &listener{
 		t:     t,
 		track: track,
-		play:  play{UserID: "user-1", TrackID: track.ID},
+		play:  Play{UserID: "user-1", TrackID: track.ID},
 	}
 }
 
 // submit runs one request through the engine and returns the resulting update.
-func (l *listener) submit(input PlaybackInput) playUpdate {
+func (l *listener) submit(input PlaybackInput) PlayUpdate {
 	l.t.Helper()
 	input.UserID = "user-1"
 	input.Track = l.track
-	submission, err := trackSubmission(l.track, input.DurationSeconds)
+	submission, err := TrackSubmissionFrom(l.track, input.DurationSeconds)
 	if err != nil {
-		l.t.Fatalf("trackSubmission: %v", err)
+		l.t.Fatalf("TrackSubmissionFrom: %v", err)
 	}
 	l.plays++
-	update, earned := settle(l.play, observationFrom(input, submission.DurationSeconds), fmt.Sprintf("play-%d", l.plays))
+	update, earned := Settle(l.play, ObservationFrom(input, submission.DurationSeconds), fmt.Sprintf("play-%d", l.plays))
 	if earned {
-		submission.Timestamp = scrobbleTimestamp(update.Play.StartedAt, input.ObservedAt)
+		submission.Timestamp = ScrobbleTimestamp(update.Play.StartedAt, input.ObservedAt, testClampAge)
 		submission.PlayedSeconds = update.Play.ListenedSeconds
-		submission.DedupeKey = scrobbleDedupeKey(submission.TrackID, submission.Artist, submission.Track, submission.Timestamp)
+		submission.DedupeKey = DedupeKey(submission.TrackID, submission.Artist, submission.Track, submission.Timestamp)
 		l.last = submission
 		l.scrobbles++
 		update.Play.Scrobbled = true
 	}
-	if shouldAnnounceNowPlaying(update, l.pointer, time.Time{}, input.ObservedAt) {
+	if ShouldAnnounceNowPlaying(update, l.pointer, time.Time{}, input.ObservedAt) {
 		l.announces = append(l.announces, update.Play.PlayID)
-		l.pointer = nowPlayingPointer{TrackID: update.Play.TrackID, PlayID: update.Play.PlayID, SentAt: input.ObservedAt, Exists: true}
+		l.pointer = NowPlayingPointer{TrackID: update.Play.TrackID, PlayID: update.Play.PlayID, SentAt: input.ObservedAt, Exists: true}
 	}
 	l.play = update.Play
 	return update
@@ -62,9 +70,9 @@ func (l *listener) submit(input PlaybackInput) playUpdate {
 
 // stream is `GET /api/v1/music/tracks/{id}/stream`, which reports the position
 // playback will resume from.
-func (l *listener) stream(at time.Time, resume int) playUpdate {
+func (l *listener) stream(at time.Time, resume int) PlayUpdate {
 	return l.submit(PlaybackInput{
-		Source:     sourceStream,
+		Source:     SourceStream,
 		After:      catalog.PlaybackState{ProgressSeconds: resume},
 		ObservedAt: at,
 	})
@@ -72,7 +80,7 @@ func (l *listener) stream(at time.Time, resume int) playUpdate {
 
 // progress is the periodic `PATCH /api/v1/playback/music-track/{id}` both
 // clients send, on a 20 second timer.
-func (l *listener) progress(at time.Time, position int) playUpdate {
+func (l *listener) progress(at time.Time, position int) PlayUpdate {
 	previous := l.play.LastPosition
 	return l.submit(PlaybackInput{
 		Source:     "playback-patch",
@@ -84,7 +92,7 @@ func (l *listener) progress(at time.Time, position int) playUpdate {
 }
 
 // playCount is the end-of-track PATCH that bumps the play counter.
-func (l *listener) playCount(at time.Time, position int) playUpdate {
+func (l *listener) playCount(at time.Time, position int) PlayUpdate {
 	return l.submit(PlaybackInput{
 		Source:     "playback-patch",
 		Before:     catalog.PlaybackState{ProgressSeconds: l.play.LastPosition, PlayCount: 2},
@@ -94,7 +102,7 @@ func (l *listener) playCount(at time.Time, position int) playUpdate {
 	})
 }
 
-func (l *listener) skip(at time.Time, position int) playUpdate {
+func (l *listener) skip(at time.Time, position int) PlayUpdate {
 	return l.submit(PlaybackInput{
 		Source:     "playback-patch",
 		Before:     catalog.PlaybackState{ProgressSeconds: l.play.LastPosition},
@@ -464,17 +472,17 @@ func TestNowPlayingSuppressedForPrefetchedTrack(t *testing.T) {
 	next := newListener(t, catalog.MusicTrack{
 		ID: "track-2", Title: "Second", ArtistNames: []string{"The Static"}, DurationSeconds: 200,
 	})
-	update, _ := settle(next.play, observationFrom(PlaybackInput{
-		UserID: "user-1", Track: next.track, Source: sourceStream,
+	update, _ := Settle(next.play, ObservationFrom(PlaybackInput{
+		UserID: "user-1", Track: next.track, Source: SourceStream,
 		After: catalog.PlaybackState{ProgressSeconds: 0}, ObservedAt: epoch,
 	}, 200), "play-1")
 
 	// The track actually playing advanced three seconds ago.
-	if shouldAnnounceNowPlaying(update, nowPlayingPointer{}, epoch.Add(-3*time.Second), epoch) {
+	if ShouldAnnounceNowPlaying(update, NowPlayingPointer{}, epoch.Add(-3*time.Second), epoch) {
 		t.Fatal("a prefetched track must not be announced while another is still advancing")
 	}
 	// Once the previous track has been quiet long enough, it is genuinely next.
-	if !shouldAnnounceNowPlaying(update, nowPlayingPointer{}, epoch.Add(-2*time.Minute), epoch) {
+	if !ShouldAnnounceNowPlaying(update, NowPlayingPointer{}, epoch.Add(-2*time.Minute), epoch) {
 		t.Fatal("the track that took over must be announced")
 	}
 }
@@ -585,45 +593,65 @@ func TestSanitizePosition(t *testing.T) {
 
 func TestScrobbleTimestampStaysInLastFMsWindow(t *testing.T) {
 	now := epoch
-	if got := scrobbleTimestamp(now.Add(time.Hour), now); !got.Equal(now) {
+	if got := ScrobbleTimestamp(now.Add(time.Hour), now, testClampAge); !got.Equal(now) {
 		t.Fatalf("a future start must be clamped to now, got %s", got)
 	}
-	if got := scrobbleTimestamp(now.Add(-90*24*time.Hour), now); now.Sub(got) > maxScrobbleAge {
+	if got := ScrobbleTimestamp(now.Add(-90*24*time.Hour), now, testClampAge); now.Sub(got) > testMaxAge {
 		t.Fatalf("a very old start must be clamped into the accepted window, got %s", got)
 	}
 	started := now.Add(-3 * time.Minute)
-	if got := scrobbleTimestamp(started, now); !got.Equal(started) {
+	if got := ScrobbleTimestamp(started, now, testClampAge); !got.Equal(started) {
 		t.Fatalf("an ordinary start must be preserved, got %s", got)
+	}
+}
+
+// A service with no age limit of its own (ListenBrainz accepts historical
+// listens) must get the true start time back, however old it is. Clamping it
+// anyway would file every recovered backlog listen under "now".
+func TestScrobbleTimestampWithoutClampPreservesOldStarts(t *testing.T) {
+	now := epoch
+	started := now.Add(-90 * 24 * time.Hour)
+	if got := ScrobbleTimestamp(started, now, 0); !got.Equal(started) {
+		t.Fatalf("an unclamped start must be preserved, got %s want %s", got, started)
+	}
+	if got := ScrobbleTimestamp(now.Add(time.Hour), now, 0); !got.Equal(now) {
+		t.Fatalf("a future start must still be clamped to now, got %s", got)
 	}
 }
 
 func TestScrobbleDedupeKeyIdentifiesTheListen(t *testing.T) {
 	at := epoch
-	base := scrobbleDedupeKey("track-1", "The Static", "Signal One", at)
-	if base != scrobbleDedupeKey("track-1", "the static", "SIGNAL ONE", at) {
+	base := DedupeKey("track-1", "The Static", "Signal One", at)
+	if base != DedupeKey("track-1", "the static", "SIGNAL ONE", at) {
 		t.Fatal("the key must not depend on metadata casing")
 	}
-	if base == scrobbleDedupeKey("track-1", "The Static", "Signal One", at.Add(time.Second)) {
+	if base == DedupeKey("track-1", "The Static", "Signal One", at.Add(time.Second)) {
 		t.Fatal("two plays a second apart must produce different keys")
 	}
-	if base == scrobbleDedupeKey("track-2", "The Static", "Signal One", at) {
+	if base == DedupeKey("track-2", "The Static", "Signal One", at) {
 		t.Fatal("different tracks must produce different keys")
 	}
 }
 
 func TestRetryDelayBacksOffAndCaps(t *testing.T) {
+	const (
+		queueBaseDelay = 30 * time.Second
+		queueMaxDelay  = 2 * time.Hour
+	)
 	var previous time.Duration
 	for attempt := 1; attempt <= 12; attempt++ {
-		delay := retryDelay(attempt)
+		delay := RetryDelay(attempt, queueBaseDelay, queueMaxDelay)
 		if delay < queueBaseDelay {
-			t.Fatalf("retryDelay(%d) = %s, want at least %s", attempt, delay, queueBaseDelay)
+			t.Fatalf("RetryDelay(%d) = %s, want at least %s", attempt, delay, queueBaseDelay)
 		}
 		if delay > queueMaxDelay+queueMaxDelay/4 {
-			t.Fatalf("retryDelay(%d) = %s, want at most %s", attempt, delay, queueMaxDelay)
+			t.Fatalf("RetryDelay(%d) = %s, want at most %s", attempt, delay, queueMaxDelay)
 		}
 		if attempt > 1 && attempt < 9 && delay <= previous {
-			t.Fatalf("retryDelay(%d) = %s did not grow past %s", attempt, delay, previous)
+			t.Fatalf("RetryDelay(%d) = %s did not grow past %s", attempt, delay, previous)
 		}
 		previous = delay
 	}
 }
+
+func intPtr(value int) *int { return &value }

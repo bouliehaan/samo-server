@@ -44,6 +44,10 @@ type Service struct {
 	podcastCache        *podcastcache.Service
 	defaultAutoDownload bool
 	baseCtx             context.Context
+
+	// liveMeta caches what each aired station is playing. See livemeta.go —
+	// demand driven, so a station nobody is listening to costs nothing.
+	liveMeta liveMetadataCache
 }
 
 type Options struct {
@@ -345,6 +349,14 @@ func (s *Service) AddInternetRadioStation(ctx context.Context, input AddInternet
 	if err != nil {
 		return InternetRadioStation{}, err
 	}
+	metadataURL, err := normalizeOptionalHTTPURL(input.MetadataURL)
+	if err != nil {
+		return InternetRadioStation{}, err
+	}
+	metadataArtworkURL, err := normalizeOptionalHTTPURL(input.MetadataArtworkURL)
+	if err != nil {
+		return InternetRadioStation{}, err
+	}
 
 	name := strings.TrimSpace(input.Name)
 	if name == "" {
@@ -359,16 +371,18 @@ func (s *Service) AddInternetRadioStation(ctx context.Context, input AddInternet
 	_, err = s.db.ExecContext(ctx, `
 		INSERT INTO internet_radio_stations (
 		  id, name, description, stream_url, homepage_url, image_url, content_type, codec, bitrate,
-		  country, language, tags_json, enabled, updated_at,
+		  country, language, tags_json, enabled, metadata_url, metadata_artwork_url, updated_at,
 		  probe_enabled, probe_interval_seconds, next_probe_at
 		)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, 1, ?, ?)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, 1, ?, ?)
 		ON CONFLICT(id) DO UPDATE SET
 		  name = excluded.name,
 		  description = excluded.description,
 		  stream_url = excluded.stream_url,
 		  homepage_url = excluded.homepage_url,
 		  image_url = excluded.image_url,
+		  metadata_url = excluded.metadata_url,
+		  metadata_artwork_url = excluded.metadata_artwork_url,
 		  content_type = excluded.content_type,
 		  codec = excluded.codec,
 		  bitrate = excluded.bitrate,
@@ -380,6 +394,7 @@ func (s *Service) AddInternetRadioStation(ctx context.Context, input AddInternet
 		id, name, strings.TrimSpace(input.Description), streamURL, homepageURL, imageURL,
 		strings.TrimSpace(input.ContentType), strings.TrimSpace(input.Codec), input.Bitrate,
 		strings.TrimSpace(input.Country), strings.TrimSpace(input.Language), jsonText(cleanStringSlice(input.Tags)), boolInt(enabled),
+		metadataURL, metadataArtworkURL,
 		DefaultProbeIntervalSeconds, scheduleInitialPoll())
 	if err != nil {
 		return InternetRadioStation{}, fmt.Errorf("upsert internet radio station: %w", err)

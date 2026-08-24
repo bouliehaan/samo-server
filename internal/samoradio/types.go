@@ -67,11 +67,14 @@ type Item struct {
 // ChannelState is what a tuned station is airing. The JSON key stays `channel`
 // for both kinds; Kind says which one it is.
 type ChannelState struct {
-	ID            string `json:"id"`
-	Kind          string `json:"kind,omitempty"`
-	Name          string `json:"name,omitempty"`
-	Title         string `json:"title,omitempty"`
-	Artist        string `json:"artist,omitempty"`
+	ID     string `json:"id"`
+	Kind   string `json:"kind,omitempty"`
+	Name   string `json:"name,omitempty"`
+	Title  string `json:"title,omitempty"`
+	Artist string `json:"artist,omitempty"`
+	// ArtworkURL pictures what is airing, not the station it came through.
+	// Absolute when hosted elsewhere, otherwise a samo-relative path.
+	ArtworkURL    string `json:"artworkUrl,omitempty"`
 	SourceLabel   string `json:"sourceLabel,omitempty"`
 	ListenerCount int    `json:"listenerCount,omitempty"`
 }

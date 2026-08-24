@@ -727,17 +727,26 @@ main.app-main {
   color: var(--text-dim);
   background: var(--surface-2);
 }
-.lastfm-utility-grid { display: grid; gap: 14px; }
-.lastfm-utility-section { display: grid; gap: 8px; }
-.lastfm-utility-label {
+/* The scrobbling panels (Last.fm, ListenBrainz) share one layout; the
+   .lastfm-* names are kept so existing markup and styles stay put. */
+.lastfm-utility-grid,
+.scrobble-utility-grid { display: grid; gap: 14px; }
+.lastfm-utility-section,
+.scrobble-utility-section { display: grid; gap: 8px; }
+.lastfm-utility-label,
+.scrobble-utility-label {
   font-family: var(--mono);
   font-size: 0.9rem;
   letter-spacing: 0.14em;
   text-transform: uppercase;
   color: var(--muted);
 }
-.lastfm-utility .actions { flex-wrap: wrap; }
-@media (max-width: 780px) { .lastfm-utility-grid { grid-template-columns: 1fr; } }
+.lastfm-utility .actions,
+.scrobble-utility .actions { flex-wrap: wrap; }
+@media (max-width: 780px) {
+  .lastfm-utility-grid,
+  .scrobble-utility-grid { grid-template-columns: 1fr; }
+}
 
 /* ---- Progress ---- */
 .progress-track {
@@ -780,7 +789,11 @@ main.app-main {
   font-size: 1.66rem;
   color: var(--ghost);
 }
-.radio-card-admin { align-items: stretch; }
+/* The admin card's third column used to stretch to the card's full height,
+   and a stretched flex row makes every button as tall as the card — a wall of
+   500px-high PLAY/PROBE/DELETE. Top-align the column and the buttons keep
+   their own height. */
+.radio-card-admin { align-items: start; }
 .radio-cover-upload { cursor: pointer; }
 .radio-cover-upload .radio-cover-input {
   position: absolute;
@@ -802,7 +815,13 @@ main.app-main {
 }
 .radio-cover-upload:hover .radio-cover-hint { color: var(--accent); }
 .radio-admin-meta { min-width: 0; }
-.radio-admin-actions { display: flex; flex-wrap: wrap; gap: 8px; }
+.radio-admin-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: flex-start;
+  align-content: flex-start;
+}
 .radio-card .name {
   font-family: var(--mono);
   font-size: 1.31rem;

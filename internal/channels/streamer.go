@@ -1508,11 +1508,18 @@ func (s *channelStreamer) skipCurrent() bool {
 	// A skip is not evidence that nothing aired. It is the one piece of
 	// evidence that somebody was listening — which is exactly how creditSkip
 	// already reads it when settling an obligation.
+	//
+	// Podcast episodes keep their row for the same reason, arrived at from the
+	// other end. Forgetting the airing was meant to stop a few seconds of audio
+	// retiring a fresh episode — but the episode was left looking unaired AND,
+	// because nothing wrote playback state, unheard. So it came back, which is
+	// the outcome the discard existed to prevent. Now the skip retires it
+	// deliberately (Service.markSkipHeard) and the log says what happened.
 	s.currentMu.RLock()
 	logID, startedAt, item := s.currentLog, s.currentAt, s.current
 	s.currentMu.RUnlock()
-	shuffled := item != nil && item.Shuffled
-	if logID != "" && !shuffled && time.Since(startedAt) < countsAsAired {
+	keepsRow := item != nil && (item.Shuffled || item.Kind == SourcePodcastSubscription)
+	if logID != "" && !keepsRow && time.Since(startedAt) < countsAsAired {
 		s.recorder.OnPlayDiscard(logID)
 		s.currentMu.Lock()
 		s.currentLog = ""

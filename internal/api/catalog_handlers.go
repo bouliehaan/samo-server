@@ -95,6 +95,7 @@ func (s *Server) catalogManifest(w http.ResponseWriter, r *http.Request) {
 			{Name: "radio", PathPrefix: "/api/v1/radio", Description: "24/7 station metadata, now playing, and schedules."},
 			{Name: "internetRadio", PathPrefix: "/api/v1/internet-radio", Description: "User-managed external internet radio streams."},
 			{Name: "lastfm", PathPrefix: "/api/v1/lastfm", Description: "Last.fm account linking and native scrobbling."},
+			{Name: "listenbrainz", PathPrefix: "/api/v1/listenbrainz", Description: "ListenBrainz account linking and listen submission."},
 		},
 		MetadataSets: []metadataSetManifest{
 			{Name: "musicArtist", Fields: []string{"ids", "sort names", "biography", "country", "genres", "styles", "moods", "images", "external IDs", "counts", "playback state"}},
@@ -135,6 +136,14 @@ func (s *Server) catalogManifest(w http.ResponseWriter, r *http.Request) {
 				"GET /api/v1/lastfm/queue",
 				"GET /api/v1/lastfm/history",
 				"POST /api/v1/lastfm/queue/flush",
+			},
+			"listenbrainz": {
+				"GET /api/v1/listenbrainz/status",
+				"POST /api/v1/listenbrainz/connect",
+				"DELETE /api/v1/listenbrainz/connect",
+				"GET /api/v1/listenbrainz/queue",
+				"GET /api/v1/listenbrainz/history",
+				"POST /api/v1/listenbrainz/queue/flush",
 			},
 			"scrobble": {
 				"POST /api/v1/scrobble/events",

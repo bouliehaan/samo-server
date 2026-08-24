@@ -1,0 +1,95 @@
+package listenbrainz
+
+import (
+	"context"
+	"time"
+)
+
+// Poller drains the durable submission queue in the background.
+//
+// Like the Last.fm poller it deliberately does not decide at startup whether
+// anyone is connected: a user can paste a token at any moment, and a poller
+// that exited at boot would leave every held listen stranded until the next
+// restart.
+type Poller struct {
+	service *Service
+	tick    time.Duration
+	limit   int
+	logger  func(format string, args ...any)
+}
+
+type PollerOptions struct {
+	Service *Service
+	Tick    time.Duration
+	Limit   int
+	Logger  func(format string, args ...any)
+}
+
+func NewPoller(options PollerOptions) *Poller {
+	tick := options.Tick
+	if tick <= 0 {
+		tick = time.Minute
+	}
+	limit := options.Limit
+	if limit <= 0 {
+		// Larger than Last.fm's batch because ListenBrainz takes many listens
+		// per request, so a backlog costs far fewer round trips.
+		limit = 100
+	}
+	return &Poller{
+		service: options.Service,
+		tick:    tick,
+		limit:   limit,
+		logger:  options.Logger,
+	}
+}
+
+func (p *Poller) Run(ctx context.Context) error {
+	if p == nil || p.service == nil {
+		return nil
+	}
+	// Deliver anything a previous run left behind before settling into the
+	// tick, so a restart mid-outage recovers in seconds rather than a minute.
+	startup := time.NewTimer(5 * time.Second)
+	defer startup.Stop()
+
+	ticker := time.NewTicker(p.tick)
+	defer ticker.Stop()
+
+	prune := time.NewTicker(6 * time.Hour)
+	defer prune.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-startup.C:
+			p.drain(ctx)
+		case <-ticker.C:
+			p.drain(ctx)
+		case <-prune.C:
+			if err := p.service.PrunePlays(ctx, 30*24*time.Hour); err != nil {
+				p.log("listenbrainz play prune failed: %v", err)
+			}
+		}
+	}
+}
+
+func (p *Poller) drain(ctx context.Context) {
+	if !p.service.Enabled() {
+		return
+	}
+	flushed, err := p.service.DrainQueue(ctx, "", p.limit, 20)
+	if err != nil && ctx.Err() == nil {
+		p.log("listenbrainz queue flush failed: %v", err)
+	}
+	if flushed > 0 {
+		p.log("listenbrainz delivered %d queued listen(s)", flushed)
+	}
+}
+
+func (p *Poller) log(format string, args ...any) {
+	if p.logger != nil {
+		p.logger(format, args...)
+	}
+}

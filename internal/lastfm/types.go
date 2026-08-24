@@ -4,8 +4,7 @@ import (
 	"errors"
 	"time"
 
-	"github.com/bouliehaan/samo-server/internal/catalog"
-	"github.com/bouliehaan/samo-server/internal/playback"
+	"github.com/bouliehaan/samo-server/internal/scrobble"
 )
 
 var (
@@ -13,19 +12,46 @@ var (
 	ErrNotConnected     = errors.New("last.fm account is not connected")
 	ErrInvalidToken     = errors.New("last.fm auth token is invalid or expired")
 	ErrSessionExpired   = errors.New("last.fm session is invalid or expired")
-	ErrMissingMetadata  = errors.New("track is missing artist or title metadata required for scrobbling")
-	ErrInvalidEvent     = errors.New("invalid scrobble event")
 	ErrInvalidConfig    = errors.New("last.fm api key and shared secret are required")
 	ErrInvalidSignature = errors.New("last.fm api signature rejected")
 )
 
-type ScrobbleEvent string
+// The listen engine is shared with every other scrobbling target; these
+// aliases keep the Last.fm package (and its clients) spelling the types the
+// way they always have.
+type (
+	ScrobbleEvent      = scrobble.ScrobbleEvent
+	TrackSubmission    = scrobble.TrackSubmission
+	PlaybackInput      = scrobble.PlaybackInput
+	ScrobbleEventInput = scrobble.EventInput
+
+	play              = scrobble.Play
+	observation       = scrobble.Observation
+	playUpdate        = scrobble.PlayUpdate
+	nowPlayingPointer = scrobble.NowPlayingPointer
+)
 
 const (
-	EventStart    ScrobbleEvent = "start"
-	EventProgress ScrobbleEvent = "progress"
-	EventComplete ScrobbleEvent = "complete"
-	EventSkip     ScrobbleEvent = "skip"
+	EventStart    = scrobble.EventStart
+	EventProgress = scrobble.EventProgress
+	EventComplete = scrobble.EventComplete
+	EventSkip     = scrobble.EventSkip
+
+	sourceStream = scrobble.SourceStream
+)
+
+var (
+	ErrMissingMetadata = scrobble.ErrMissingMetadata
+	ErrInvalidEvent    = scrobble.ErrInvalidEvent
+)
+
+// Last.fm refuses scrobbles older than two weeks. maxScrobbleAge is the point
+// past which delivery is abandoned; scrobbleClampAge is where an older
+// timestamp is pinned, deliberately inside it so a clamped listen does not land
+// exactly on the drop boundary and get discarded on its way out.
+const (
+	maxScrobbleAge   = 13 * 24 * time.Hour
+	scrobbleClampAge = maxScrobbleAge - 12*time.Hour
 )
 
 const (
@@ -69,14 +95,6 @@ type AuthCompleteResponse struct {
 	Username    string    `json:"username"`
 	Connected   bool      `json:"connected"`
 	ConnectedAt time.Time `json:"connectedAt"`
-}
-
-type ScrobbleEventInput struct {
-	TrackID         string     `json:"trackId"`
-	Event           string     `json:"event"`
-	ProgressSeconds int        `json:"progressSeconds,omitempty"`
-	DurationSeconds int        `json:"durationSeconds,omitempty"`
-	StartedAt       *time.Time `json:"startedAt,omitempty"`
 }
 
 type ScrobbleEventResponse struct {
@@ -127,40 +145,6 @@ type SubmissionRecord struct {
 type HistoryPage struct {
 	Items []SubmissionRecord `json:"items"`
 	Total int                `json:"total"`
-}
-
-type TrackSubmission struct {
-	TrackID              string
-	Artist               string
-	Track                string
-	Album                string
-	DurationSeconds      int
-	PlayedSeconds        int
-	Timestamp            time.Time
-	MusicBrainzRecording string
-	// DedupeKey identifies the listen this submission represents. It is the
-	// idempotency key the ledger is claimed with, so the same play can never be
-	// scrobbled twice regardless of which code path rediscovers it.
-	DedupeKey string
-}
-
-type PlaybackInput struct {
-	UserID        string
-	Track         catalog.MusicTrack
-	Before        catalog.PlaybackState
-	After         catalog.PlaybackState
-	Patch         *playback.PatchInput
-	Source        string
-	ResumeSeconds int
-	Event         ScrobbleEvent
-	// ObservedAt is when the server received this report. Stamped by the HTTP
-	// handler, not by the worker that processes it, so notifications that
-	// overtake one another in flight can still be ordered.
-	ObservedAt time.Time
-	// DurationSeconds overrides the catalog duration when a client knows better.
-	DurationSeconds int
-	// StartedAt lets an explicit client event declare when the play began.
-	StartedAt *time.Time
 }
 
 type playbackResult struct {

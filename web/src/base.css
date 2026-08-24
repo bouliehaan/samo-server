@@ -329,6 +329,10 @@ html, body {
   text-decoration: none;
   transition: background 100ms ease, color 100ms ease, border-color 100ms ease;
 }
+/* <a class="btn"> inherits the body's 1.55 line-height while <button> uses the
+   UA's `normal`, so a link sitting in a row of buttons rides 4px taller than
+   its neighbours. Match the button. */
+a.btn { line-height: normal; }
 .btn:disabled { opacity: 0.5; cursor: progress; }
 .btn.primary {
   background: var(--accent);

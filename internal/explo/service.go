@@ -69,11 +69,21 @@ type ServiceOptions struct {
 	ReloadCatalog func(context.Context) error
 	PlaylistName  string
 	Logger        func(string, ...any)
+	// FFmpegPath, TrackByID and ScanSubpaths exist for Keep (see keep.go),
+	// which copies a drop into the library with the effective metadata written
+	// into the file. All three are optional: without them Keep reports why it
+	// cannot run and everything else in this service is unaffected.
+	FFmpegPath   string
+	TrackByID    func(id string) (catalog.MusicTrack, error)
+	ScanSubpaths func(ctx context.Context, paths []string) error
 }
 
 type Service struct {
 	db            *sql.DB
 	fpcalcPath    string
+	ffmpegPath    string
+	trackByID     func(id string) (catalog.MusicTrack, error)
+	scanSubpaths  func(ctx context.Context, paths []string) error
 	httpClient    *http.Client
 	metadataApply *metadata.MetadataApplyService
 	metadata      *metadata.Service
@@ -148,6 +158,9 @@ func NewService(options ServiceOptions) *Service {
 		fpcalcPath:    strings.TrimSpace(options.FpcalcPath),
 		httpClient:    httpClient,
 		metadataApply: options.MetadataApply,
+		ffmpegPath:    options.FFmpegPath,
+		trackByID:     options.TrackByID,
+		scanSubpaths:  options.ScanSubpaths,
 		metadata:      options.Metadata,
 		playlists:     options.Playlists,
 		covers:        options.Covers,

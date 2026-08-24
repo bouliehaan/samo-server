@@ -142,6 +142,52 @@ func (s *Server) browseExploDirectories(w http.ResponseWriter, r *http.Request) 
 	writeJSON(w, http.StatusOK, entries)
 }
 
+// postExploKeep copies selected drops into the music library proper. The drop
+// folder is wiped by every weekly rotation, so this is how a track survives
+// the week. Copies rather than moves: the original stays in Explore until
+// rotation collects it, so the playlist does not shift under you mid-triage.
+func (s *Server) postExploKeep(w http.ResponseWriter, r *http.Request) {
+	if _, ok := s.requireAdmin(w, r); !ok {
+		return
+	}
+	service, ok := s.requireExploService(w)
+	if !ok {
+		return
+	}
+	var input struct {
+		TrackIDs []string `json:"trackIds"`
+	}
+	if !readJSONBody(w, r, &input) {
+		return
+	}
+	if len(input.TrackIDs) == 0 {
+		writeError(w, http.StatusBadRequest, "trackIds is required")
+		return
+	}
+	results, err := service.Keep(r.Context(), input.TrackIDs)
+	if err != nil {
+		writeExploError(w, err)
+		return
+	}
+	kept, alreadyInLibrary, failed := 0, 0, 0
+	for _, res := range results {
+		switch {
+		case res.Error != "":
+			failed++
+		case res.AlreadyInLibrary:
+			alreadyInLibrary++
+		default:
+			kept++
+		}
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"alreadyInLibrary": alreadyInLibrary,
+		"failed":           failed,
+		"kept":             kept,
+		"results":          results,
+	})
+}
+
 func (s *Server) clearExploConfig(w http.ResponseWriter, r *http.Request) {
 	if _, ok := s.requireAdmin(w, r); !ok {
 		return

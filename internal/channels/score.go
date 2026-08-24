@@ -82,9 +82,10 @@ type scoreEnv struct {
 	// separationByCreator is the per-creator window the rules settled on, for
 	// anyone who is too much of the library to be held to the general one.
 	separationByCreator map[string]time.Duration
-	// separationTurn is one pass of a shuffled source, which is what separates
-	// its items instead of the configured window.
-	separationTurn map[string]time.Duration
+	// turnReadiness is how far through its source's queue each item of a
+	// shuffled source has travelled, 0..1 — what separates those items instead
+	// of the configured window.
+	turnReadiness map[string]float64
 
 	lastCategory CategoryID
 	minRuns      []resolvedMinRun
@@ -294,11 +295,16 @@ func (s scoreEnv) restedness(candidate Candidate) float64 {
 	consider := func(last time.Time, window time.Duration) {
 		restedAt(last, 2*window)
 	}
-	if turn, ok := s.separationTurn[candidate.SourceID]; ok && turn > 0 {
+	if readiness, ok := s.turnReadiness[queueKey(candidate.SourceID, candidate.Ref)]; ok {
 		// Inside a queue there is no such thing as more rested than "has not
-		// come round yet", so the gradient saturates at the turn rather than
-		// twice it — the same reason a fitted creator window does.
-		restedAt(s.lastByRef[candidate.Ref], turn)
+		// come round yet", so the gradient is the queue position itself and
+		// saturates at the turn rather than twice it — the same reason a fitted
+		// creator window does. Measured in songs like the rule it mirrors:
+		// scoring in wall-clock while the rule counts draws is exactly the
+		// drift the two halves are meant not to have.
+		if readiness < value {
+			value = readiness
+		}
 	} else {
 		consider(s.lastByRef[candidate.Ref], s.separationItem)
 	}
@@ -348,7 +354,7 @@ func (s *scoreEnv) adoptSeparation(env constraintEnv) {
 	s.separationSource = env.separationSource
 	s.separationCreator = env.separationCreator
 	s.separationByCreator = env.separationByCreator
-	s.separationTurn = env.separationTurn
+	s.turnReadiness = env.turnReadiness
 }
 
 // windowFit is how close this item is to the length the block ASKED for.

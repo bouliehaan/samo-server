@@ -20,9 +20,10 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
-	"math/rand/v2"
 	"strings"
 	"time"
+
+	"github.com/bouliehaan/samo-server/internal/scrobble"
 )
 
 const (
@@ -46,22 +47,9 @@ const (
 	flushPacing = 150 * time.Millisecond
 )
 
-// retryDelay is the geometric backoff for transient failures: 30s, 1m, 2m, 4m,
-// ... capped at two hours, with jitter so a queue that failed together does not
-// retry together.
+// retryDelay applies Last.fm's backoff bounds to the shared schedule.
 func retryDelay(attempts int) time.Duration {
-	if attempts < 1 {
-		attempts = 1
-	}
-	delay := queueBaseDelay
-	for i := 1; i < attempts && delay < queueMaxDelay; i++ {
-		delay *= 2
-	}
-	if delay > queueMaxDelay {
-		delay = queueMaxDelay
-	}
-	jitter := time.Duration(rand.Int64N(int64(delay / 4)))
-	return delay + jitter
+	return scrobble.RetryDelay(attempts, queueBaseDelay, queueMaxDelay)
 }
 
 // scrobble claims a play and tries to deliver it at once.

@@ -437,6 +437,9 @@ func (e *Engine) Materialise(ctx context.Context, candidate Candidate) (Playback
 		}
 		item.URL = url
 		item.DurationSeconds = candidate.episode.DurationSeconds
+		if showID := strings.TrimSpace(candidate.episode.PodcastID); showID != "" {
+			item.ArtworkURL = "/api/v1/podcasts/shows/" + showID + "/cover"
+		}
 	case SourceMusicPlaylist:
 		if candidate.track == nil || len(candidate.track.AudioFiles) == 0 {
 			return PlaybackItem{}, errors.New("candidate has no track")
@@ -448,6 +451,9 @@ func (e *Engine) Materialise(ctx context.Context, candidate Candidate) (Playback
 		item.URL = path
 		item.SourceLabel = firstNonEmpty(src.Label, "Playlist")
 		item.DurationSeconds = candidate.track.DurationSeconds
+		if albumID := strings.TrimSpace(candidate.track.AlbumID); albumID != "" {
+			item.ArtworkURL = "/api/v1/music/albums/" + albumID + "/cover"
+		}
 	case SourceFilePool, SourceScheduledShow:
 		if candidate.path == "" {
 			return PlaybackItem{}, errors.New("candidate has no file")

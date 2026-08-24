@@ -62,9 +62,11 @@ import { globalScanActionsHTML, libraryKindScanActionsHTML, libraryScanActionsHT
   let audiobooksMode = "titles";
   let podcastsMode = "shows";
   let settingsMode = "libraries";
-  // Default RADIO sub-mode is INTERNET — the stations you tune into, which is
-  // what the tab is reached for. CHANNELS is the programming surface: you go
-  // there to build something, not to listen, and it costs a click to say so.
+  // Default RADIO sub-mode is STATIONS (internally "internet", after the
+  // /internet-radio API it reads) — the stations you tune into, which is what
+  // the tab is reached for, so it also sits leftmost in the pill bar.
+  // SAMO-CHANNELS is the programming surface: you go there to build something,
+  // not to listen, and it costs a click to say so.
   let radioMode = "internet";
   // Which section of a channel's programming screen is open. Module state, not
   // DOM state, because the 8-second poll re-renders the whole view — anything
@@ -1393,9 +1395,36 @@ import { globalScanActionsHTML, libraryKindScanActionsHTML, libraryScanActionsHT
       // Don't blow away an open composer / form the user is filling in, or a
       // card mid-drag on the tier list. Reschedule so we try again next tick.
       if (hasOpenComposerOrModal() || rankIsBusy()) { scheduleRadioPoll(); return; }
+      // Nor a control somebody's finger is on. This render replaces the whole
+      // panel — including the volume slider — so repainting mid-drag destroys
+      // the element under the touch, the "change" event never fires, and the
+      // level the user picked is never sent at all.
+      if (radioControlIsBusy()) { scheduleRadioPoll(); return; }
+      // A hidden tab has nobody to show this to, and polling one is how the
+      // reset happened: a mobile browser freezes this timer while the tab is
+      // away and runs the overdue callback the instant it comes back, so
+      // returning to the radio tab repainted every control from a snapshot
+      // taken over a connection that had only just woken up. Wait to be seen.
+      if (document.hidden) { scheduleRadioPoll(); return; }
       await renderRadio(true);
     }, 8000);
   }
+
+  // True while a samo-radio control is being operated. Dragging a range input
+  // focuses it, which is enough to know a finger is down without wiring
+  // pointer listeners through the delegated-event setup this file uses.
+  function radioControlIsBusy() {
+    const el = document.activeElement;
+    return Boolean(el && el.dataset && String(el.dataset.action || "").indexOf("samoradio-") === 0);
+  }
+
+  // Repaint on the way back in rather than on an overdue timer, and only when
+  // the radio tab is the one being looked at.
+  document.addEventListener("visibilitychange", () => {
+    if (document.hidden || activeTab !== "radio") return;
+    if (hasOpenComposerOrModal() || rankIsBusy() || radioControlIsBusy()) return;
+    void renderRadio(true);
+  });
 
   function hasOpenComposerOrModal() {
     const composers = main.querySelectorAll(".composer");
@@ -1409,8 +1438,8 @@ import { globalScanActionsHTML, libraryKindScanActionsHTML, libraryScanActionsHT
 
   function radioSubPills() {
     return '<div class="pill-bar">' +
-      '<button class="pill ' + (radioMode === "channels" ? "active" : "") + '" data-action="radio-mode" data-mode="channels">CHANNELS</button>' +
-      '<button class="pill ' + (radioMode === "internet" ? "active" : "") + '" data-action="radio-mode" data-mode="internet">INTERNET</button>' +
+      '<button class="pill ' + (radioMode === "internet" ? "active" : "") + '" data-action="radio-mode" data-mode="internet">STATIONS</button>' +
+      '<button class="pill ' + (radioMode === "channels" ? "active" : "") + '" data-action="radio-mode" data-mode="channels">SAMO-CHANNELS</button>' +
       '<button class="pill ' + (radioMode === "samo-radio" ? "active" : "") + '" data-action="radio-mode" data-mode="samo-radio">SAMO-RADIO</button>' +
     '</div>';
   }
@@ -1445,9 +1474,9 @@ import { globalScanActionsHTML, libraryKindScanActionsHTML, libraryScanActionsHT
       composerRadioStation();
 
     const inet = (internet && internet.items) || [];
-    html += '<div class="section-row"><div class="section-label">// internet radio</div>';
+    html += '<div class="section-row"><div class="section-label">// stations</div>';
     if (inet.length === 0) {
-      html += '<div class="empty-state">// add an internet station with + NEW STATION</div>';
+      html += '<div class="empty-state">// add a station with + NEW STATION</div>';
     } else {
       inet.forEach((station) => { html += internetRadioAdminCard(station); });
     }
@@ -2896,11 +2925,12 @@ import { globalScanActionsHTML, libraryKindScanActionsHTML, libraryScanActionsHT
   }
 
   async function settingsAccount() {
-    const [me, tokens, lastfmStatus, lastfmConfig, users] = await Promise.all([
+    const [me, tokens, lastfmStatus, lastfmConfig, listenbrainzStatus, users] = await Promise.all([
       api("/api/v1/users/me"),
       api("/api/v1/users/me/tokens").catch(() => ({ items: [] })),
       api("/api/v1/lastfm/status").catch(() => ({ enabled: false })),
       api("/api/v1/lastfm/config").catch(() => null),
+      api("/api/v1/listenbrainz/status").catch(() => ({ enabled: false })),
       api("/api/v1/users").catch(() => null),
     ]);
     let html = '<div class="account-layout">' +
@@ -2957,7 +2987,45 @@ import { globalScanActionsHTML, libraryKindScanActionsHTML, libraryScanActionsHT
         (lastfmStatus.enabled && lastfmStatus.connected ? '<button class="btn ghost" type="button" data-action="lastfm-flush">FLUSH QUEUE</button><button class="btn danger" type="button" data-action="lastfm-disconnect">DISCONNECT</button>' : '') +
       '</div>' +
       '<div class="status-line" id="lastfmMessage" hidden></div>' +
-    '</div></div></div></div>' +
+    '</div></div></div></div>';
+
+    // ListenBrainz needs no server credentials, so this panel is a single
+    // section: paste a token and you are connected.
+    const lbConnected = listenbrainzStatus && listenbrainzStatus.connected;
+    const lbStatus = lbConnected ? "CONNECTED" : (listenbrainzStatus && listenbrainzStatus.enabled ? "READY" : "UNAVAILABLE");
+    const lbRoot = (listenbrainzStatus && listenbrainzStatus.apiRoot) || "https://api.listenbrainz.org";
+    html += '<div class="account-row">' +
+      '<div class="panel panel-wide scrobble-utility">' +
+      '<div class="panel-head"><span>// listenbrainz</span><span>' + lbStatus + '</span></div>' +
+      '<div class="scrobble-utility-grid">';
+    if (listenbrainzStatus && listenbrainzStatus.enabled && !lbConnected) {
+      html += '<form class="scrobble-utility-section" id="listenbrainzConnectForm">' +
+        '<div class="scrobble-utility-label">CONNECT ACCOUNT</div>' +
+        '<div class="panel-sub">Paste your user token from listenbrainz.org/settings. No server-wide API key is needed.</div>' +
+        '<div class="form-grid">' +
+          fieldHTML("listenbrainzToken", "User Token", "user token", "password", "") +
+          fieldHTML("listenbrainzAPIRoot", "API Root", lbRoot + " (leave blank for default)", "text", "") +
+        '</div>' +
+        '<div class="actions"><button class="btn primary" type="submit">CONNECT LISTENBRAINZ</button></div>' +
+        '<div class="status-line" id="listenbrainzMessage" hidden></div>' +
+      '</form>';
+    } else if (lbConnected) {
+      html += '<div class="scrobble-utility-section">' +
+        '<div class="scrobble-utility-label">ACCOUNT CONNECTED</div>' +
+        '<div class="panel-sub">Connected as ' + escapeHTML(listenbrainzStatus.username || "") + ' at ' + escapeHTML(lbRoot) + ' \u00b7 queue ' + (listenbrainzStatus.queueSize || 0) + '</div>' +
+        '<div class="actions">' +
+          '<button class="btn ghost" type="button" data-action="listenbrainz-flush">FLUSH QUEUE</button>' +
+          '<button class="btn danger" type="button" data-action="listenbrainz-disconnect">DISCONNECT</button>' +
+        '</div>' +
+        '<div class="status-line" id="listenbrainzMessage" hidden></div>' +
+      '</div>';
+    } else {
+      html += '<div class="scrobble-utility-section">' +
+        '<div class="scrobble-utility-label">UNAVAILABLE</div>' +
+        '<div class="panel-sub">The ListenBrainz integration is not available on this server.</div>' +
+      '</div>';
+    }
+    html += '</div></div></div>' +
       '<div class="account-row">';
 
     const tokenItems = (tokens && tokens.items) || [];
@@ -3370,6 +3438,22 @@ import { globalScanActionsHTML, libraryKindScanActionsHTML, libraryScanActionsHT
       });
     }
 
+    const listenbrainzConnectForm = document.getElementById("listenbrainzConnectForm");
+    if (listenbrainzConnectForm) {
+      listenbrainzConnectForm.addEventListener("submit", async (event) => {
+        event.preventDefault();
+        const body = { token: document.getElementById("listenbrainzToken").value.trim() };
+        const root = document.getElementById("listenbrainzAPIRoot").value.trim();
+        if (root) body.apiRoot = root;
+        if (!body.token) { setMessage("listenbrainzMessage", "paste your user token first", true); return; }
+        try {
+          const result = await api("/api/v1/listenbrainz/connect", { method: "POST", body: body });
+          setMessage("listenbrainzMessage", "connected as " + (result.username || ""), false);
+          await viewSettings();
+        } catch (err) { setMessage("listenbrainzMessage", err.message, true); }
+      });
+    }
+
     const exploConfigForm = document.getElementById("exploConfigForm");
     if (exploConfigForm) {
       const browseToggle = document.getElementById("exploBrowseToggle");
@@ -3670,9 +3754,23 @@ import { globalScanActionsHTML, libraryKindScanActionsHTML, libraryScanActionsHT
     const base = "/api/v1/samo-radio/devices/" + encodeURIComponent(deviceID);
     try {
       if (action === "samoradio-volume") {
-        await api(base + "/volume", { method: "POST", body: { volume: Number(el.value) / 100 } });
+        // Render what the device SETTLED on, not what the thumb said.
+        //
+        // The reply to this POST is the device's full new state, and it is the
+        // only authoritative answer the browser gets between here and the next
+        // poll. Throwing it away and echoing el.value meant the control could
+        // sit at a level the device was not playing at until a render came
+        // along and silently corrected it — which reads as the slider
+        // "resetting" on its own.
+        const settledState = await api(base + "/volume", { method: "POST", body: { volume: Number(el.value) / 100 } });
+        const settled = settledState && typeof settledState.volume === "number"
+          ? Math.round(settledState.volume * 100)
+          : Math.round(Number(el.value));
+        el.value = String(settled);
+        const cached = samoRadioDevices.find((entry) => entry.id === deviceID);
+        if (cached && settledState) cached.state = settledState;
         const readout = el.parentElement && el.parentElement.querySelector(".samoradio-volume-value");
-        if (readout) readout.textContent = String(Math.round(Number(el.value)));
+        if (readout) readout.textContent = String(settled);
       } else if (action === "samoradio-output") {
         await api(base + "/settings", { method: "PATCH", body: { output: { device: el.value } } });
         await renderRadio(true);
@@ -4485,6 +4583,15 @@ import { globalScanActionsHTML, libraryKindScanActionsHTML, libraryScanActionsHT
       } else if (action === "lastfm-flush") {
         await withButton(el, "FLUSHING...", async () => {
           await api("/api/v1/lastfm/queue/flush", { method: "POST" });
+          await viewSettings();
+        });
+      } else if (action === "listenbrainz-disconnect") {
+        if (!confirm("Disconnect ListenBrainz? Listens already queued are kept and will be delivered when you reconnect.")) return;
+        await api("/api/v1/listenbrainz/connect", { method: "DELETE" });
+        await viewSettings();
+      } else if (action === "listenbrainz-flush") {
+        await withButton(el, "FLUSHING...", async () => {
+          await api("/api/v1/listenbrainz/queue/flush", { method: "POST" });
           await viewSettings();
         });
       }

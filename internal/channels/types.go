@@ -188,13 +188,25 @@ type ScheduleRule struct {
 // stay on this item — used so a live cut-in releases back to rotation
 // when its scheduled window ends.
 type PlaybackItem struct {
-	URL             string `json:"url"`
-	Title           string `json:"title"`
-	Artist          string `json:"artist,omitempty"`
-	Kind            string `json:"kind"`
-	SourceID        string `json:"sourceId,omitempty"`
-	SourceLabel     string `json:"sourceLabel,omitempty"`
-	ItemRef         string `json:"itemRef,omitempty"`
+	URL         string `json:"url"`
+	Title       string `json:"title"`
+	Artist      string `json:"artist,omitempty"`
+	Kind        string `json:"kind"`
+	SourceID    string `json:"sourceId,omitempty"`
+	SourceLabel string `json:"sourceLabel,omitempty"`
+	ItemRef     string `json:"itemRef,omitempty"`
+	// ArtworkURL is the picture of what is AIRING, which is not always a
+	// picture of where it came from: a channel relaying a station shows that
+	// station's logo, or the cover of the song the station is playing, not the
+	// channel's own tile.
+	//
+	// Absolute when it lives on somebody else's server, and a samo-relative
+	// path like "/api/v1/media/covers/x/image" when it lives here. Clients
+	// already hold the base URL to join the second shape to, and building an
+	// absolute URL down here would mean the scheduler inventing the server's
+	// public address — which it cannot know, since the same item is served to
+	// a phone on the LAN and a wall on loopback.
+	ArtworkURL      string `json:"artworkUrl,omitempty"`
 	DurationSeconds int    `json:"durationSeconds"`
 	// Category is the station's own name for what kind of programming this is,
 	// carried from the source that produced it so the play log records what

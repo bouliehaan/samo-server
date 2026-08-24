@@ -249,6 +249,40 @@ func listeningDayKey(day ListeningDay, loc *time.Location, now time.Time) string
 	return local.Format("2006-01-02")
 }
 
+// listeningDayStart is the instant the listening day `now` belongs to began.
+//
+// The twin of listeningDayKey, and it has to agree with it: the small hours
+// before the day opens still belong to the day that just ended. Built with
+// wallClock rather than midnight-plus-a-duration for the same reason
+// ListeningDay.NextStart is — on the day the clocks change, adding eight hours
+// to midnight does not give you 08:00.
+func listeningDayStart(day ListeningDay, loc *time.Location, now time.Time) time.Time {
+	if loc == nil {
+		loc = time.UTC
+	}
+	normalized := day.normalized()
+	local := now.In(loc)
+	start := wallClock(startOfDay(local, loc), normalized.StartMinute, loc)
+	if start.After(local) {
+		start = wallClock(startOfDay(local, loc).AddDate(0, 0, -1), normalized.StartMinute, loc)
+	}
+	return start
+}
+
+// listeningDayElapsed is how much of the current listening day has already
+// happened — the window an "how often has this aired today" question has to
+// look back over.
+//
+// Never zero. A zero window reads as "no window" to the store, which falls back
+// to twenty-four hours and quietly readmits yesterday — the exact failure this
+// is here to prevent.
+func listeningDayElapsed(day ListeningDay, loc *time.Location, now time.Time) time.Duration {
+	if elapsed := now.Sub(listeningDayStart(day, loc, now)); elapsed > time.Second {
+		return elapsed
+	}
+	return time.Second
+}
+
 func handoverVerb(from, to Block) string {
 	if from.Next == to.ID {
 		return "handed over to"

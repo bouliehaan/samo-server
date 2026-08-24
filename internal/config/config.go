@@ -34,12 +34,16 @@ type Config struct {
 	ScanOnStart            bool
 	WatchLibraries         bool
 	WatchDebounce          time.Duration
+	WatchResync            time.Duration
 	PodcastPoll            bool
 	PodcastPollTick        time.Duration
 	LastFMAPIKey           string
 	LastFMSharedSecret     string
 	LastFMPoll             bool
 	LastFMPollTick         time.Duration
+	ListenBrainzAPIRoot    string
+	ListenBrainzPoll       bool
+	ListenBrainzPollTick   time.Duration
 	PodcastCache           bool
 	PodcastCacheMaxBytes   int64
 	PodcastCacheMaxAge     time.Duration
@@ -80,26 +84,32 @@ func LoadEnv() (Config, error) {
 	}
 
 	cfg := Config{
-		Addr:                   envOrDefault("SAMO_ADDR", defaultAddr),
-		DataDir:                dataDir,
-		DBDSN:                  strings.TrimSpace(os.Getenv("SAMO_DB_DSN")),
-		RadioConfigPath:        radioConfigPath,
-		APIToken:               strings.TrimSpace(os.Getenv("SAMO_API_TOKEN")),
-		BootstrapUsername:      strings.TrimSpace(os.Getenv("SAMO_BOOTSTRAP_USERNAME")),
-		BootstrapPassword:      strings.TrimSpace(os.Getenv("SAMO_BOOTSTRAP_PASSWORD")),
-		Libraries:              loadLibraries(),
-		MetadataProviders:      envCSVOrDefault("SAMO_METADATA_PROVIDERS", defaultMetadataProviders),
-		MetadataUserAgent:      envOrDefault("SAMO_METADATA_USER_AGENT", "SamoServer/0.1 (https://github.com/bouliehaan/samo-server)"),
-		AudibleRegion:          envOrDefault("SAMO_AUDIBLE_REGION", "us"),
-		ScanOnStart:            envBool("SAMO_SCAN_ON_START", false),
-		WatchLibraries:         envBool("SAMO_WATCH_LIBRARIES", true),
-		WatchDebounce:          envDuration("SAMO_WATCH_DEBOUNCE", 3*time.Second),
-		PodcastPoll:            envBool("SAMO_PODCAST_POLL", true),
-		PodcastPollTick:        envDuration("SAMO_PODCAST_POLL_TICK", time.Minute),
-		LastFMAPIKey:           strings.TrimSpace(os.Getenv("SAMO_LASTFM_API_KEY")),
-		LastFMSharedSecret:     strings.TrimSpace(os.Getenv("SAMO_LASTFM_SHARED_SECRET")),
-		LastFMPoll:             envBool("SAMO_LASTFM_POLL", true),
-		LastFMPollTick:         envDuration("SAMO_LASTFM_POLL_TICK", time.Minute),
+		Addr:               envOrDefault("SAMO_ADDR", defaultAddr),
+		DataDir:            dataDir,
+		DBDSN:              strings.TrimSpace(os.Getenv("SAMO_DB_DSN")),
+		RadioConfigPath:    radioConfigPath,
+		APIToken:           strings.TrimSpace(os.Getenv("SAMO_API_TOKEN")),
+		BootstrapUsername:  strings.TrimSpace(os.Getenv("SAMO_BOOTSTRAP_USERNAME")),
+		BootstrapPassword:  strings.TrimSpace(os.Getenv("SAMO_BOOTSTRAP_PASSWORD")),
+		Libraries:          loadLibraries(),
+		MetadataProviders:  envCSVOrDefault("SAMO_METADATA_PROVIDERS", defaultMetadataProviders),
+		MetadataUserAgent:  envOrDefault("SAMO_METADATA_USER_AGENT", "SamoServer/0.1 (https://github.com/bouliehaan/samo-server)"),
+		AudibleRegion:      envOrDefault("SAMO_AUDIBLE_REGION", "us"),
+		ScanOnStart:        envBool("SAMO_SCAN_ON_START", false),
+		WatchLibraries:     envBool("SAMO_WATCH_LIBRARIES", true),
+		WatchDebounce:      envDuration("SAMO_WATCH_DEBOUNCE", 3*time.Second),
+		WatchResync:        envDuration("SAMO_WATCH_RESYNC", 30*time.Second),
+		PodcastPoll:        envBool("SAMO_PODCAST_POLL", true),
+		PodcastPollTick:    envDuration("SAMO_PODCAST_POLL_TICK", time.Minute),
+		LastFMAPIKey:       strings.TrimSpace(os.Getenv("SAMO_LASTFM_API_KEY")),
+		LastFMSharedSecret: strings.TrimSpace(os.Getenv("SAMO_LASTFM_SHARED_SECRET")),
+		LastFMPoll:         envBool("SAMO_LASTFM_POLL", true),
+		LastFMPollTick:     envDuration("SAMO_LASTFM_POLL_TICK", time.Minute),
+		// ListenBrainz needs no server credentials — a user's token is the
+		// whole connection — so the only setting is which instance to use.
+		ListenBrainzAPIRoot:    strings.TrimSpace(os.Getenv("SAMO_LISTENBRAINZ_API_ROOT")),
+		ListenBrainzPoll:       envBool("SAMO_LISTENBRAINZ_POLL", true),
+		ListenBrainzPollTick:   envDuration("SAMO_LISTENBRAINZ_POLL_TICK", time.Minute),
 		PodcastCache:           envBool("SAMO_PODCAST_CACHE", true),
 		PodcastCacheMaxBytes:   envInt64("SAMO_PODCAST_CACHE_MAX_BYTES", 10<<30),
 		PodcastCacheMaxAge:     envDuration("SAMO_PODCAST_CACHE_MAX_AGE", 30*24*time.Hour),
