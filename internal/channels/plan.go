@@ -1302,56 +1302,97 @@ func DerivePlan(channel Channel, sources []Source, rules []ScheduleRule, default
 		if !rule.Enabled {
 			continue
 		}
-		poolID, ok := showPools[rule.SourceID]
-		if !ok {
-			// A slot pointing at a rotation source: give it a pool of its own so
-			// the slot means that source and only that source.
-			poolID = "slot-" + rule.SourceID
-			if _, exists := plan.Pool(poolID); !exists {
-				plan.Pools = append(plan.Pools, Pool{
-					ID:        poolID,
-					Label:     "Slot source",
-					SourceIDs: []string{rule.SourceID},
-				})
-			}
-		}
-		plan.Blocks = append(plan.Blocks, Block{
-			ID:    "slot-" + rule.ID,
-			Label: firstNonEmpty(rule.Label, "Booked slot"),
-			Enter: BlockEntry{
-				At:   minuteToClock(rule.StartMinute),
-				Days: weekdayMaskToSpec(rule.WeekdayMask),
-				Hard: true,
-				// The old engine cut in on the minute via the preemption
-				// watchdog. Kept for derived plans so nothing changes silently;
-				// a plan the owner has edited can choose makeNext instead.
-				Start: StartImmediately,
-			},
-			Exit:  BlockExit{At: minuteToClock(rule.EndMinute)},
-			Pools: []PoolRef{{Pool: poolID, Weight: 1}},
-		})
+		var poolID string
+		poolID, plan.Pools = slotPoolFor(rule, showPools, plan.Pools)
+		plan.Blocks = append(plan.Blocks, slotBlockFor(rule, poolID))
 	}
 	return plan
 }
 
-// AdoptScheduleRules adds a block for every booked slot the plan does not
-// already have one for, and returns what it added.
+// slotBlockID is the id a booked slot's block is filed under.
+//
+// The `slot-` namespace belongs to the schedule: everything under it is written
+// from a rule and taken away with it. That is only safe because the second half
+// is a rule id, so a block somebody names `slot-overnight` by hand is visibly
+// not one of these and is left alone.
+func slotBlockID(ruleID string) string { return "slot-" + ruleID }
+
+// isSlotBlockID reports whether an id is one this file writes.
+func isSlotBlockID(id string) bool { return strings.HasPrefix(id, "slot-csched_") }
+
+// slotPoolFor is the pool a booked slot plays out of: the show's own pool if it
+// has one, otherwise a pool written for it so the slot means that source and
+// only that source. Returns the pool list to store, which may have grown.
+func slotPoolFor(rule ScheduleRule, showPools map[string]string, pools []Pool) (string, []Pool) {
+	if poolID, ok := showPools[rule.SourceID]; ok {
+		return poolID, pools
+	}
+	poolID := "slot-" + rule.SourceID
+	for _, pool := range pools {
+		if pool.ID == poolID {
+			return poolID, pools
+		}
+	}
+	return poolID, append(pools, Pool{
+		ID:        poolID,
+		Label:     firstNonEmpty(rule.Label, "Slot source"),
+		SourceIDs: []string{rule.SourceID},
+	})
+}
+
+// slotBlockFor is a booked slot expressed as a block: hard-anchored over its
+// own pool, for the window the rule names.
+func slotBlockFor(rule ScheduleRule, poolID string) Block {
+	return Block{
+		ID:    slotBlockID(rule.ID),
+		Label: firstNonEmpty(rule.Label, "Booked slot"),
+		Enter: BlockEntry{
+			At:   minuteToClock(rule.StartMinute),
+			Days: weekdayMaskToSpec(rule.WeekdayMask),
+			Hard: true,
+			// The old engine cut in on the minute via the preemption
+			// watchdog. Kept so nothing changes silently; a plan the owner has
+			// edited can choose makeNext instead.
+			Start: StartImmediately,
+		},
+		Exit:  BlockExit{At: minuteToClock(rule.EndMinute)},
+		Pools: []PoolRef{{Pool: poolID, Weight: 1}},
+	}
+}
+
+// ReconcileScheduleRules makes the plan's booked-slot blocks match the
+// schedule, and reports what it added and what it dropped.
 //
 // A stored plan is a snapshot of the schedule at the moment somebody pressed
-// save. Book a show afterwards and the rule exists, the UI lists it as ENABLED,
-// the programme grid draws it — and the scheduler, which reads the PLAN, has no
-// block for it, so at the appointed hour nothing claims the time and the
-// station falls back to ordinary rotation. No error anywhere. Exactly the trap
-// that frozen pool lists were, one level up.
+// save, and the schedule keeps changing after it. Both directions used to go
+// wrong, and both were silent:
 //
-// So booked slots are adopted the same way rotation pools became rules: the
-// plan says what the station IS, and the schedule says what is booked. Deleting
-// a slot from the plan does not disable it — deleting the RULE does, which is
-// the switch the UI actually presents.
-func (p Plan) AdoptScheduleRules(rules []ScheduleRule, sources []Source) (Plan, []string) {
-	existing := map[string]bool{}
-	for _, block := range p.Blocks {
-		existing[block.ID] = true
+// Book a show afterwards and the rule exists, the UI lists it as ENABLED, the
+// programme grid draws it — and the scheduler, which reads the PLAN, has no
+// block for it, so at the appointed hour nothing claims the time and the
+// station falls back to ordinary rotation.
+//
+// Cancel one and the mirror image happens. The slot was copied into the plan
+// the first time anybody saved it, nothing took the copy back out, and the
+// block went on claiming the same hour every day with no rule left anywhere to
+// explain it — invisible on the SCHEDULE list, invisible on the grid, audible
+// on the radio.
+//
+// So the `slot-` block namespace belongs to the schedule rather than to the
+// plan: every enabled rule gets a block, a block whose rule has been cancelled
+// or disabled is dropped, and a block whose rule has moved moves with it. The
+// plan says what the station IS; the schedule says what is booked. Deleting a
+// booked slot from the plan does not cancel it — deleting the RULE does, which
+// is the switch both the SCHEDULE list and the block row now present.
+//
+// Only ids this function itself writes are touched: `slot-` followed by a rule
+// id. A block somebody named `slot-overnight` by hand is theirs.
+func (p Plan) ReconcileScheduleRules(rules []ScheduleRule, sources []Source) (Plan, []string, []string) {
+	booked := map[string]ScheduleRule{}
+	for _, rule := range rules {
+		if rule.Enabled {
+			booked[slotBlockID(rule.ID)] = rule
+		}
 	}
 	showPools := map[string]string{}
 	for _, pool := range p.Pools {
@@ -1359,7 +1400,33 @@ func (p Plan) AdoptScheduleRules(rules []ScheduleRule, sources []Source) (Plan, 
 			showPools[pool.SourceIDs[0]] = pool.ID
 		}
 	}
+	// Copied rather than appended to in place: the caller's plan came from
+	// somewhere else and must not grow a block because this ran.
+	pools := append([]Pool(nil), p.Pools...)
 
+	kept := make([]Block, 0, len(p.Blocks))
+	dropped := []string{}
+	held := map[string]bool{}
+	for _, block := range p.Blocks {
+		if !isSlotBlockID(block.ID) {
+			kept = append(kept, block)
+			continue
+		}
+		rule, ok := booked[block.ID]
+		if !ok {
+			dropped = append(dropped, firstNonEmpty(block.Label, block.ID))
+			continue
+		}
+		var poolID string
+		poolID, pools = slotPoolFor(rule, showPools, pools)
+		// Rewritten from the rule rather than kept: the rule is what the owner
+		// edits, so a slot that has moved must move here too.
+		kept = append(kept, slotBlockFor(rule, poolID))
+		held[block.ID] = true
+	}
+
+	// Whatever is booked and has no block yet, in schedule order, so a plan is
+	// byte-stable for a given channel and diffing it says something.
 	ordered := append([]ScheduleRule(nil), rules...)
 	sort.SliceStable(ordered, func(i, j int) bool {
 		if ordered[i].StartMinute != ordered[j].StartMinute {
@@ -1367,38 +1434,41 @@ func (p Plan) AdoptScheduleRules(rules []ScheduleRule, sources []Source) (Plan, 
 		}
 		return ordered[i].ID < ordered[j].ID
 	})
-
-	adopted := []string{}
+	added := []string{}
 	for _, rule := range ordered {
-		if !rule.Enabled || existing["slot-"+rule.ID] {
+		if !rule.Enabled || held[slotBlockID(rule.ID)] {
 			continue
 		}
-		poolID, ok := showPools[rule.SourceID]
-		if !ok {
-			poolID = "slot-" + rule.SourceID
-			if _, exists := p.Pool(poolID); !exists {
-				p.Pools = append(p.Pools, Pool{
-					ID:        poolID,
-					Label:     firstNonEmpty(rule.Label, "Slot source"),
-					SourceIDs: []string{rule.SourceID},
-				})
-			}
-		}
-		p.Blocks = append(p.Blocks, Block{
-			ID:    "slot-" + rule.ID,
-			Label: firstNonEmpty(rule.Label, "Booked slot"),
-			Enter: BlockEntry{
-				At:    minuteToClock(rule.StartMinute),
-				Days:  weekdayMaskToSpec(rule.WeekdayMask),
-				Hard:  true,
-				Start: StartImmediately,
-			},
-			Exit:  BlockExit{At: minuteToClock(rule.EndMinute)},
-			Pools: []PoolRef{{Pool: poolID, Weight: 1}},
-		})
-		adopted = append(adopted, firstNonEmpty(rule.Label, rule.ID))
+		var poolID string
+		poolID, pools = slotPoolFor(rule, showPools, pools)
+		kept = append(kept, slotBlockFor(rule, poolID))
+		added = append(added, firstNonEmpty(rule.Label, rule.ID))
 	}
-	return p, adopted
+
+	p.Pools = pools
+	p.Blocks = kept
+	return p, added, dropped
+}
+
+// DroppedBookings names the booked slots a plan document leaves out that the
+// schedule still holds.
+//
+// The editor round-trips every booked block, so a plan arriving without one was
+// hand-edited — and removing it there does nothing, because the reconcile above
+// writes it straight back. Saying so is the difference between a rejected edit
+// and an edit that appears to work for a week.
+func (p Plan) DroppedBookings(rules []ScheduleRule) []string {
+	present := map[string]bool{}
+	for _, block := range p.Blocks {
+		present[block.ID] = true
+	}
+	missing := []string{}
+	for _, rule := range rules {
+		if rule.Enabled && !present[slotBlockID(rule.ID)] {
+			missing = append(missing, firstNonEmpty(rule.Label, rule.ID))
+		}
+	}
+	return missing
 }
 
 // hasRotationInventory reports whether a channel owns anything a rotation pool

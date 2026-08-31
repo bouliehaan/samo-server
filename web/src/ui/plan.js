@@ -77,6 +77,21 @@ function isAutoPool(pool) {
   return String(pool.id || "").indexOf("slot-") === 0;
 }
 
+// bookingIDOf is the schedule rule a block belongs to, or "" for an ordinary
+// block.
+//
+// The `slot-<rule id>` namespace is written from the schedule and reconciled
+// against it on every load, so one of these blocks is a VIEW of a booking
+// rather than something the plan owns. That has to show, because it decides
+// what the buttons on the row can do: removing the block from the plan document
+// achieves nothing — the server writes it straight back — while cancelling the
+// booking is what the person clicking REMOVE meant. An evening of NPR outlived
+// its deletion by a week because this row looked like every other row.
+function bookingIDOf(block) {
+  const id = String((block && block.id) || "");
+  return id.indexOf("slot-csched_") === 0 ? id.slice("slot-".length) : "";
+}
+
 // collapsibleSection is the disclosure every part of the plan is wrapped in.
 // The header stays a fixed two lines whether it is open or shut, so the plan
 // reads as an index you can scan before it reads as a form you have to.
@@ -246,25 +261,35 @@ function blocksSection(blocks, plan, collapsed, sourceNames) {
   const rows = blocks.length === 0
     ? '<div class="empty-state">// no blocks — a plan needs at least a default one</div>'
     : '<div class="list">' + blocks.map((block, index) => {
+        const booking = bookingIDOf(block);
         const tag = block.default ? "DEF" : (block.enter && block.enter.hard ? "HARD" : String(index + 1).padStart(2, "0"));
+        const label = block.label || block.id;
+        // A booked slot is edited where it was booked. Its window, its days and
+        // its content all come from the rule, and the plan's copy is rewritten
+        // from the rule on every load — so an EDIT here would revert on the
+        // next render, and a REMOVE here would come back.
+        const actions = booking
+          ? '<button class="btn danger btn-mini" data-action="channel-schedule-delete" ' +
+              'data-id="' + attr(booking) + '" data-name="' + attr(label) + '">REMOVE BOOKING</button>'
+          : '<button class="btn ghost btn-mini" data-action="plan-block-move" data-index="' + index + '" data-dir="up">↑</button>' +
+            '<button class="btn ghost btn-mini" data-action="plan-block-move" data-index="' + index + '" data-dir="down">↓</button>' +
+            '<button class="btn ghost btn-mini" data-action="plan-block-edit" data-index="' + index + '">EDIT</button>' +
+            '<button class="btn danger btn-mini" data-action="plan-block-delete" data-index="' + index + '">REMOVE</button>';
         // When it runs is the thing you scan a block list for, so it leads the
         // row on its own line; everything else is the detail underneath.
         // stacked: a block's summary is content, not a subtitle — clipping it
         // to one line hides the limits and the cycle, which is most of what
         // makes one block different from another.
         return '<div class="list-row stacked">' +
-          '<div class="num">' + escapeHTML(tag) + '</div>' +
+          '<div class="num">' + escapeHTML(booking ? "BOOK" : tag) + '</div>' +
           '<div class="main">' +
-            '<div class="name">' + escapeHTML(block.label || block.id) +
+            '<div class="name">' + escapeHTML(label) +
+              (booking ? ' <span class="row-chip">BOOKED</span>' : "") +
               '<span class="row-when">' + escapeHTML(blockWhen(block, plan)) + '</span></div>' +
-            '<div class="meta">' + escapeHTML(blockPlays(block, plan, sourceNames)) + '</div>' +
+            '<div class="meta">' + escapeHTML(blockPlays(block, plan, sourceNames)) +
+              (booking ? ' · a booked slot — its hours are set under PROGRAM' : "") + '</div>' +
           '</div>' +
-          '<div class="actions">' +
-            '<button class="btn ghost btn-mini" data-action="plan-block-move" data-index="' + index + '" data-dir="up">↑</button>' +
-            '<button class="btn ghost btn-mini" data-action="plan-block-move" data-index="' + index + '" data-dir="down">↓</button>' +
-            '<button class="btn ghost btn-mini" data-action="plan-block-edit" data-index="' + index + '">EDIT</button>' +
-            '<button class="btn danger btn-mini" data-action="plan-block-delete" data-index="' + index + '">REMOVE</button>' +
-          '</div>' +
+          '<div class="actions">' + actions + '</div>' +
         '</div>';
       }).join("") + '</div>';
 

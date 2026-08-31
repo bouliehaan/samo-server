@@ -360,10 +360,10 @@ func (s *Service) GetPlan(ctx context.Context, channelID string) (PlanView, erro
 	if err != nil {
 		return PlanView{}, err
 	}
-	if plan, ok, err := LoadPlan(ctx, s.db, channelID); err == nil && ok {
-		return PlanView{Plan: plan, Custom: true}, nil
-	} else if err != nil {
+	stored, ok, err := LoadPlan(ctx, s.db, channelID)
+	if err != nil {
 		s.logger.Printf("channel %s: %v", channelID, err)
+		ok = false
 	}
 	sources, err := ListChannelSources(ctx, s.db, channelID)
 	if err != nil {
@@ -373,9 +373,19 @@ func (s *Service) GetPlan(ctx context.Context, channelID string) (PlanView, erro
 	if err != nil {
 		return PlanView{}, err
 	}
+	enabled := filterEnabledSources(sources)
+	if ok {
+		// Reconciled against the schedule, exactly as the engine does when it
+		// goes to pick something. The editor showing a different plan from the
+		// one on air is how a removed block could be gone from every screen and
+		// still hold its hour: the stored document had lost it, and the
+		// scheduler was writing it back on every load where nobody could see.
+		reconciled, _, _ := stored.ReconcileScheduleRules(rules, enabled)
+		return PlanView{Plan: reconciled, Custom: true}, nil
+	}
 	deps := s.schedDeps()
 	return PlanView{
-		Plan:   DerivePlan(channel, filterEnabledSources(sources), rules, deps.talkShare(channel)),
+		Plan:   DerivePlan(channel, enabled, rules, deps.talkShare(channel)),
 		Custom: false,
 	}, nil
 }
@@ -396,6 +406,20 @@ func (s *Service) SetPlan(ctx context.Context, channelID string, raw []byte) (Pl
 	sources, err := ListChannelSources(ctx, s.db, channelID)
 	if err != nil {
 		return PlanView{}, err
+	}
+	// A plan that leaves out a slot the schedule still holds is refused rather
+	// than quietly restored. The editor round-trips booked blocks, so this is a
+	// hand-edited document, and the reconcile would write the block straight
+	// back on the next load — an edit that reads as applied and is not.
+	rules, err := ListScheduleRules(ctx, s.db, channelID)
+	if err != nil {
+		return PlanView{}, err
+	}
+	if missing := plan.DroppedBookings(rules); len(missing) > 0 {
+		return PlanView{}, fmt.Errorf(
+			"%w: %s is still booked on the schedule, so removing the block here would not stop it — "+
+				"cancel it under BOOKED SLOTS instead",
+			ErrInvalidID, strings.Join(missing, ", "))
 	}
 	if orphans := plan.UnreachableSources(filterEnabledSources(sources)); len(orphans) > 0 {
 		names := make([]string, 0, len(orphans))

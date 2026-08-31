@@ -4414,7 +4414,11 @@ import { globalScanActionsHTML, libraryKindScanActionsHTML, libraryScanActionsHT
         await api("/api/v1/channels/" + encodeURIComponent(activeChannelID) + "/sources/" + encodeURIComponent(el.dataset.id), { method: "DELETE" });
         await viewRadio();
       } else if (action === "channel-schedule-delete") {
-        if (!confirm("Remove rule " + (el.dataset.name || "") + "?")) return;
+        // Fired from the SCHEDULE list and from the block a booking writes into
+        // the plan, which is the same object seen twice — so the wording is
+        // about the booking rather than about the row that was clicked.
+        if (!confirm("Cancel the booking " + (el.dataset.name || "") + "?\n\n" +
+          "It comes off the schedule and stops holding its hour.")) return;
         await api("/api/v1/channels/" + encodeURIComponent(activeChannelID) + "/schedule/" + encodeURIComponent(el.dataset.id), { method: "DELETE" });
         await viewRadio();
       } else if (action === "station-dir-add") {

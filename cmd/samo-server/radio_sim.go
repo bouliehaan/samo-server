@@ -226,14 +226,20 @@ func simPlan(ctx context.Context, db *sql.DB, channel channels.Channel, sourceRo
 		}
 		return plan, "from " + path, nil
 	}
-	if plan, ok, err := channels.LoadPlan(ctx, db, channel.ID); err != nil {
+	stored, ok, err := channels.LoadPlan(ctx, db, channel.ID)
+	if err != nil {
 		return channels.Plan{}, "", err
-	} else if ok {
-		return plan, "stored", nil
 	}
 	rules, err := channels.ListScheduleRules(ctx, db, channel.ID)
 	if err != nil {
 		return channels.Plan{}, "", err
+	}
+	if ok {
+		// Reconciled against the schedule, the same as the scheduler does on
+		// its way to a decision. A simulator that reads the stored document
+		// raw simulates a station nobody is running.
+		reconciled, _, _ := stored.ReconcileScheduleRules(rules, sourceRows)
+		return reconciled, "stored", nil
 	}
 	share := channel.TalkShare
 	if share <= 0 || share >= 1 {

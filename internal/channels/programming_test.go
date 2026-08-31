@@ -282,3 +282,97 @@ func TestAnItemStillPlayingCountsSoFar(t *testing.T) {
 		t.Fatalf("an in-progress item should count its two hours so far, got %s", got)
 	}
 }
+
+// A daypart that ends at a clock time must be done with its live stream then.
+//
+// The exit condition is only ever evaluated BETWEEN items, and a live stream
+// has no end of its own — so a block running NPR "until 19:00" picked the
+// stream at 18:30, handed it the full sixty-minute live limit, and was still
+// playing NPR at 19:30. Every weekday. With nothing in the plan to point at,
+// because the plan was correct: the overrun lived in how long the station was
+// allowed to STAY on the item, which no daypart boundary bounded.
+//
+// A booked slot never had this — an anchor's end is already a ceiling. It was
+// only the plain clock-time dayparts, which are the ones you write by hand.
+func TestADaypartEndsItsLiveStreamOnTime(t *testing.T) {
+	for _, at := range []struct {
+		name  string
+		start time.Time
+		want  time.Duration
+	}{
+		{"half an hour left", time.Date(2026, 8, 27, 18, 30, 0, 0, time.UTC), 30 * time.Minute},
+		// The worst case: a minute before the boundary used to buy a full hour.
+		{"a minute left", time.Date(2026, 8, 27, 18, 59, 0, 0, time.UTC), time.Minute},
+	} {
+		t.Run(at.name, func(t *testing.T) {
+			db := newTestDB(t)
+			ctx := context.Background()
+			mustChannel(t, db, "ch1")
+			npr := mustSource(t, db, "ch1", CreateSourceInput{
+				Kind: SourceLiveStream, Label: "NPR", Role: RoleTalk,
+				Config: map[string]any{"url": "http://example.test/npr"}, Enabled: boolPtr(true),
+			})
+			music := mustSource(t, db, "ch1", CreateSourceInput{
+				Kind: SourceLiveStream, Label: "Night Music", Role: RoleMusic,
+				Config: map[string]any{"url": "http://example.test/music"}, Enabled: boolPtr(true),
+			})
+			plan := Plan{
+				Version:    PlanVersion,
+				Categories: []CategoryDef{{ID: "talk", Target: 0.5}, {ID: "music", Target: 0.5}},
+				Pools: []Pool{
+					{ID: "npr", SourceIDs: []string{npr.ID}},
+					{ID: "music", SourceIDs: []string{music.ID}},
+				},
+				Blocks: []Block{
+					{ID: "general", Default: true, Pools: []PoolRef{{Pool: "music"}}},
+					{
+						ID:    "npr-evening",
+						Label: "NPR evening",
+						Enter: BlockEntry{At: "17:00", Days: "mon-fri"},
+						Exit:  BlockExit{At: "19:00"},
+						Pools: []PoolRef{{Pool: "npr"}},
+					},
+				},
+			}
+			if err := SavePlan(ctx, db, "ch1", plan); err != nil {
+				t.Fatalf("save plan: %v", err)
+			}
+
+			now := at.start
+			sched := NewScheduler(Dependencies{
+				DB: db, Now: func() time.Time { return now },
+				Skips: NewSkipRegistry(func() time.Time { return now }),
+			})
+			item, err := sched.NextItem(ctx, "ch1")
+			if err != nil {
+				t.Fatalf("next item: %v", err)
+			}
+			if item.SourceID != npr.ID {
+				t.Fatalf("the daypart should be on air at %s, got %q", now.Format("15:04"), item.Title)
+			}
+			if item.MaxDuration != at.want {
+				t.Fatalf("picked at %s in a block that ends at 19:00: allowed to run until %s (%s), want %s",
+					now.Format("15:04"), now.Add(item.MaxDuration).Format("15:04"), item.MaxDuration, at.want)
+			}
+		})
+	}
+}
+
+// A daypart that runs past midnight ends on the far side of it.
+//
+// The exit clock is resolved against the day the block was ENTERED, so "enter
+// 22:00, exit 02:00" must end at two in the morning rather than at two o'clock
+// on the day it started — which is in the past, and would read as a ceiling of
+// zero or, worse, as a block that has already ended.
+func TestAnOvernightDaypartEndsAfterMidnight(t *testing.T) {
+	loc := time.UTC
+	entered := time.Date(2026, 8, 27, 22, 0, 0, 0, loc)
+	end, ok := blockExitAt(BlockExit{At: "02:00"}, entered, loc)
+	if !ok {
+		t.Fatal("an exit clock time should resolve")
+	}
+	want := time.Date(2026, 8, 28, 2, 0, 0, 0, loc)
+	if !end.Equal(want) {
+		t.Fatalf("an overnight block entered at 22:00 ends at %s, want %s", end, want)
+	}
+}

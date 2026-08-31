@@ -3,6 +3,7 @@ package channels
 import (
 	"context"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -666,7 +667,7 @@ func TestASlotBookedAfterThePlanWasSavedStillAirs(t *testing.T) {
 		WeekdayMask: 127, StartMinute: 23 * 60, EndMinute: 24 * 60, Enabled: true,
 	}}
 
-	adopted, added := plan.AdoptScheduleRules(rules, []Source{lofi})
+	adopted, added, _ := plan.ReconcileScheduleRules(rules, []Source{lofi})
 	if len(added) != 1 {
 		t.Fatalf("expected the booked slot to be adopted, got %v", added)
 	}
@@ -695,7 +696,7 @@ func TestASlotBookedAfterThePlanWasSavedStillAirs(t *testing.T) {
 	}
 
 	// Adopting twice must not duplicate it.
-	again, addedAgain := adopted.AdoptScheduleRules(rules, []Source{lofi})
+	again, addedAgain, _ := adopted.ReconcileScheduleRules(rules, []Source{lofi})
 	if len(addedAgain) != 0 || len(again.Blocks) != len(adopted.Blocks) {
 		t.Fatalf("adoption is not idempotent: added %v", addedAgain)
 	}
@@ -966,4 +967,550 @@ func TestNoRoomForTheNewEpisodeMeansNoRoomForTheShow(t *testing.T) {
 			decision.Explain())
 	}
 	t.Logf("played %q from %s instead", item.Title, item.SourceID)
+}
+
+// Cancelling a booking must take it off the air.
+//
+// The mirror image of the bug above, and the one that actually bit: a booked
+// slot is copied into the stored plan the first time anybody saves it, and
+// nothing ever took the copy back out. Delete the rule and it vanishes from the
+// SCHEDULE list, from the programme grid and from every screen that reads the
+// schedule — while the block it was copied into keeps claiming the same hour
+// every day, for ever, with no rule anywhere to explain it. NPR kept going past
+// seven every weekday evening for exactly this reason.
+func TestCancellingABookingTakesItOffTheAir(t *testing.T) {
+	npr := Source{ID: "csrc_npr", ChannelID: "c", Kind: SourceLiveStream, Label: "NPR",
+		Enabled: true, Role: RoleShow, Config: map[string]any{"url": "http://example.test/npr"}}
+
+	// The plan as it is stored after somebody has saved it once: the booked
+	// slot has been baked in.
+	plan := Plan{
+		Version:    PlanVersion,
+		Categories: []CategoryDef{{ID: "talk", Target: 1}},
+		Pools: []Pool{
+			{ID: "talk", Match: &PoolMatch{Category: "talk"}},
+			{ID: "slot-csrc_npr", Label: "NPR", SourceIDs: []string{"csrc_npr"}},
+		},
+		Blocks: []Block{
+			{ID: "general", Default: true, Pools: []PoolRef{{Pool: "talk"}}},
+			{
+				ID:    "slot-csched_npr_evening",
+				Label: "NPR evening",
+				Enter: BlockEntry{At: "19:00", Days: "mon-fri", Hard: true, Start: StartImmediately},
+				Exit:  BlockExit{At: "21:00"},
+				Pools: []PoolRef{{Pool: "slot-csrc_npr", Weight: 1}},
+			},
+		},
+	}
+
+	// The rule behind it has been cancelled, so the schedule is empty.
+	reconciled, added, dropped := plan.ReconcileScheduleRules(nil, []Source{npr})
+	if len(added) != 0 {
+		t.Fatalf("nothing is booked, so nothing should have been added: %v", added)
+	}
+	if len(dropped) != 1 {
+		t.Fatalf("the cancelled slot should have been dropped, got %v", dropped)
+	}
+	if _, ok := reconciled.Block("slot-csched_npr_evening"); ok {
+		t.Fatal("the block for a cancelled booking is still in the plan")
+	}
+	if err := reconciled.Validate(); err != nil {
+		t.Fatalf("the reconciled plan should be valid: %v", err)
+	}
+
+	// And the station must be in ordinary rotation at the hour it used to hold.
+	now := time.Date(2026, 8, 20, 19, 30, 0, 0, time.UTC) // a Thursday
+	timeline := BuildTimeline(reconciled, now, time.UTC)
+	got := ResolveBlock(reconciled, timeline, ProgramState{}, ConditionContext{}, now)
+	if got.Block.ID != "general" {
+		t.Fatalf("at 19:30 on a weekday the station is in %q, not ordinary rotation", got.Block.ID)
+	}
+}
+
+// Disabling a rule is the same answer as deleting it: the slot stops.
+func TestADisabledBookingDoesNotHoldItsSlot(t *testing.T) {
+	npr := Source{ID: "csrc_npr", ChannelID: "c", Kind: SourceLiveStream, Label: "NPR",
+		Enabled: true, Role: RoleShow, Config: map[string]any{"url": "http://example.test/npr"}}
+	plan := Plan{
+		Version:    PlanVersion,
+		Categories: []CategoryDef{{ID: "talk", Target: 1}},
+		Pools:      []Pool{{ID: "talk", Match: &PoolMatch{Category: "talk"}}},
+		Blocks: []Block{
+			{ID: "general", Default: true, Pools: []PoolRef{{Pool: "talk"}}},
+			{
+				ID:    "slot-csched_npr",
+				Enter: BlockEntry{At: "19:00", Hard: true},
+				Exit:  BlockExit{At: "21:00"},
+				Pools: []PoolRef{{Pool: "talk"}},
+			},
+		},
+	}
+	rules := []ScheduleRule{{ID: "csched_npr", ChannelID: "c", SourceID: "csrc_npr",
+		WeekdayMask: 62, StartMinute: 19 * 60, EndMinute: 21 * 60, Enabled: false}}
+
+	reconciled, _, dropped := plan.ReconcileScheduleRules(rules, []Source{npr})
+	if len(dropped) != 1 {
+		t.Fatalf("a disabled rule should not hold its block, dropped %v", dropped)
+	}
+	if _, ok := reconciled.Block("slot-csched_npr"); ok {
+		t.Fatal("a disabled booking still has a block")
+	}
+}
+
+// A booking that has moved takes its block with it.
+//
+// The plan's copy is a copy. Leaving it on the old clock time means the SCHEDULE
+// list and the station disagree about when a show is on, which is the same
+// class of bug as the two above with a smaller blast radius.
+func TestARebookedSlotMovesItsBlock(t *testing.T) {
+	npr := Source{ID: "csrc_npr", ChannelID: "c", Kind: SourceLiveStream, Label: "NPR",
+		Enabled: true, Role: RoleShow, Config: map[string]any{"url": "http://example.test/npr"}}
+	plan := Plan{
+		Version:    PlanVersion,
+		Categories: []CategoryDef{{ID: "talk", Target: 1}},
+		Pools: []Pool{
+			{ID: "talk", Match: &PoolMatch{Category: "talk"}},
+			{ID: "slot-csrc_npr", SourceIDs: []string{"csrc_npr"}},
+		},
+		Blocks: []Block{
+			{ID: "general", Default: true, Pools: []PoolRef{{Pool: "talk"}}},
+			{
+				ID:    "slot-csched_npr",
+				Label: "NPR evening",
+				Enter: BlockEntry{At: "19:00", Days: "mon-fri", Hard: true, Start: StartImmediately},
+				Exit:  BlockExit{At: "21:00"},
+				Pools: []PoolRef{{Pool: "slot-csrc_npr", Weight: 1}},
+			},
+		},
+	}
+	// Same booking, now finishing at seven instead of running to nine.
+	rules := []ScheduleRule{{ID: "csched_npr", ChannelID: "c", SourceID: "csrc_npr",
+		Label: "NPR evening", WeekdayMask: 62, StartMinute: 17 * 60, EndMinute: 19 * 60, Enabled: true}}
+
+	reconciled, _, _ := plan.ReconcileScheduleRules(rules, []Source{npr})
+	block, ok := reconciled.Block("slot-csched_npr")
+	if !ok {
+		t.Fatal("the booking lost its block")
+	}
+	if block.Enter.At != "17:00" || block.Exit.At != "19:00" {
+		t.Fatalf("the block did not follow its rule: enters %q, exits %q", block.Enter.At, block.Exit.At)
+	}
+}
+
+// A block somebody named `slot-…` by hand belongs to them.
+//
+// The reconcile owns the ids it writes — `slot-` plus a rule id — and nothing
+// else. Pruning on the prefix alone would quietly delete a hand-written block
+// on every plan load.
+func TestReconcileLeavesHandWrittenSlotNamesAlone(t *testing.T) {
+	plan := Plan{
+		Version:    PlanVersion,
+		Categories: []CategoryDef{{ID: "talk", Target: 1}},
+		Pools:      []Pool{{ID: "talk", Match: &PoolMatch{Category: "talk"}}},
+		Blocks: []Block{
+			{ID: "general", Default: true, Pools: []PoolRef{{Pool: "talk"}}},
+			{ID: "slot-overnight", Label: "Overnight", Enter: BlockEntry{At: "01:00"}, Pools: []PoolRef{{Pool: "talk"}}},
+		},
+	}
+	reconciled, _, dropped := plan.ReconcileScheduleRules(nil, nil)
+	if len(dropped) != 0 {
+		t.Fatalf("a hand-written block was dropped: %v", dropped)
+	}
+	if _, ok := reconciled.Block("slot-overnight"); !ok {
+		t.Fatal("the hand-written block is gone")
+	}
+}
+
+// The run-up to a booked slot is not the place for the shortest oddity a
+// station owns.
+//
+// Jacob's words: "when we get close to a scheduled slot, oftentimes we end up
+// playing like one or 2 episodes I have of things that are like only a few
+// minutes long. Why we no just play music?"
+//
+// Because nothing had ever asked the question. Ten minutes before the news,
+// fitsBeforeAnchor rules out every real episode on the station and the two
+// four-minute curios in the library are the only spoken things left standing —
+// so on a talk-format channel, where the talk category is permanently in
+// deficit, they beat music outright. That pick is the highest-scoring candidate
+// that fits, the record says so, and it is still wrong: the clock chose it, not
+// the station.
+func TestTheGapBeforeABookedSlotGoesToMusic(t *testing.T) {
+	now := time.Date(2026, 8, 27, 15, 50, 0, 0, time.UTC)
+	sources := []Source{
+		podcastSource("longpod", "A Long Podcast", "plong"),
+		podcastSource("shortpod", "Minute Briefs", "pshort"),
+		musicSource("mus1", "House Playlist", "pl1"),
+		{ID: "atc", ChannelID: "ch1", Kind: SourceLiveStream, Label: "ATC", Enabled: true,
+			Role: RoleShow, Config: map[string]any{"url": "http://example.test/atc"}},
+	}
+
+	// The shelf: a dozen real episodes, none of which fit ten minutes, and the
+	// two curios that do.
+	long := make([]catalog.PodcastEpisode, 0, 12)
+	for i := 0; i < 12; i++ {
+		long = append(long, episode("long"+strconv.Itoa(i), "Long episode "+strconv.Itoa(i),
+			now.AddDate(0, 0, -3*i-1), 45+i))
+	}
+	tracks := make([]catalog.MusicTrack, 0, 24)
+	for i := 0; i < 24; i++ {
+		tracks = append(tracks, track("t"+strconv.Itoa(i), "Song "+strconv.Itoa(i),
+			"Artist "+strconv.Itoa(i), 150+(i*37)%180))
+	}
+	// The curios come with a deep back catalogue, because that is what a daily
+	// short-form show actually looks like: sixty rows against the long show's
+	// twelve. A fixture with two of them passes whether the rule works or not.
+	briefs := make([]catalog.PodcastEpisode, 0, 60)
+	for i := 0; i < 60; i++ {
+		briefs = append(briefs, episode("brief"+strconv.Itoa(i), "Brief "+strconv.Itoa(i),
+			now.AddDate(0, 0, -i-1), 3+i%3))
+	}
+	cat := &stubCatalog{
+		episodes:  map[string][]catalog.PodcastEpisode{"plong": long, "pshort": briefs},
+		playlists: map[string][]catalog.MusicTrack{"pl1": tracks},
+	}
+
+	// His station's shape: talk is the format and music is the minority, so
+	// categoryDeficit points at talk at every decision.
+	plan := Plan{
+		Version:      PlanVersion,
+		Seed:         3,
+		Selection:    SelectionPolicy{Epsilon: -1},
+		Categories:   []CategoryDef{{ID: "talk", Target: 0.7}, {ID: "music", Target: 0.3}},
+		UnderrunPool: "music",
+		Pools: []Pool{
+			{ID: "talk", Match: &PoolMatch{Category: "talk"}},
+			{ID: "music", Match: &PoolMatch{Category: "music"}},
+			{ID: "booked", SourceIDs: []string{"atc"}},
+		},
+		Blocks: []Block{
+			{ID: "general", Label: "General rotation", Default: true,
+				Pools: []PoolRef{{Pool: "talk"}, {Pool: "music"}}},
+			{ID: "atc", Label: "All Things Considered",
+				Enter: BlockEntry{At: "16:00", Days: "*", Hard: true, Start: StartImmediately},
+				Exit:  BlockExit{At: "17:00"},
+				Pools: []PoolRef{{Pool: "booked"}}, Next: "general"},
+		},
+	}
+
+	s := newStation(t, plan, sources, cat, now)
+	slot := time.Date(2026, 8, 27, 16, 0, 0, 0, time.UTC)
+	for s.now.Before(slot) {
+		at := s.now
+		item, decision := s.step()
+		if item.SourceID == "shortpod" {
+			t.Fatalf("at %s, with %s to go before the news, the station reached for a"+
+				" %ds curio instead of music\n%s",
+				at.Format("15:04:05"), round(slot.Sub(at)), item.DurationSeconds, decision.Explain())
+		}
+		if item.SourceID == "atc" {
+			t.Fatalf("the booked slot opened at %s instead of 16:00 — the gap has to be"+
+				" FILLED, not handed back\n%s", at.Format("15:04:05"), decision.Explain())
+		}
+	}
+
+	// And the appointment still starts on the second: filling the gap must not
+	// have cost the boundary it exists to protect.
+	if !s.now.Equal(slot) {
+		t.Fatalf("the run-up ran to %s, not 16:00 exactly", s.now.Format("15:04:05"))
+	}
+
+	// With the slot behind it the station goes back to real programming: the
+	// curios were deferred, not banned.
+	s.now = slot.Add(time.Hour)
+	s.state = ProgramState{}
+	item, decision := s.decide()
+	if item.Category != "talk" {
+		t.Fatalf("after the slot the station should be back on talk, played %q from %s\n%s",
+			item.Title, item.SourceID, decision.Explain())
+	}
+}
+
+// A station whose talk IS four minutes long keeps its four minutes.
+//
+// The rule above measures a stub against what its own category normally runs,
+// and that is the whole of its safety: a news brief, a weather bed, a channel
+// of short readings are all representative at four minutes, and a rule written
+// in absolute seconds would have silently taken every one of them off the air
+// in front of every appointment on the schedule.
+func TestAShortFormatIsNotAStub(t *testing.T) {
+	now := time.Date(2026, 8, 27, 15, 50, 0, 0, time.UTC)
+	window := 10 * time.Minute
+
+	brief := func(ref string, minutes int) Candidate {
+		return Candidate{Ref: ref, Title: ref, SourceID: "briefs", Category: "talk",
+			Duration: time.Duration(minutes) * time.Minute}
+	}
+	song := func(ref string) Candidate {
+		return Candidate{Ref: ref, Title: ref, SourceID: "mus1", Category: "music",
+			Duration: 3 * time.Minute}
+	}
+	env := constraintEnv{now: now, window: window}
+
+	// A category that is short all the way down. Nothing of it is longer than
+	// the gap, so the gap has taken nothing away and the rule has no business
+	// firing.
+	shortFormat := []Candidate{brief("b1", 4), brief("b2", 3), brief("b3", 5), song("s1")}
+	if blocked := categoriesOutOfRoom(shortFormat, shortFormat, env); len(blocked) > 0 {
+		t.Fatalf("stood a four-minute format down from a ten-minute gap: %v", blocked)
+	}
+
+	// The same four-minute item in a category of forty-five-minute episodes IS
+	// a stub, and only because the gap is what left it standing alone.
+	longFormat := []Candidate{
+		brief("curio", 4), brief("e1", 45), brief("e2", 50), brief("e3", 40), song("s1"),
+	}
+	survivors := []Candidate{brief("curio", 4), song("s1")}
+	blocked := categoriesOutOfRoom(longFormat, survivors, env)
+	if !blocked["talk"] {
+		t.Fatal("left a four-minute curio to represent a forty-five-minute format in a ten-minute gap")
+	}
+	if blocked["music"] {
+		t.Fatal("stood music down: a three-minute song is exactly what a ten-minute gap is for")
+	}
+
+	// An episode that is genuinely worth the gap keeps the category in play,
+	// even though the giants of it were ruled out.
+	withRealOption := append([]Candidate{brief("mid", 20)}, longFormat...)
+	stillFits := []Candidate{brief("curio", 4), brief("mid", 20), song("s1")}
+	if got := categoriesOutOfRoom(withRealOption, stillFits, constraintEnv{
+		now: now, window: 25 * time.Minute,
+	}); len(got) > 0 {
+		t.Fatalf("stood talk down with a twenty-minute episode fitting the gap: %v", got)
+	}
+
+	// No appointment, no rule: an open-ended rotation is not a gap.
+	if got := categoriesOutOfRoom(longFormat, survivors, constraintEnv{now: now}); len(got) > 0 {
+		t.Fatalf("fired with no boundary ahead: %v", got)
+	}
+
+	// And never during a boundary fill, where being cut off is the job and
+	// every length on the station is a candidate.
+	if got := categoriesOutOfRoom(longFormat, survivors, constraintEnv{
+		now: now, window: window, cutAtBoundary: true,
+	}); len(got) > 0 {
+		t.Fatalf("fired inside a boundary fill: %v", got)
+	}
+
+	// Something with no natural end — a relayed stream — is not a stub. It is
+	// capped at the gap instead, so its category still has a real answer.
+	relay := []Candidate{
+		{Ref: "krcc", SourceID: "krcc", Category: "talk", Traits: Traits{Continuous: true}},
+		song("s1"),
+	}
+	if got := categoriesOutOfRoom(longFormat, relay, env); len(got) > 0 {
+		t.Fatalf("called a continuous source a stub: %v", got)
+	}
+
+	// But an episode nobody has MEASURED is not a relay, and reading the two as
+	// one thing is what made this rule miss most of what it was written for. A
+	// feed that omits its duration arrives here at zero, and one of those
+	// anywhere in the category used to clear the whole category — every real
+	// episode back into contention, the clock keeping its pick, and the record
+	// showing the rule quietly not firing.
+	unprobed := []Candidate{
+		brief("curio", 4),
+		{Ref: "nolength", SourceID: "briefs", Category: "talk"},
+		song("s1"),
+	}
+	if got := categoriesOutOfRoom(longFormat, unprobed, env); !got["talk"] {
+		t.Fatal("one unmeasured episode waved the whole category back into a gap it does not fit")
+	}
+}
+
+// A short show with a deep back catalogue must not redefine what its category
+// is.
+//
+// The rule above asks what a category normally runs. Asked of the enumerated
+// EPISODES, the answer is decided by which shows publish most often — and short
+// shows publish often. Three long-form shows with twenty episodes each are
+// outvoted two to one by two five-minute dailies with sixty apiece: the median
+// lands at five minutes, the floor under two, and every curio the rule exists
+// to catch reads as perfectly typical programming.
+//
+// Which is not a corner case. It is the ordinary shape of a podcast library,
+// and it is why the first cut of this rule fired in tests and did nothing on
+// the actual station.
+func TestADeepBackCatalogueDoesNotRedefineItsCategory(t *testing.T) {
+	window := 10 * time.Minute
+	env := constraintEnv{now: time.Date(2026, 8, 28, 15, 50, 0, 0, time.UTC), window: window}
+
+	shelf := []Candidate{}
+	// Three long-form shows, twenty episodes each.
+	for show := 0; show < 3; show++ {
+		for i := 0; i < 20; i++ {
+			shelf = append(shelf, Candidate{
+				Ref:      "l" + strconv.Itoa(show) + "_" + strconv.Itoa(i),
+				SourceID: "long" + strconv.Itoa(show), Show: "Long Show " + strconv.Itoa(show),
+				Category: "talk", Duration: time.Duration(42+i%8) * time.Minute,
+			})
+		}
+	}
+	// Two five-minute dailies, sixty episodes each: four times the row count.
+	for show := 0; show < 2; show++ {
+		for i := 0; i < 60; i++ {
+			shelf = append(shelf, Candidate{
+				Ref:      "s" + strconv.Itoa(show) + "_" + strconv.Itoa(i),
+				SourceID: "short" + strconv.Itoa(show), Show: "Daily " + strconv.Itoa(show),
+				Category: "talk", Duration: time.Duration(3+i%3) * time.Minute,
+			})
+		}
+	}
+	shelf = append(shelf, Candidate{Ref: "song", SourceID: "mus1", Category: "music",
+		Duration: 3 * time.Minute})
+
+	if floor := categoryStubFloors(shelf)["talk"]; floor < 10*time.Minute {
+		t.Fatalf("a category of forty-five-minute shows came out with a %v floor — counted"+
+			" episodes rather than shows, so nothing in it can ever be a stub", floor)
+	}
+
+	survivors := []Candidate{
+		{Ref: "s0_1", SourceID: "short0", Show: "Daily 0", Category: "talk", Duration: 4 * time.Minute},
+		{Ref: "song", SourceID: "mus1", Category: "music", Duration: 3 * time.Minute},
+	}
+	if !categoriesOutOfRoom(shelf, survivors, env)["talk"] {
+		t.Fatal("left a four-minute daily to represent a category of forty-five-minute shows")
+	}
+
+	// And a station that is ALL dailies keeps them: counting shows rather than
+	// episodes must not turn into a bias against short formats.
+	allShort := shelf[60:]
+	shortSurvivors := []Candidate{allShort[0], survivors[1]}
+	if got := categoriesOutOfRoom(allShort, shortSurvivors, env); len(got) > 0 {
+		t.Fatalf("stood a station of five-minute dailies down from a ten-minute gap: %v", got)
+	}
+}
+
+// A station with nothing else to offer keeps talking.
+//
+// The rule above stands a category down in favour of something better suited to
+// the gap. Where there is no something-else — a channel that is spoken word and
+// nothing but — standing down would mean silence in front of every appointment
+// on the schedule, which is worse than any curio. Preferring music over a stub
+// is a preference; having something to play is not.
+func TestTheGapRuleNeverLeavesTheStationWithNothing(t *testing.T) {
+	now := time.Date(2026, 8, 27, 15, 50, 0, 0, time.UTC)
+	sources := []Source{
+		podcastSource("longpod", "A Long Podcast", "plong"),
+		podcastSource("shortpod", "Minute Briefs", "pshort"),
+		{ID: "atc", ChannelID: "ch1", Kind: SourceLiveStream, Label: "ATC", Enabled: true,
+			Role: RoleShow, Config: map[string]any{"url": "http://example.test/atc"}},
+	}
+	long := make([]catalog.PodcastEpisode, 0, 8)
+	for i := 0; i < 8; i++ {
+		long = append(long, episode("long"+strconv.Itoa(i), "Long episode "+strconv.Itoa(i),
+			now.AddDate(0, 0, -3*i-1), 45+i))
+	}
+	cat := &stubCatalog{episodes: map[string][]catalog.PodcastEpisode{
+		"plong":  long,
+		"pshort": {episode("brief1", "A three minute brief", now.AddDate(0, 0, -9), 3)},
+	}}
+	plan := Plan{
+		Version:    PlanVersion,
+		Seed:       3,
+		Selection:  SelectionPolicy{Epsilon: -1},
+		Categories: []CategoryDef{{ID: "talk", Target: 1}},
+		Pools: []Pool{
+			{ID: "talk", Match: &PoolMatch{Category: "talk"}},
+			{ID: "booked", SourceIDs: []string{"atc"}},
+		},
+		Blocks: []Block{
+			{ID: "general", Label: "General rotation", Default: true, Pools: []PoolRef{{Pool: "talk"}}},
+			{ID: "atc", Label: "All Things Considered",
+				Enter: BlockEntry{At: "16:00", Days: "*", Hard: true, Start: StartImmediately},
+				Exit:  BlockExit{At: "17:00"},
+				Pools: []PoolRef{{Pool: "booked"}}, Next: "general"},
+		},
+	}
+
+	s := newStation(t, plan, sources, cat, now)
+	item, decision := s.decide()
+	if item.ItemRef != "episode:brief1" {
+		t.Fatalf("a talk-only station in a ten-minute gap must still play its only option,"+
+			" played %q\n%s", item.Title, decision.Explain())
+	}
+	// And it does not claim to have done something it did not do.
+	if strings.Contains(decision.Note, "odds and ends") {
+		t.Fatalf("recorded that the gap went elsewhere, then played the stub anyway: %q", decision.Note)
+	}
+}
+
+// The last sliver in front of a slot is still not the place for a curio.
+//
+// The gap rule stands a category down by taking it out of contention, and
+// dropCategories will not empty a candidate set — a station with nowhere else
+// to go keeps playing. So in the last stretch, where no song fits either, the
+// rule found the right answer and could not apply it: the curio was all that
+// was left, and it went out. On a real station that is one short episode in
+// front of a booked show most days, which is exactly the complaint.
+//
+// "The only things that fit are odds and ends" is a block out of ROOM, not out
+// of options, and the plan already nominates a pool for that moment. Ask it,
+// and fall back to the curio only if it comes back empty.
+func TestTheLastSliverBeforeASlotIsFilledNotScraped(t *testing.T) {
+	now := time.Date(2026, 8, 28, 15, 57, 0, 0, time.UTC)
+	sources := []Source{
+		podcastSource("longpod", "A Long Podcast", "plong"),
+		podcastSource("shortpod", "A Daily Brief", "pshort"),
+		musicSource("mus1", "House Playlist", "pl1"),
+		{ID: "atc", ChannelID: "ch1", Kind: SourceLiveStream, Label: "ATC", Enabled: true,
+			Role: RoleShow, Config: map[string]any{"url": "http://example.test/atc"}},
+	}
+	long := make([]catalog.PodcastEpisode, 0, 10)
+	for i := 0; i < 10; i++ {
+		long = append(long, episode("long"+strconv.Itoa(i), "Long ep "+strconv.Itoa(i),
+			now.AddDate(0, 0, -3*i-1), 45+i))
+	}
+	briefs := make([]catalog.PodcastEpisode, 0, 40)
+	for i := 0; i < 40; i++ {
+		briefs = append(briefs, episode("brief"+strconv.Itoa(i), "Brief "+strconv.Itoa(i),
+			now.AddDate(0, 0, -i-1), 3))
+	}
+	// Three minutes to the slot, and every song on the station is longer than
+	// that. Only the three-minute briefs fit — so standing talk down would
+	// leave nothing, and the old answer was to play one.
+	tracks := make([]catalog.MusicTrack, 0, 12)
+	for i := 0; i < 12; i++ {
+		tracks = append(tracks, track("t"+strconv.Itoa(i), "Song "+strconv.Itoa(i),
+			"Artist "+strconv.Itoa(i), 240+i*5))
+	}
+	cat := &stubCatalog{
+		episodes:  map[string][]catalog.PodcastEpisode{"plong": long, "pshort": briefs},
+		playlists: map[string][]catalog.MusicTrack{"pl1": tracks},
+	}
+	plan := Plan{
+		Version:      PlanVersion,
+		Seed:         3,
+		Selection:    SelectionPolicy{Epsilon: -1},
+		Categories:   []CategoryDef{{ID: "talk", Target: 0.75}, {ID: "music", Target: 0.25}},
+		UnderrunPool: "music",
+		Pools: []Pool{
+			{ID: "talk", Match: &PoolMatch{Category: "talk"}},
+			{ID: "music", Match: &PoolMatch{Category: "music"}},
+			{ID: "booked", SourceIDs: []string{"atc"}},
+		},
+		Blocks: []Block{
+			{ID: "general", Label: "General rotation", Default: true,
+				Pools: []PoolRef{{Pool: "talk"}, {Pool: "music"}}},
+			{ID: "atc", Label: "All Things Considered",
+				Enter: BlockEntry{At: "16:00", Days: "*", Hard: true, Start: StartImmediately},
+				Exit:  BlockExit{At: "17:00"},
+				Pools: []PoolRef{{Pool: "booked"}}, Next: "general"},
+		},
+	}
+
+	s := newStation(t, plan, sources, cat, now)
+	item, decision := s.decide()
+	if item.SourceID == "shortpod" {
+		t.Fatalf("with three minutes to the news and no song short enough, the station played"+
+			" a curio rather than holding the boundary with music\n%s", decision.Explain())
+	}
+	if item.SourceID != "mus1" {
+		t.Fatalf("expected the nominated gap pool, played %q from %s\n%s",
+			item.Title, item.SourceID, decision.Explain())
+	}
+	// Held to the boundary and faded, not run over it.
+	if item.MaxDuration <= 0 || item.MaxDuration > 3*time.Minute {
+		t.Fatalf("the fill was not capped at the gap: MaxDuration=%v", item.MaxDuration)
+	}
 }

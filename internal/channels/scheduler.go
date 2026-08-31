@@ -359,16 +359,21 @@ func (s *Scheduler) PlanFor(ctx context.Context, channel Channel, sources []Sour
 		return Plan{}, err
 	}
 	if ok {
-		// A booked show added after the plan was saved still has to go out.
-		// The plan says what the station IS; the schedule says what is booked,
-		// and the two are kept in step here rather than at save time — save
-		// time is a moment, and the schedule keeps changing after it.
-		adopted, added := stored.AdoptScheduleRules(rules, sources)
+		// A booked show added after the plan was saved still has to go out, and
+		// one cancelled after it must not. The plan says what the station IS;
+		// the schedule says what is booked, and the two are kept in step here
+		// rather than at save time — save time is a moment, and the schedule
+		// keeps changing after it.
+		reconciled, added, dropped := stored.ReconcileScheduleRules(rules, sources)
 		if len(added) > 0 {
 			s.deps.logf("channel %s: booked slots not in the stored plan, adopting: %s",
 				channel.ID, strings.Join(added, ", "))
 		}
-		return adopted, nil
+		if len(dropped) > 0 {
+			s.deps.logf("channel %s: blocks for bookings that no longer exist, dropping: %s",
+				channel.ID, strings.Join(dropped, ", "))
+		}
+		return reconciled, nil
 	}
 	return DerivePlan(channel, sources, rules, s.deps.talkShare(channel)), nil
 }

@@ -425,6 +425,32 @@ func blockWindowContains(block Block, now time.Time) bool {
 	return !now.Before(startAt) && now.Before(end)
 }
 
+// blockExitAt is the instant a block that ends at a clock time ends, resolved
+// against the day it was entered.
+//
+// Shared with the intent builder so "has this block ended" and "how long may
+// the station stay on this item" cannot disagree. A block entered at 22:00 that
+// exits at 02:00 ends tomorrow morning, and a ceiling that resolved that to
+// this morning would come out negative and be silently ignored.
+func blockExitAt(exit BlockExit, enteredAt time.Time, loc *time.Location) (time.Time, bool) {
+	if exit.At == "" {
+		return time.Time{}, false
+	}
+	minute, err := parseClock(exit.At)
+	if err != nil {
+		return time.Time{}, false
+	}
+	if loc == nil {
+		loc = time.UTC
+	}
+	entered := enteredAt.In(loc)
+	end := wallClock(startOfDay(entered, loc), minute, loc)
+	if !end.After(entered) {
+		end = wallClock(startOfDay(entered, loc).AddDate(0, 0, 1), minute, loc)
+	}
+	return end, true
+}
+
 // blockExitFired reports whether anything has ended the current block, and what.
 func blockExitFired(plan Plan, block Block, state ProgramState, timeline Timeline, cond ConditionContext, now time.Time) (string, bool) {
 	exit := block.Exit
@@ -438,17 +464,8 @@ func blockExitFired(plan Plan, block Block, state ProgramState, timeline Timelin
 			}
 		}
 	}
-	if exit.At != "" {
-		if minute, err := parseClock(exit.At); err == nil {
-			loc := now.Location()
-			end := wallClock(startOfDay(state.EnteredAt.In(loc), loc), minute, loc)
-			if !end.After(state.EnteredAt) {
-				end = wallClock(startOfDay(state.EnteredAt.In(loc), loc).AddDate(0, 0, 1), minute, loc)
-			}
-			if !now.Before(end) {
-				return "reached " + exit.At, true
-			}
-		}
+	if end, ok := blockExitAt(exit, state.EnteredAt, now.Location()); ok && !now.Before(end) {
+		return "reached " + exit.At, true
 	}
 	if exit.AtNextAnchor && timeline.Next != nil && !now.Before(timeline.Next.Start) {
 		return "the next booked slot is due", true

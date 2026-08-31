@@ -151,6 +151,20 @@ func (e *Engine) Decide(ctx context.Context, now time.Time, state ProgramState) 
 	}
 
 	item, attempt := e.selectIn(ctx, now, timeline, block, tail, env)
+	// Something plays, but only because the gap left nothing better to reach
+	// for: every real item of the category is too long for the room, and what
+	// survived is the curio at the bottom of the shelf. The pool the plan
+	// nominated for exactly this moment is the better answer, and asking for it
+	// costs nothing — the curio is still in hand if the pool comes back empty.
+	if attempt.ok && attempt.outOfRoom != "" {
+		if fillItem, fill, ok := e.fillFromUnderrunPool(ctx, now, timeline, block, tail, env,
+			"only odds and ends of "+attempt.outOfRoom+" fit the "+round(attempt.window)+
+				" left, so the gap is filled rather than played out with them"); ok {
+			next := fill.state
+			next.ItemCount++
+			return fillItem, fill.decision, next, nil
+		}
+	}
 	if attempt.ok {
 		// A stopset separates things worth separating, so whether one is due is
 		// asked once the station knows what it would play next — a break
@@ -207,23 +221,12 @@ func (e *Engine) Decide(ctx context.Context, now time.Time, state ProgramState) 
 		// playing over the show itself. Inside one it is the block's OWN pool:
 		// a music hour with ninety seconds it cannot fill wants one more song
 		// faded out on the hour, which is what the hour is for.
-		if timeline.Active == nil && e.Plan.UnderrunPool != "" {
-			filler := block
-			filler.Block.Pools = []PoolRef{{Pool: e.Plan.UnderrunPool, Weight: 1}}
-			filler.Block.Pattern = nil
-			filler.Block.Breaks = nil
-			if item, fill := e.selectIn(ctx, now, timeline, filler, tail, env); fill.ok {
-				fill.decision.Note = "nothing left fits before " + timeline.nextLabel() +
-					", so the gap is filled rather than starting it early"
-				next := fill.state
-				next.ItemCount++
-				return item, fill.decision, next, nil
-			}
-			if item, fill, ok := e.holdBoundary(ctx, now, timeline, filler, tail, env); ok {
-				next := fill.state
-				next.ItemCount++
-				return item, fill.decision, next, nil
-			}
+		if item, fill, ok := e.fillFromUnderrunPool(ctx, now, timeline, block, tail, env,
+			"nothing left fits before "+timeline.nextLabel()+
+				", so the gap is filled rather than starting it early"); ok {
+			next := fill.state
+			next.ItemCount++
+			return item, fill.decision, next, nil
 		}
 		if handover, ok := e.blockForBoundary(timeline, block, now); ok {
 			item, retry := e.selectIn(ctx, now, timeline, handover, tail, env)
@@ -340,6 +343,38 @@ func (e *Engine) holdBoundary(
 		"nothing fits the %s before %s, so the time is held and this is faded out on the boundary",
 		round(room), boundary)
 	return item, fill, true
+}
+
+// fillFromUnderrunPool fills the gap in front of an appointment from the pool
+// the plan nominated for it, whole if something fits and faded on the boundary
+// if nothing does.
+//
+// Only outside an appointment, and only from the nominated pool: filling the
+// tail of a booked hour from somewhere else would be playing over the show
+// itself. Extracted so the two situations that need it — nothing fits at all,
+// and nothing GOOD fits — reach the same code. Two code paths that fill a gap
+// is how a scheduler grows a rule that only applies on Tuesdays.
+func (e *Engine) fillFromUnderrunPool(
+	ctx context.Context,
+	now time.Time,
+	timeline Timeline,
+	block BlockDecision,
+	tail []PlayTailEntry,
+	env enumerationContext,
+	note string,
+) (PlaybackItem, selection, bool) {
+	if timeline.Active != nil || e.Plan.UnderrunPool == "" {
+		return PlaybackItem{}, selection{}, false
+	}
+	filler := block
+	filler.Block.Pools = []PoolRef{{Pool: e.Plan.UnderrunPool, Weight: 1}}
+	filler.Block.Pattern = nil
+	filler.Block.Breaks = nil
+	if item, fill := e.selectIn(ctx, now, timeline, filler, tail, env); fill.ok {
+		fill.decision.Note = note
+		return item, fill, true
+	}
+	return e.holdBoundary(ctx, now, timeline, filler, tail, env)
 }
 
 // minBoundaryFill is the smallest gap worth putting something in.
@@ -600,7 +635,11 @@ type selection struct {
 	// onlyFitFailures means every candidate was rejected for not fitting a
 	// boundary, and nothing else was wrong.
 	onlyFitFailures bool
-	window          time.Duration
+	// outOfRoom names the categories the gap has cut down to odds and ends,
+	// when standing them down would have left the block with nothing. Empty
+	// when the gap rule either did not fire or was able to apply itself.
+	outOfRoom string
+	window    time.Duration
 }
 
 func (s selection) boundaryNote(timeline Timeline) string {
@@ -633,6 +672,13 @@ func (e *Engine) selectIn(
 	out := selection{decision: decision, state: block.State, window: intent.Window}
 
 	candidates := e.Enumerate(ctx, intent, env)
+	// The whole shelf, kept aside before anything below narrows `candidates`.
+	//
+	// "What does this category normally run" is a fact about what the station
+	// owns, and a position that asks for something owed does not change it. Ask
+	// the narrowed set instead and a cycle whose only outstanding episode is a
+	// four-minute one concludes that four minutes is what this category is.
+	shelf := candidates
 	out.decision.Considered = len(candidates)
 	if len(candidates) == 0 {
 		out.decision.Error = "no pool in this block could produce anything"
@@ -736,6 +782,29 @@ func (e *Engine) selectIn(
 			survivors = narrowed
 			out.decision.Note = "what is owed no longer fits what is left of this run, " +
 				"so the run ends here rather than filling it with older, shorter items"
+		}
+	}
+
+	// And the same question asked of the clock rather than of the run: what is
+	// left before the appointment is too small for this category to be itself,
+	// so the gap goes to whatever is natively the right length for one.
+	if blocked := categoriesOutOfRoom(shelf, survivors, cenv); len(blocked) > 0 {
+		names := categoryNames(blocked)
+		if narrowed := dropCategories(survivors, blocked); len(narrowed) < len(survivors) {
+			survivors = narrowed
+			out.decision.Note = strings.TrimSpace(out.decision.Note + fmt.Sprintf(
+				" only odds and ends of %s fit the %s left, so the gap goes to other"+
+					" programming and %s comes back when there is room for a real one",
+				names, round(intent.Window), names))
+		} else {
+			// Standing the category down would leave nothing at all, so it
+			// stands: a curio is better than silence, and dropCategories will
+			// not empty a set. But "the only things that fit are odds and ends"
+			// is a block out of ROOM rather than out of options, and the caller
+			// has a better answer than this one — the nominated gap pool, or a
+			// song faded on the boundary. Said here, decided there, because
+			// what is left in hand is still playable if that comes back empty.
+			out.outOfRoom = names
 		}
 	}
 
@@ -888,6 +957,22 @@ func (e *Engine) buildIntent(block BlockDecision, timeline Timeline, tail []Play
 		intent.Window = remaining
 		if block.State.ItemCount == 0 {
 			intent.Window = 0
+		}
+	}
+	// A block that ends at a clock time is over AT that clock time, and for a
+	// source with no length of its own that has to be a ceiling on the ITEM,
+	// not a question asked once the item ends.
+	//
+	// This is the one boundary nothing could enforce. An exit is only ever
+	// evaluated between items, and a live stream does not end on its own, so a
+	// daypart running NPR "until 19:00" picked the stream at 18:30, handed it
+	// the full sixty-minute live limit and let it run to 19:30 — every day, with
+	// nothing in the plan to point at, because the plan was right. An anchored
+	// block was already bounded by its appointment; a plain daypart was not.
+	if end, ok := blockExitAt(block.Block.Exit, block.EnteredAt, timeline.Location); ok {
+		if remaining := end.Sub(timeline.Now); remaining > 0 &&
+			(intent.PlayCeiling <= 0 || remaining < intent.PlayCeiling) {
+			intent.PlayCeiling = remaining
 		}
 	}
 	// A block that says how long it wants to run is asking for items that fit
@@ -1569,6 +1654,184 @@ func categoriesOutOfRun(candidates []Candidate, env constraintEnv) map[CategoryI
 		return nil
 	}
 	return out
+}
+
+// categoriesOutOfRoom is every category the gap in front of an appointment has
+// cut down to odds and ends.
+//
+// Its sibling categoriesOutOfRun asks the same question of a run limit. This
+// one asks it of the clock, and the clock asks it far more often, because every
+// appointment on the schedule has a run-up to it and every run-up narrows.
+//
+// Approaching a booked slot, fitsBeforeAnchor takes the long content away
+// first, and what it leaves behind is not a smaller version of the category —
+// it is whatever happens to be shortest. On a station whose podcasts run
+// three-quarters of an hour, the ten minutes before the news is the one moment
+// in the day the two four-minute oddities in the library can win, so they win
+// it. Every day, at the same time, in front of the same show, and the record
+// showed nothing wrong: each of those picks was the highest-scoring candidate
+// that fitted.
+//
+// Which is the whole problem. The clock chose those items, not the station.
+// Nothing about a four-minute curio says "play me before the news" except that
+// it was the only spoken thing short enough, and a person filling that gap
+// would reach for music and let the podcast go out whole afterwards. Music is
+// already the right length for a gap; that is what a song is.
+//
+// So a category stands down when the room left cannot hold anything
+// representative of it, and only when the room is what took the rest away. A
+// category whose items are genuinely short — a news brief, a weather bed, a
+// station whose talk IS four minutes long — is representative at four minutes
+// and keeps its place, because the floor is measured against what that category
+// itself normally runs rather than against a number written here.
+//
+// Only the hard fit counts as "the room". A block that merely ends at a clock
+// time truncates its items instead of ruling them out, and that is a different
+// problem with a different right answer; measuring against it would fire this
+// rule where its reasoning does not hold.
+func categoriesOutOfRoom(candidates, survivors []Candidate, env constraintEnv) map[CategoryID]bool {
+	// Being cut off is the job in a boundary fill, so every length is a
+	// candidate there and none of them mean what they usually mean.
+	if env.window <= 0 || env.cutAtBoundary {
+		return nil
+	}
+	floors := categoryStubFloors(candidates)
+	if len(floors) == 0 {
+		return nil
+	}
+	// Categories the room itself truncated: something representative is on the
+	// shelf and does not fit. A category that simply has nothing longer to
+	// offer has not been cut down by anything, and is not this rule's business.
+	out := map[CategoryID]bool{}
+	for _, candidate := range candidates {
+		floor, ok := floors[candidate.Category]
+		if ok && candidate.Duration >= floor && candidate.Duration > env.window {
+			out[candidate.Category] = true
+		}
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	// ...minus the ones with something representative still standing, and minus
+	// the ones with nothing standing at all, which are already gone and must
+	// not be reported as though this rule had removed them.
+	present := map[CategoryID]bool{}
+	for _, candidate := range survivors {
+		present[candidate.Category] = true
+		floor, ok := floors[candidate.Category]
+		if !ok {
+			continue
+		}
+		// A source with no natural end really can fill a gap: nothing downstream
+		// would move off it, so the play ceiling bounds it and it plays for
+		// exactly the room there is. That is a fact about a RELAY, though, and
+		// not about a duration nobody has measured.
+		//
+		// Reading them as one thing is what made this rule miss most of what it
+		// was written for. A podcast feed that omits <itunes:duration>, or a
+		// file the scanner has not probed, arrives here at zero — indexed as
+		// "can fill any gap" — and one of them anywhere in the category cleared
+		// the whole category from the blocked set. Every real episode alongside
+		// it went back into contention, the clock kept its pick, and the record
+		// showed the rule quietly not firing. Unmeasured is not the same as
+		// endless, exactly as it is not the same as short.
+		if candidate.Traits.Continuous || candidate.Duration >= floor {
+			delete(out, candidate.Category)
+		}
+	}
+	for category := range out {
+		if !present[category] {
+			delete(out, category)
+		}
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
+}
+
+// categoryStubFloors is the shortest item that still counts as one, per
+// category.
+//
+// Measured across the whole shelf and never across the survivors, because in
+// front of an appointment the survivors ARE the rump: let them define their own
+// normal and a four-minute oddity looks typical of a forty-five-minute show,
+// which is precisely the reading that has to be wrong for the rule to work.
+//
+// Per SHOW first, then across shows, and that ordering is the whole of whether
+// this works. Asking the enumerated episodes directly weights every show by how
+// deep its back catalogue happens to be, and short shows publish often: three
+// long-form shows with twenty episodes each are outvoted two to one by two
+// five-minute dailies with sixty apiece, the category median lands at five
+// minutes, the floor lands under two, and every curio the rule exists to catch
+// reads as a perfectly typical piece of programming. The rule then does nothing
+// at all, for exactly the libraries it was written for.
+//
+// "What does a show in this category usually run" is the question with the
+// stable answer. A show counts once whether it has four episodes or four
+// hundred, which is also what makes the same podcast added twice — as a feed
+// and as a folder — stop counting as two.
+//
+// The median rather than the mean at both levels, for the same reason every
+// other statistic in here is one: a library with one six-hour epic in it should
+// not have its idea of a normal episode dragged upward by the epic.
+func categoryStubFloors(candidates []Candidate) map[CategoryID]time.Duration {
+	byShow := map[CategoryID]map[string][]time.Duration{}
+	for _, candidate := range candidates {
+		if candidate.Duration <= 0 || candidate.Category == "" {
+			continue
+		}
+		shows, ok := byShow[candidate.Category]
+		if !ok {
+			shows = map[string][]time.Duration{}
+			byShow[candidate.Category] = shows
+		}
+		// The programme where there is one, the source row otherwise: a
+		// playlist is a single shelf however many tracks are on it.
+		key := firstNonEmpty(candidate.Show, candidate.SourceID)
+		shows[key] = append(shows[key], candidate.Duration)
+	}
+	out := make(map[CategoryID]time.Duration, len(byShow))
+	for category, shows := range byShow {
+		typical := make([]time.Duration, 0, len(shows))
+		for _, lengths := range shows {
+			typical = append(typical, medianDuration(lengths))
+		}
+		if floor := medianDuration(typical) / stubFraction; floor > 0 {
+			out[category] = floor
+		}
+	}
+	return out
+}
+
+// medianDuration is the middle length of a set, sorting in place.
+func medianDuration(lengths []time.Duration) time.Duration {
+	if len(lengths) == 0 {
+		return 0
+	}
+	sort.Slice(lengths, func(i, j int) bool { return lengths[i] < lengths[j] })
+	return lengths[len(lengths)/2]
+}
+
+// stubFraction is how much shorter than its category's usual an item has to be
+// before it stops counting as one of them.
+//
+// A third, and deliberately generous: the question is not whether an item is
+// short but whether it is an item of this at all. A fifteen-minute episode on a
+// station whose podcasts run three-quarters of an hour is a real listen and
+// belongs in any gap that can hold it. Four minutes is not a short episode of
+// that show, it is the clock picking — and the clock has no taste.
+const stubFraction = 3
+
+// categoryNames lists a category set for the record, in a fixed order so two
+// runs of the same decision read the same.
+func categoryNames(categories map[CategoryID]bool) string {
+	names := make([]string, 0, len(categories))
+	for category := range categories {
+		names = append(names, string(category))
+	}
+	sort.Strings(names)
+	return strings.Join(names, ", ")
 }
 
 // dropCategories removes whole categories from a candidate set, but never
