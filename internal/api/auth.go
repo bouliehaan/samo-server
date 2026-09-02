@@ -78,3 +78,12 @@ func (s *Server) requireAdmin(w http.ResponseWriter, r *http.Request) (users.Pri
 func (s *Server) usersService() *users.Service {
 	return s.users
 }
+
+// isAdmin answers the same question requireAdmin asks, without answering the
+// request. For a response that CONTAINS an admin-only affordance rather than
+// being one: a field a non-admin should not be offered is left out, and the
+// rest of the payload is served exactly as it always was.
+func (s *Server) isAdmin(r *http.Request) bool {
+	principal, ok := s.currentUser(r)
+	return ok && principal.User.Role == users.RoleAdmin
+}

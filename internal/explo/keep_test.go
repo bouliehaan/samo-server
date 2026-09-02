@@ -1,7 +1,10 @@
 package explo
 
 import (
+	"database/sql"
+	"errors"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/bouliehaan/samo-server/internal/catalog"
@@ -102,4 +105,152 @@ func containsRune(s, sub string) bool {
 		}
 	}
 	return false
+}
+
+// The kept copy has to carry samo's cover. An explo drop is an untagged rip
+// with no embedded picture, and the art the app shows comes from samo's own
+// identification — so a copy that only writes text tags lands in the library
+// with no artwork at all.
+func TestRemuxArgsEmbedsTheCover(t *testing.T) {
+	args := remuxArgs("/drop/x.flac", "/lib/x.flac", "/covers/c.jpg", catalog.MusicTrack{Title: "Roxanne"})
+	joined := strings.Join(args, " ")
+
+	if !strings.Contains(joined, "-i /drop/x.flac -i /covers/c.jpg") {
+		t.Fatalf("cover is not a second input: %s", joined)
+	}
+	// Audio from the source, picture from the cover: mapping all of input 0
+	// alongside input 1 would leave two pictures on a file that had its own.
+	if !strings.Contains(joined, "-map 0:a -map 1:v") {
+		t.Fatalf("streams are not mapped audio-then-cover: %s", joined)
+	}
+	// Without this the picture is a plain video stream, which FLAC refuses.
+	if !strings.Contains(joined, "-disposition:v:0 attached_pic") {
+		t.Fatalf("cover is not marked as attached art: %s", joined)
+	}
+	if args[len(args)-1] != "/lib/x.flac" {
+		t.Fatalf("destination must come last, got %q", args[len(args)-1])
+	}
+}
+
+// With no cover to add, the source's own streams must still come across whole
+// — a file that DID carry embedded art must not lose it.
+func TestRemuxArgsWithoutCoverKeepsSourceStreams(t *testing.T) {
+	joined := strings.Join(remuxArgs("/drop/x.flac", "/lib/x.flac", "", catalog.MusicTrack{Title: "Roxanne"}), " ")
+	if !strings.Contains(joined, "-map 0 -c copy") {
+		t.Fatalf("source streams are not mapped whole: %s", joined)
+	}
+	if strings.Contains(joined, "attached_pic") {
+		t.Fatalf("no cover was given, so nothing should be attached: %s", joined)
+	}
+}
+
+// The tags samo holds as overrides are the point of remuxing rather than
+// copying, so they have to reach the file alongside the cover.
+func TestRemuxArgsWritesEffectiveTags(t *testing.T) {
+	joined := strings.Join(remuxArgs("/a.flac", "/b.flac", "/c.jpg", catalog.MusicTrack{
+		Title:            "Roxanne",
+		DisplayArtist:    "The Police",
+		AlbumTitle:       "Outlandos D'Amour",
+		AlbumArtistNames: []string{"The Police"},
+		TrackNumber:      3,
+		ReleaseYear:      1978,
+	}), " ")
+	for _, want := range []string{
+		"-metadata title=Roxanne",
+		"-metadata artist=The Police",
+		"-metadata album=Outlandos D'Amour",
+		"-metadata album_artist=The Police",
+		"-metadata track=3",
+		"-metadata date=1978",
+	} {
+		if !strings.Contains(joined, want) {
+			t.Fatalf("missing %q in: %s", want, joined)
+		}
+	}
+}
+
+// Keepable is what decides whether a surface offers "Keep in Library" at all,
+// so a wrong answer is either a menu entry that always fails or a drop nobody
+// is told they can save.
+//
+// db is a bare pointer: Keepable only checks it for nil, because a service
+// without storage is a disabled one. Giving it a real database would test the
+// harness rather than the rule.
+func newKeepableService(dirs []string, track catalog.MusicTrack, found bool) *Service {
+	return &Service{
+		db:         new(sql.DB),
+		dirs:       dirs,
+		ffmpegPath: "/usr/bin/ffmpeg",
+		trackByID: func(string) (catalog.MusicTrack, error) {
+			if !found {
+				return catalog.MusicTrack{}, errors.New("no such track")
+			}
+			return track, nil
+		},
+	}
+}
+
+func TestKeepableAcceptsDropFolderTrack(t *testing.T) {
+	track := catalog.MusicTrack{AudioFiles: []catalog.AudioFile{{Path: "/drops/explo/Artist - Song.flac"}}}
+	if !newKeepableService([]string{"/drops/explo"}, track, true).Keepable("t1") {
+		t.Fatal("a track inside the explo folder should be keepable")
+	}
+}
+
+// The case this whole feature turns on: a station whose music is the ordinary
+// library — Christmas rotation in December, say — must not offer to keep
+// anything, because there is nothing to save it from.
+func TestKeepableRejectsOrdinaryLibraryTrack(t *testing.T) {
+	track := catalog.MusicTrack{AudioFiles: []catalog.AudioFile{{Path: "/mnt/music/Wham!/Last Christmas.flac"}}}
+	if newKeepableService([]string{"/drops/explo"}, track, true).Keepable("t1") {
+		t.Fatal("a library track is already kept; it must not be offered")
+	}
+}
+
+// A folder that merely shares a prefix is a different folder. Without this,
+// "/drops/exploration" would be read as explo content.
+func TestKeepableRejectsSiblingPrefixFolder(t *testing.T) {
+	track := catalog.MusicTrack{AudioFiles: []catalog.AudioFile{{Path: "/drops/exploration/Song.flac"}}}
+	if newKeepableService([]string{"/drops/explo"}, track, true).Keepable("t1") {
+		t.Fatal("/drops/exploration is not under /drops/explo")
+	}
+}
+
+// Every "no" answers false rather than erroring: the caller's only question is
+// whether to draw a menu entry.
+func TestKeepableRejectsWhenNothingCanKeep(t *testing.T) {
+	inDrop := catalog.MusicTrack{AudioFiles: []catalog.AudioFile{{Path: "/drops/explo/Song.flac"}}}
+	cases := []struct {
+		name    string
+		service *Service
+		trackID string
+	}{
+		{"nil service", nil, "t1"},
+		{"no explo folder configured", newKeepableService(nil, inDrop, true), "t1"},
+		{"unknown track", newKeepableService([]string{"/drops/explo"}, inDrop, false), "t1"},
+		{"empty id", newKeepableService([]string{"/drops/explo"}, inDrop, true), ""},
+		{
+			"nothing to copy",
+			newKeepableService([]string{"/drops/explo"}, catalog.MusicTrack{}, true),
+			"t1",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if tc.service.Keepable(tc.trackID) {
+				t.Fatal("expected false")
+			}
+		})
+	}
+}
+
+// Keep fails the whole batch without ffmpeg — it remuxes samo's tags and cover
+// into the copy — so a server missing it must not offer the action either.
+func TestKeepableRejectsWithoutFFmpeg(t *testing.T) {
+	track := catalog.MusicTrack{AudioFiles: []catalog.AudioFile{{Path: "/drops/explo/Song.flac"}}}
+	service := newKeepableService([]string{"/drops/explo"}, track, true)
+	service.ffmpegPath = ""
+	if service.Keepable("t1") {
+		t.Fatal("without ffmpeg the keep would fail; do not offer it")
+	}
 }

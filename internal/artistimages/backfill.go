@@ -28,13 +28,20 @@ const (
 )
 
 type BackfillJob struct {
-	ID         string     `json:"id"`
-	Status     string     `json:"status"`
-	Mode       string     `json:"mode"`
-	Total      int        `json:"total"`
-	Processed  int        `json:"processed"`
-	Found      int        `json:"found"`
-	Failed     int        `json:"failed"`
+	ID        string `json:"id"`
+	Status    string `json:"status"`
+	Mode      string `json:"mode"`
+	Total     int    `json:"total"`
+	Processed int    `json:"processed"`
+	Found     int    `json:"found"`
+	Failed    int    `json:"failed"`
+	// Blocked counts artists no source would answer for — a refused CDN, an
+	// exhausted quota, a timeout. Kept apart from Failed because the two ask
+	// for opposite responses: Failed is the library's answer and there is
+	// nothing to do about it, Blocked means run it again once the way out is
+	// clear. Rolled together, a total outage reads exactly like a library full
+	// of artists nobody has ever photographed.
+	Blocked    int        `json:"blocked"`
 	Skipped    int        `json:"skipped"`
 	StartedAt  time.Time  `json:"startedAt"`
 	FinishedAt *time.Time `json:"finishedAt,omitempty"`
@@ -235,6 +242,8 @@ func (s *Service) executeBackfill(ctx context.Context, artists []catalog.MusicAr
 			s.activeBackfill.job.Found++
 		case backfillFailed:
 			s.activeBackfill.job.Failed++
+		case backfillBlocked:
+			s.activeBackfill.job.Blocked++
 		case backfillSkipped:
 			s.activeBackfill.job.Skipped++
 		}
@@ -260,6 +269,7 @@ type backfillOutcome int
 const (
 	backfillFound backfillOutcome = iota
 	backfillFailed
+	backfillBlocked
 	backfillSkipped
 )
 
@@ -272,9 +282,12 @@ func (s *Service) backfillArtist(ctx context.Context, artist catalog.MusicArtist
 		s.patchCatalog(artist.ID, cached)
 		return backfillFound
 	}
-	images, found := s.fetchAndPersist(ctx, artist)
-	if found && len(images) > 0 {
+	images, outcome := s.fetchAndPersist(ctx, artist)
+	switch {
+	case outcome == fetchFound && len(images) > 0:
 		return backfillFound
+	case outcome == fetchBlocked:
+		return backfillBlocked
 	}
 	return backfillFailed
 }

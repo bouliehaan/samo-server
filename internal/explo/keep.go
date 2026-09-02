@@ -162,7 +162,7 @@ func (s *Service) keepOne(ctx context.Context, id, root string, dirs []string, r
 	tmp := dest + ".samo-keep-tmp" + filepath.Ext(dest)
 	defer func() { _ = os.Remove(tmp) }()
 
-	if err := s.remuxWithTags(ctx, source, tmp, track); err != nil {
+	if err := s.remuxWithTags(ctx, source, tmp, track, s.keepCoverPath(ctx, id, track)); err != nil {
 		return "", err
 	}
 	info, err := os.Stat(tmp)
@@ -176,10 +176,55 @@ func (s *Service) keepOne(ctx context.Context, id, root string, dirs []string, r
 }
 
 // remuxWithTags copies the audio stream untouched and rewrites the tags around
-// it. `-c copy` means no re-encode, so this is lossless and fast; `-map 0`
-// carries embedded cover art across.
-func (s *Service) remuxWithTags(ctx context.Context, source, dest string, track catalog.MusicTrack) error {
-	args := []string{"-nostdin", "-y", "-loglevel", "error", "-i", source, "-map", "0", "-c", "copy"}
+// it. `-c copy` means no re-encode, so this is lossless and fast.
+func (s *Service) remuxWithTags(ctx context.Context, source, dest string, track catalog.MusicTrack, coverPath string) error {
+	cmd := exec.CommandContext(ctx, s.ffmpegPath, remuxArgs(source, dest, coverPath, track)...)
+	if out, err := cmd.CombinedOutput(); err != nil {
+		detail := strings.TrimSpace(string(out))
+		if len(detail) > 200 {
+			detail = detail[:200]
+		}
+		return fmt.Errorf("remux failed: %s", detail)
+	}
+	return nil
+}
+
+// remuxArgs builds the ffmpeg command line for one kept copy.
+//
+// The cover is the reason this is not just `-map 0`. An explo drop is a
+// stranger's untagged rip: it usually carries NO embedded picture, and the art
+// the app shows is samo's own — fetched from Cover Art Archive during
+// identification and stored as a metadata override pointing at a file under
+// the cover cache. None of that follows the audio. Copying the file and
+// writing only text tags therefore produced a library album with no artwork at
+// all, which is exactly what a kept track is not supposed to be: the whole
+// point of remuxing is that the copy carries samo's effective metadata, and
+// the cover is metadata.
+//
+//   - With a cover in hand, take the audio from input 0 and the picture from
+//     input 1. samo's cover REPLACES any the source carried, because samo's is
+//     what the app displays — and when the source's own art is where samo got
+//     it, they are the same image anyway.
+//   - Without one, `-map 0` keeps whatever the source had, embedded art
+//     included.
+func remuxArgs(source, dest, coverPath string, track catalog.MusicTrack) []string {
+	args := []string{"-nostdin", "-y", "-loglevel", "error", "-i", source}
+	if coverPath != "" {
+		args = append(args, "-i", coverPath, "-map", "0:a", "-map", "1:v")
+	} else {
+		args = append(args, "-map", "0")
+	}
+	args = append(args, "-c", "copy")
+	if coverPath != "" {
+		// Without the disposition the picture is a plain video stream: FLAC
+		// refuses it, and players that accept it show a one-frame video rather
+		// than cover art.
+		args = append(args,
+			"-disposition:v:0", "attached_pic",
+			"-metadata:s:v:0", "title=Album cover",
+			"-metadata:s:v:0", "comment=Cover (front)",
+		)
+	}
 
 	add := func(key, value string) {
 		if strings.TrimSpace(value) != "" {
@@ -205,17 +250,35 @@ func (s *Service) remuxWithTags(ctx context.Context, source, dest string, track 
 	if track.ExternalIDs.MusicBrainzRecordingID != "" {
 		add("musicbrainz_trackid", track.ExternalIDs.MusicBrainzRecordingID)
 	}
-	args = append(args, dest)
+	return append(args, dest)
+}
 
-	cmd := exec.CommandContext(ctx, s.ffmpegPath, args...)
-	if out, err := cmd.CombinedOutput(); err != nil {
-		detail := strings.TrimSpace(string(out))
-		if len(detail) > 200 {
-			detail = detail[:200]
+// keepCoverPath picks the local image to embed in the kept copy: samo's
+// effective cover for the track, whatever its origin — a Cover Art Archive
+// download, a scanner sidecar, extracted embedded art, an admin upload.
+//
+// Generated placeholder tiles are deliberately excluded. A placeholder exists
+// so the Explore grid is never blank while the real art is still being chased;
+// baking one into a library file would outlive that wait and, worse, satisfy
+// the scanner — the album would show a fake tile forever, even once real art
+// landed. An artless file is the honest state, and the next cover pass can
+// still fix the album.
+func (s *Service) keepCoverPath(ctx context.Context, trackID string, track catalog.MusicTrack) string {
+	for _, image := range track.Images {
+		path := strings.TrimSpace(image.Path)
+		if path == "" {
+			continue
 		}
-		return fmt.Errorf("remux failed: %s", detail)
+		info, err := os.Stat(path)
+		if err != nil || info.IsDir() || info.Size() == 0 {
+			continue
+		}
+		if s.isPlaceholderCoverPath(ctx, trackID, path) {
+			continue
+		}
+		return path
 	}
-	return nil
+	return ""
 }
 
 // keepDestination builds <root>/<album artist>/<album>/<NN> - <title>.<ext>,
@@ -371,4 +434,45 @@ func (s *Service) resolveKeptTrackIDs(ctx context.Context, results []KeepResult)
 		case <-time.After(interval):
 		}
 	}
+}
+
+// Keepable reports whether Keep would actually do something for this track:
+// whether it is a drop sitting in the rotating folder, rather than a track
+// already in the library proper.
+//
+// It exists so a surface can ask BEFORE offering the action. Anywhere the
+// answer is no — a server with no explo folder configured, a channel airing a
+// track out of the ordinary library, a live relay with no file behind it at
+// all — the action is meaningless and should not appear; the alternative is
+// offering "Keep in Library" against every song on the radio and letting the
+// endpoint refuse most of them.
+//
+// Free of I/O on purpose. The catalog projection is in memory and the folder
+// list is a lock-guarded slice, so a panel that asks this every time the song
+// changes costs nothing. Every failure answers false rather than an error,
+// because to the only caller there is they all mean the same thing.
+func (s *Service) Keepable(trackID string) bool {
+	// ffmpeg included: Keep remuxes samo's tags and cover into the copy, and
+	// without it the whole batch fails. Offering an action that cannot run is
+	// worse than not offering it.
+	if s == nil || s.db == nil || s.trackByID == nil || s.ffmpegPath == "" || trackID == "" {
+		return false
+	}
+	dirs := s.effectiveDirs()
+	if len(dirs) == 0 {
+		return false
+	}
+	track, err := s.trackByID(trackID)
+	if err != nil {
+		return false
+	}
+	// The first file with a path, matching what keepOne would copy — asking
+	// about one file and keeping another would make this lie in exactly the
+	// case it exists to get right.
+	for _, file := range track.AudioFiles {
+		if file.Path != "" {
+			return underAnyDir(file.Path, dirs)
+		}
+	}
+	return false
 }

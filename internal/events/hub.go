@@ -17,7 +17,36 @@ const (
 	TypeScanJob = "scan-job"
 	// TypeArtistImages carries an artist-image backfill job snapshot.
 	TypeArtistImages = "artist-images"
+	// TypeCatalogChanged says a part of the catalog has changed and any view
+	// of it should be re-read. Unlike the job types above it is not admin
+	// data, and it is served on its own endpoint to every signed-in client.
+	TypeCatalogChanged = "catalog-changed"
 )
+
+// CatalogChange is the payload of TypeCatalogChanged.
+//
+// It is the one event in this package that is not a snapshot, because there is
+// no snapshot to send: "the catalog changed" is a fact about a transition. The
+// package's dropped-event guarantee therefore does not hold for it, and its
+// consumers are built accordingly — every client that acts on this ALSO
+// reconciles on connect and on foreground, so a dropped notification costs
+// latency (the change lands at the next reconcile) and never correctness.
+//
+// Scope and ID are a hint, not a contract: a client that only knows how to
+// refetch everything may ignore both and still be correct.
+type CatalogChange struct {
+	// Scope is the kind of thing that changed — "playlist" or "library".
+	Scope string `json:"scope"`
+	// Action is "updated" or "deleted".
+	Action string `json:"action"`
+	// ID identifies the changed entity where one entity changed. Empty for a
+	// scope-wide change (a scan landing new tracks, say).
+	ID string `json:"id,omitempty"`
+	// Origin is the id of the client that caused the change, when it declared
+	// one via the X-Samo-Client header. A client uses it to ignore the echo of
+	// its own write, which it has already applied locally.
+	Origin string `json:"origin,omitempty"`
+}
 
 // Event is one snapshot, addressed by type.
 type Event struct {

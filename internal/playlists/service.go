@@ -304,6 +304,19 @@ func (s *Service) SetSystemTracks(ctx context.Context, id string, trackIDs []str
 	return s.loadByID(ctx, id)
 }
 
+// Get reads one playlist straight from the database, bypassing the in-memory
+// catalog projection.
+//
+// That bypass is the point: it exists for callers that have just written a row
+// and need the result to INSTALL into the projection, so reading the
+// projection would hand back the pre-write value they are trying to replace.
+func (s *Service) Get(ctx context.Context, id string) (catalog.MusicPlaylist, error) {
+	if s == nil || s.db == nil {
+		return catalog.MusicPlaylist{}, ErrDisabled
+	}
+	return s.loadByID(ctx, id)
+}
+
 func (s *Service) loadByID(ctx context.Context, id string) (catalog.MusicPlaylist, error) {
 	var (
 		item          catalog.MusicPlaylist

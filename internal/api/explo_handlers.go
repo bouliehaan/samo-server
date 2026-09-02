@@ -180,6 +180,14 @@ func (s *Server) postExploKeep(w http.ResponseWriter, r *http.Request) {
 			kept++
 		}
 	}
+	// A kept drop is a new row in the library, and the ids of the album and
+	// artist it landed under are the scanner's to decide — so the scope is the
+	// library rather than a guess at which entities moved. Only announced when
+	// something actually landed: a run that found everything already present
+	// changed nothing and should cost connected clients nothing.
+	if kept > 0 {
+		s.publishCatalogChange(r, "library", "updated", "")
+	}
 	writeJSON(w, http.StatusOK, map[string]any{
 		"alreadyInLibrary": alreadyInLibrary,
 		"failed":           failed,

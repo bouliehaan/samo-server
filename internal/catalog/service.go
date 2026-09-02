@@ -875,3 +875,85 @@ func podcastEpisodeSortStamp(item PodcastEpisode) int64 {
 	}
 	return 0
 }
+
+// UpsertMusicPlaylist installs one playlist into the live projection without
+// rebuilding it.
+//
+// Every playlist write used to go through Replace, which meant re-reading the
+// ENTIRE library out of SQLite and rebuilding eleven maps and ten slice clones
+// — ~6.1s of work on a 100k-track library — so that one row could change. That
+// cost is what made a playlist edit slow enough for both clients to paper over
+// it with optimistic writes, which is where the divergent caches came from.
+//
+// A playlist reaches the projection through exactly three places, and this
+// touches all three:
+//   - musicPlaylists, the ordered slice the list endpoints page over;
+//   - playlistByID, which MusicPlaylist and MusicTracksForPlaylist read (the
+//     track list is derived from TrackIDs at read time, so installing the row
+//     is the whole of making a membership edit visible);
+//   - imageByID, so a cover set on this playlist resolves.
+//
+// The slice is cloned rather than written in place. Playlists number in the
+// hundreds at most, so the clone is nothing, and it keeps the guarantee that
+// no reader can be holding a backing array this write mutates. imageByID is
+// updated in place, as it already is by every other incremental image write in
+// this package.
+func (s *Service) UpsertMusicPlaylist(playlist MusicPlaylist) {
+	if s == nil || strings.TrimSpace(playlist.ID) == "" {
+		return
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	next := slices.Clone(s.musicPlaylists)
+	replaced := false
+	for i, existing := range next {
+		if existing.ID == playlist.ID {
+			next[i] = playlist
+			replaced = true
+			break
+		}
+	}
+	if !replaced {
+		next = append(next, playlist)
+	}
+
+	s.musicPlaylists = next
+	s.playlistByID = make(map[string]MusicPlaylist, len(next))
+	for _, item := range next {
+		s.playlistByID[item.ID] = item
+	}
+	registerCatalogImages(s.imageByID, playlist.Images)
+}
+
+// DeleteMusicPlaylist drops one playlist from the live projection without
+// rebuilding it. Counterpart to UpsertMusicPlaylist; see there for why.
+//
+// The playlist's images are deliberately left in imageByID. Image ids are
+// shared — a cover reached through a playlist may be the same file another
+// entity uses — so unregistering them here could break an unrelated lookup to
+// tidy an entry that costs a map slot and is rebuilt from scratch by the next
+// full reload.
+func (s *Service) DeleteMusicPlaylist(id string) {
+	id = strings.TrimSpace(id)
+	if s == nil || id == "" {
+		return
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	next := make([]MusicPlaylist, 0, len(s.musicPlaylists))
+	for _, existing := range s.musicPlaylists {
+		if existing.ID != id {
+			next = append(next, existing)
+		}
+	}
+	if len(next) == len(s.musicPlaylists) {
+		return
+	}
+
+	s.musicPlaylists = next
+	delete(s.playlistByID, id)
+}

@@ -69,3 +69,49 @@ func (s *Service) SearchAudiobooksText(text string, page catalog.PageRequest) ca
 func (s *Service) SearchPodcastsText(text string, page catalog.PageRequest) catalog.PodcastSearchResults {
 	return s.SearchPodcasts(PodcastQuery{Text: text, Page: page, Sort: SortRelevance}, PlaybackOverlay{})
 }
+
+// UpsertMusicPlaylist installs one playlist into the music index without
+// rebuilding it, mirroring catalog.Service.UpsertMusicPlaylist.
+//
+// The search index is the OTHER thing a playlist write used to rebuild
+// wholesale, alongside the catalog projection — and unlike the catalog it was
+// rebuilt from the same freshly-loaded seed, so the pair cost one full library
+// read between them. Playlists are the only entity in this index with no
+// derived state (no explo filtering, no audio-quality enrichment — see
+// buildMusicIndex), which is what makes a single-row install exact here rather
+// than an approximation of a rebuild.
+func (s *Service) UpsertMusicPlaylist(playlist catalog.MusicPlaylist) {
+	if s == nil || playlist.ID == "" {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	next := append([]catalog.MusicPlaylist(nil), s.music.playlists...)
+	for i, existing := range next {
+		if existing.ID == playlist.ID {
+			next[i] = playlist
+			s.music.playlists = next
+			return
+		}
+	}
+	s.music.playlists = append(next, playlist)
+}
+
+// DeleteMusicPlaylist drops one playlist from the music index without
+// rebuilding it.
+func (s *Service) DeleteMusicPlaylist(id string) {
+	if s == nil || id == "" {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	next := make([]catalog.MusicPlaylist, 0, len(s.music.playlists))
+	for _, existing := range s.music.playlists {
+		if existing.ID != id {
+			next = append(next, existing)
+		}
+	}
+	s.music.playlists = next
+}

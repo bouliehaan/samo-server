@@ -29,6 +29,7 @@ import (
 	"github.com/bouliehaan/samo-server/internal/config"
 	"github.com/bouliehaan/samo-server/internal/covers"
 	"github.com/bouliehaan/samo-server/internal/discovery"
+	"github.com/bouliehaan/samo-server/internal/egress"
 	"github.com/bouliehaan/samo-server/internal/events"
 	"github.com/bouliehaan/samo-server/internal/explo"
 	"github.com/bouliehaan/samo-server/internal/files"
@@ -229,7 +230,27 @@ func main() {
 	catalogService := catalog.NewService(catalogSeed)
 	playbackService := playback.NewWithReadDB(db, readDB)
 	metadataService := metadata.NewDefaultService(cfg.MetadataProviders, cfg.MetadataUserAgent)
-	coverService.SetRemoteOptions(covers.RemoteOptions{})
+	// Artwork downloads are the one outbound path that may leave the VPN, and
+	// only for the hosts named in the closed list — every other request in this
+	// process, the Deezer *lookup* included, keeps the default route. Disabled
+	// unless SAMO_EGRESS_PROXY_URL is set, in which case this is a no-op wrapper
+	// around the same client as before.
+	egressRouter, err := egress.NewRouter(egress.Options{
+		ProxyURL: cfg.EgressProxyURL,
+		Hosts:    cfg.EgressProxyHosts,
+		Logger:   log.Infof,
+	})
+	if err != nil {
+		log.Fatalf("egress proxy configuration: %v", err)
+	}
+	if egressRouter.Enabled() {
+		log.Infof("egress proxy: %s via %s (these hosts bypass the default route; "+
+			"if it is unreachable they fall back to it)",
+			egressRouter.Hosts(), egressRouter.ProxyHost())
+	}
+	coverService.SetRemoteOptions(covers.RemoteOptions{
+		HTTPClient: egress.Client(egressRouter, nil),
+	})
 	metadataApplyService := metadata.NewMetadataApplyServiceWithOptions(db, metadata.MetadataApplyOptions{
 		CoverDownloader: coverService,
 		Logger:          log.Printf,
@@ -358,6 +379,23 @@ func main() {
 		catalogService.Replace(seed)
 		searchService.Rebuild(seed)
 		return nil
+	}
+
+	// The single-playlist path, used instead of reloadCatalog by the handlers
+	// that change exactly one playlist row. reloadCatalog re-reads the entire
+	// library out of SQLite and rebuilds both the catalog projection and the
+	// search index; doing that so one song can join a playlist is what made a
+	// playlist edit take seconds and serialize behind every other edit.
+	//
+	// Both indexes are updated, in that order, because both hold playlists and
+	// a client can reach one through either.
+	applyCatalogPlaylist := func(playlist catalog.MusicPlaylist) {
+		catalogService.UpsertMusicPlaylist(playlist)
+		searchService.UpsertMusicPlaylist(playlist)
+	}
+	removeCatalogPlaylist := func(id string) {
+		catalogService.DeleteMusicPlaylist(id)
+		searchService.DeleteMusicPlaylist(id)
 	}
 
 	exploService := explo.NewService(explo.ServiceOptions{
@@ -624,37 +662,39 @@ func main() {
 	artistImageService.SetEventHub(eventHub)
 
 	handler := api.NewServer(api.ServerOptions{
-		DB:            db,
-		APIToken:      cfg.APIToken,
-		Catalog:       catalogService,
-		Libraries:     libraryService,
-		Playback:      playbackService,
-		Covers:        coverService,
-		Files:         filesService,
-		Thumbnails:    thumbnailService,
-		Metadata:      metadataService,
-		MetadataApply: metadataApplyService,
-		Playlists:     playlistService,
-		PodcastStream: podcastStreamService,
-		PodcastCache:  podcastCacheService,
-		Search:        searchService,
-		Bookmarks:     bookmarksService,
-		Radio:         radioService,
-		Sources:       sourceService,
-		LastFM:        lastfmService,
-		ListenBrainz:  listenbrainzService,
-		Explo:         exploService,
-		ArtistImages:  artistImageService,
-		Events:        eventHub,
-		ArtistMeta:    artistMetaService,
-		Users:         userService,
-		Channels:      channelsService,
-		SamoRadio:     samoRadioService,
-		Loudness:      loudnessService,
-		ListenAddr:    cfg.Addr,
-		ReloadCatalog: reloadCatalog,
-		StartedAt:     time.Now(),
-		BaseContext:   ctx,
+		DB:             db,
+		APIToken:       cfg.APIToken,
+		Catalog:        catalogService,
+		Libraries:      libraryService,
+		Playback:       playbackService,
+		Covers:         coverService,
+		Files:          filesService,
+		Thumbnails:     thumbnailService,
+		Metadata:       metadataService,
+		MetadataApply:  metadataApplyService,
+		Playlists:      playlistService,
+		PodcastStream:  podcastStreamService,
+		PodcastCache:   podcastCacheService,
+		Search:         searchService,
+		Bookmarks:      bookmarksService,
+		Radio:          radioService,
+		Sources:        sourceService,
+		LastFM:         lastfmService,
+		ListenBrainz:   listenbrainzService,
+		Explo:          exploService,
+		ArtistImages:   artistImageService,
+		Events:         eventHub,
+		ArtistMeta:     artistMetaService,
+		Users:          userService,
+		Channels:       channelsService,
+		SamoRadio:      samoRadioService,
+		Loudness:       loudnessService,
+		ListenAddr:     cfg.Addr,
+		ReloadCatalog:  reloadCatalog,
+		ApplyPlaylist:  applyCatalogPlaylist,
+		RemovePlaylist: removeCatalogPlaylist,
+		StartedAt:      time.Now(),
+		BaseContext:    ctx,
 	})
 
 	// Started regardless of whether credentials exist right now: they can be

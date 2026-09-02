@@ -58,7 +58,23 @@ type Config struct {
 	ScanFFprobe            bool
 	ExploDirs              []string
 	AcoustIDAPIKey         string
-	ExploPlaylistName      string
+
+	// EgressProxyURL routes a named few hosts through an outbound CONNECT proxy
+	// instead of the box's default route, for deployments where that default
+	// route is a VPN whose exit address some CDNs refuse. Empty — the default —
+	// means every request goes out the normal way, unchanged.
+	//
+	// Include the shared secret as userinfo:
+	//   http://samo:TOKEN@192.168.1.12:6768
+	//
+	// Anything routed this way does not traverse the VPN, so the host list is
+	// closed and deliberately short. See internal/egress.
+	EgressProxyURL string
+
+	// EgressProxyHosts is the comma-separated host list to route. Empty falls
+	// back to egress.DefaultHosts, which is Deezer's image CDN and nothing else.
+	EgressProxyHosts  string
+	ExploPlaylistName string
 	// LogLevel is the verbosity dial: debug|info|warn|error. Applied before
 	// anything else logs, so a quiet appliance stays quiet from the first line.
 	LogLevel string
@@ -124,6 +140,8 @@ func LoadEnv() (Config, error) {
 		ScanFFprobe:            envBool("SAMO_SCAN_FFPROBE", false),
 		ExploDirs:              envPathList("SAMO_EXPLO_DIRS"),
 		AcoustIDAPIKey:         strings.TrimSpace(os.Getenv("SAMO_ACOUSTID_API_KEY")),
+		EgressProxyURL:         strings.TrimSpace(os.Getenv("SAMO_EGRESS_PROXY_URL")),
+		EgressProxyHosts:       strings.TrimSpace(os.Getenv("SAMO_EGRESS_PROXY_HOSTS")),
 		ExploPlaylistName:      envOrDefault("SAMO_EXPLO_PLAYLIST_NAME", "Explore"),
 		LogLevel:               envOrDefault("SAMO_LOG_LEVEL", "info"),
 	}

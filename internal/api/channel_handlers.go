@@ -367,6 +367,26 @@ func (s *Server) deleteChannelScheduleRule(w http.ResponseWriter, r *http.Reques
 
 // ----- now playing + preview ------------------------------------------
 
+// channelNowAiringResponse is a channel's now-playing plus the one thing a
+// listener can DO about what is on.
+//
+// The extra field is resolved here rather than in internal/channels, which
+// deliberately knows nothing about explo — or about the catalog at all. This is
+// the layer where both already live.
+type channelNowAiringResponse struct {
+	channels.NowPlaying
+	// KeepableTrackID is the airing track when it is an explo drop the next
+	// weekly rotation will delete, and the id to hand to POST /explo/keep.
+	//
+	// One field rather than a flag beside an id, because the two can never
+	// disagree: present means "this can be kept, here is what to keep", absent
+	// means the question does not arise. Absent is the answer for almost
+	// everything — a station whose music comes from the ordinary library, a
+	// podcast, a relayed stream, a server with no explo folder configured, or a
+	// listener who is not an admin and could not keep it anyway.
+	KeepableTrackID string `json:"keepableTrackId,omitempty"`
+}
+
 func (s *Server) channelNowPlaying(w http.ResponseWriter, r *http.Request) {
 	if s.channels == nil {
 		writeError(w, http.StatusNotFound, "channels disabled")
@@ -378,7 +398,33 @@ func (s *Server) channelNowPlaying(w http.ResponseWriter, r *http.Request) {
 		writeChannelError(w, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, np)
+	writeJSON(w, http.StatusOK, channelNowAiringResponse{
+		NowPlaying:      np,
+		KeepableTrackID: s.keepableAiringTrackID(r, np.Current),
+	})
+}
+
+// keepableAiringTrackID names the airing track if keeping it is both possible
+// and permitted, and "" otherwise.
+//
+// Keeping is admin-only (POST /explo/keep says so), so a non-admin is told
+// nothing: the field is the ONLY thing a client keys the action off, and
+// reporting it to someone whose keep would 403 puts a menu entry on screen
+// whose only outcome is an error.
+func (s *Server) keepableAiringTrackID(r *http.Request, current *channels.PlaybackItem) string {
+	const prefix = "track:"
+	service := s.exploService()
+	if service == nil || current == nil || !strings.HasPrefix(current.ItemRef, prefix) {
+		return ""
+	}
+	if !s.isAdmin(r) {
+		return ""
+	}
+	trackID := strings.TrimSpace(strings.TrimPrefix(current.ItemRef, prefix))
+	if !service.Keepable(trackID) {
+		return ""
+	}
+	return trackID
 }
 
 // channelScheduleStatus answers "why is my show not playing".

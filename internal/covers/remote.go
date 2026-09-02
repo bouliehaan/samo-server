@@ -103,7 +103,7 @@ func (s *Service) DownloadFromURL(ctx context.Context, rawURL string) (*catalog.
 	defer resp.Body.Close()
 
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return nil, fmt.Errorf("fetch cover: status %d", resp.StatusCode)
+		return nil, &HTTPStatusError{StatusCode: resp.StatusCode, URL: parsed.String()}
 	}
 	contentType := strings.TrimSpace(resp.Header.Get("Content-Type"))
 	if !strings.HasPrefix(strings.ToLower(contentType), "image/") {

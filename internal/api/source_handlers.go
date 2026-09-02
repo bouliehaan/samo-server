@@ -10,7 +10,9 @@ import (
 	"strings"
 	"time"
 
+	"github.com/bouliehaan/samo-server/internal/catalog"
 	"github.com/bouliehaan/samo-server/internal/covers"
+	"github.com/bouliehaan/samo-server/internal/events"
 	"github.com/bouliehaan/samo-server/internal/log"
 	"github.com/bouliehaan/samo-server/internal/safego"
 	"github.com/bouliehaan/samo-server/internal/sources"
@@ -381,6 +383,56 @@ func (s *Server) reloadCatalogProjection(r *http.Request) error {
 		return nil
 	}
 	return s.reloadCatalog(r.Context())
+}
+
+// applyPlaylistProjection installs one changed playlist into the live catalog
+// and search projections, falling back to a full reload when the incremental
+// hooks are not wired.
+//
+// The full reload re-reads the entire library out of SQLite and rebuilds both
+// indexes so that one row can change — on a large library, seconds of work per
+// added song, serialized behind a global mutex. A playlist row reaches the
+// projection through a bounded, known set of places, so it can simply be put
+// there.
+func (s *Server) applyPlaylistProjection(r *http.Request, playlist catalog.MusicPlaylist) error {
+	if s.applyPlaylist == nil {
+		return s.reloadCatalogProjection(r)
+	}
+	s.applyPlaylist(playlist)
+	return nil
+}
+
+// removePlaylistProjection is the deletion counterpart to
+// applyPlaylistProjection.
+func (s *Server) removePlaylistProjection(r *http.Request, id string) error {
+	if s.removePlaylist == nil {
+		return s.reloadCatalogProjection(r)
+	}
+	s.removePlaylist(id)
+	return nil
+}
+
+// publishCatalogChange tells every connected client that something they may be
+// displaying has changed.
+//
+// Called AFTER the projection is updated, never before: a client that acts on
+// this immediately refetches, and a notification that outruns the projection
+// would hand it the pre-change state and leave it confidently stale — the
+// exact failure this whole mechanism exists to end.
+//
+// The origin id lets the client that made the change ignore its own echo. It
+// has already applied the result locally, so refetching on its own write is
+// pure round trip.
+func (s *Server) publishCatalogChange(r *http.Request, scope, action, id string) {
+	s.events.Publish(events.Event{
+		Type: events.TypeCatalogChanged,
+		Data: events.CatalogChange{
+			Action: action,
+			ID:     id,
+			Origin: strings.TrimSpace(r.Header.Get("X-Samo-Client")),
+			Scope:  scope,
+		},
+	})
 }
 
 func readJSONBody(w http.ResponseWriter, r *http.Request, dst any) bool {

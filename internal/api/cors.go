@@ -26,7 +26,11 @@ func WithCORS(next http.Handler) http.Handler {
 			w.Header().Add("Vary", "Origin")
 		}
 		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, PATCH, DELETE, OPTIONS")
-		w.Header().Set("Access-Control-Allow-Headers", "Authorization, Content-Type, X-Samo-Token, Accept")
+		// X-Samo-Client is the request's origin id, echoed back on the
+		// catalog-change events it causes so the client that made a change can
+		// ignore its own notification. Omitting it here would fail preflight
+		// for a cross-origin browser client and take every request with it.
+		w.Header().Set("Access-Control-Allow-Headers", "Authorization, Content-Type, X-Samo-Token, X-Samo-Client, Accept")
 		w.Header().Set("Access-Control-Expose-Headers", "Content-Type, Content-Length, Content-Disposition, WWW-Authenticate")
 
 		if r.Method == http.MethodOptions {

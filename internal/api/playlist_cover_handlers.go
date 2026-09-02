@@ -136,10 +136,19 @@ func (s *Server) uploadMusicPlaylistCover(w http.ResponseWriter, r *http.Request
 		writeCatalogDeleteError(w, err)
 		return
 	}
-	if err := s.reloadCatalogProjection(r); err != nil {
+	// Read the row back from the database, not the projection: the projection
+	// is what is about to be updated FROM it, so asking it now would return the
+	// playlist without its new cover.
+	updated, err := s.playlistsService().Get(r.Context(), id)
+	if err != nil {
+		writeCatalogError(w, err)
+		return
+	}
+	if err := s.applyPlaylistProjection(r, updated); err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
+	s.publishCatalogChange(r, "playlist", "updated", id)
 
 	item, err := s.catalog.MusicPlaylistForUser(principal.User.ID, id)
 	if err != nil {

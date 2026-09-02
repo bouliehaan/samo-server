@@ -23,10 +23,11 @@ func (s *Server) createMusicPlaylist(w http.ResponseWriter, r *http.Request) {
 		writePlaylistError(w, err)
 		return
 	}
-	if err := s.reloadCatalogProjection(r); err != nil {
+	if err := s.applyPlaylistProjection(r, item); err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
+	s.publishCatalogChange(r, "playlist", "updated", item.ID)
 	writeJSON(w, http.StatusCreated, item)
 }
 
@@ -50,10 +51,14 @@ func (s *Server) importMusicPlaylist(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if !input.DryRun {
+		// Import stays on the full reload: it can create many playlists at
+		// once and resolve tracks as it goes, so there is no single row to
+		// install.
 		if err := s.reloadCatalogProjection(r); err != nil {
 			writeError(w, http.StatusInternalServerError, err.Error())
 			return
 		}
+		s.publishCatalogChange(r, "library", "updated", "")
 	}
 	writeJSON(w, http.StatusOK, result)
 }
@@ -93,10 +98,15 @@ func (s *Server) updateMusicPlaylist(w http.ResponseWriter, r *http.Request) {
 		writePlaylistError(w, err)
 		return
 	}
-	if err := s.reloadCatalogProjection(r); err != nil {
+	// Update already returns the row it just wrote, so the projection is
+	// installed from that rather than re-read — the response and what the next
+	// GET serves are the same object by construction, which is the property a
+	// full reload was being used to buy.
+	if err := s.applyPlaylistProjection(r, item); err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
+	s.publishCatalogChange(r, "playlist", "updated", item.ID)
 	writeJSON(w, http.StatusOK, item)
 }
 
@@ -110,10 +120,11 @@ func (s *Server) deleteMusicPlaylist(w http.ResponseWriter, r *http.Request) {
 		writePlaylistError(w, err)
 		return
 	}
-	if err := s.reloadCatalogProjection(r); err != nil {
+	if err := s.removePlaylistProjection(r, r.PathValue("id")); err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
+	s.publishCatalogChange(r, "playlist", "deleted", r.PathValue("id"))
 	w.WriteHeader(http.StatusNoContent)
 }
 

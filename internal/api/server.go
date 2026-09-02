@@ -78,6 +78,13 @@ type ServerOptions struct {
 	// derived from whatever host a client's request happened to arrive on.
 	ListenAddr    string
 	ReloadCatalog func(context.Context) error
+	// ApplyPlaylist and RemovePlaylist install a single playlist change into
+	// the live projection instead of reloading the whole catalog for it. Both
+	// are optional: when either is nil the affected handler falls back to
+	// ReloadCatalog, so a partially-wired Server (tests, embeddings) stays
+	// correct — only slower.
+	ApplyPlaylist  func(catalog.MusicPlaylist)
+	RemovePlaylist func(string)
 	// DisableInitialInternetRadioProbe turns off the fire-and-forget
 	// post-create probe. Useful for tests that close DB/tempdirs immediately.
 	DisableInitialInternetRadioProbe bool
@@ -122,6 +129,8 @@ type Server struct {
 	listenAddr                       string
 	events                           *events.Hub
 	reloadCatalog                    func(context.Context) error
+	applyPlaylist                    func(catalog.MusicPlaylist)
+	removePlaylist                   func(string)
 	disableInitialInternetRadioProbe bool
 	baseCtx                          context.Context
 	startedAt                        time.Time
@@ -223,6 +232,8 @@ func NewServer(options ServerOptions) http.Handler {
 		loudness:                         options.Loudness,
 		listenAddr:                       strings.TrimSpace(options.ListenAddr),
 		reloadCatalog:                    options.ReloadCatalog,
+		applyPlaylist:                    options.ApplyPlaylist,
+		removePlaylist:                   options.RemovePlaylist,
 		disableInitialInternetRadioProbe: options.DisableInitialInternetRadioProbe,
 		baseCtx:                          options.BaseContext,
 		startedAt:                        options.StartedAt,
@@ -320,6 +331,7 @@ func (s *Server) routes() {
 	s.handleAPI("POST /api/v1/libraries/{id}/scan", s.scanLibrary)
 	s.handleAPI("POST /api/v1/scan", s.scanAllLibraries)
 	s.handleAPI("GET /api/v1/events", s.eventStream)
+	s.handleAPI("GET /api/v1/catalog/events", s.catalogEventStream)
 	s.handleAPI("GET /api/v1/scan/jobs", s.listScanJobs)
 	s.handleAPI("GET /api/v1/scan/jobs/{id}", s.getScanJob)
 	s.handleAPI("POST /api/v1/scan/jobs/{id}/cancel", s.cancelScanJob)

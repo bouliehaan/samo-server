@@ -215,7 +215,7 @@ import { globalScanActionsHTML, libraryKindScanActionsHTML, libraryScanActionsHT
       '<div class="num">' + (running ? "…" : "·") + '</div>' +
       '<div class="main"><div class="name">' + escapeHTML((job.status || "unknown").toUpperCase()) + '</div>' +
       '<div class="meta">' + processed + " / " + total + " ARTISTS · " +
-      (job.found || 0) + " FOUND · " + (job.failed || 0) + " FAILED · " + (job.skipped || 0) + " SKIPPED · STARTED " + formatDate(job.startedAt) +
+      (job.found || 0) + " FOUND · " + (job.failed || 0) + " FAILED · " + (job.blocked || 0) + " BLOCKED · " + (job.skipped || 0) + " SKIPPED · STARTED " + formatDate(job.startedAt) +
       (job.error ? " · " + escapeHTML(job.error) : "") + '</div></div>';
     if (running) {
       html += '<div class="actions"><button class="btn ghost btn-mini" data-action="cancel-artist-images">CANCEL</button></div>';
