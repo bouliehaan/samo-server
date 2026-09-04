@@ -72,9 +72,9 @@ type scoreEnv struct {
 	airtime     AirtimeWindow
 
 	lastByRef     map[string]time.Time
-	lastBySource  map[string]time.Time
-	lastByShow    map[string]time.Time
-	lastByCreator map[string]time.Time
+	lastBySource  map[string]lastAiring
+	lastByShow    map[string]lastAiring
+	lastByCreator map[string]lastAiring
 
 	separationItem    time.Duration
 	separationSource  time.Duration
@@ -275,11 +275,18 @@ func (s scoreEnv) restedness(candidate Candidate) float64 {
 	value := 1.0
 	// restedAt is the gradient: nothing at all when it just aired, full marks
 	// once `full` has gone by.
-	restedAt := func(last time.Time, full time.Duration) {
-		if full <= 0 || last.IsZero() {
+	restedAt := func(last lastAiring, full time.Duration) {
+		// Scaled by the airing's exposure, exactly as the separation rule is.
+		// One set of numbers used by both halves: a rule that waves a show
+		// through because nobody heard it, paired with a preference that keeps
+		// docking it for that same airing, puts the show below the contender
+		// band and the relaxation never fires — which is a ban dressed as a
+		// preference.
+		full = last.heard(full)
+		if full <= 0 || last.At.IsZero() {
 			return
 		}
-		ratio := float64(s.now.Sub(last)) / float64(full)
+		ratio := float64(s.now.Sub(last.At)) / float64(full)
 		if ratio > 1 {
 			ratio = 1
 		}
@@ -292,7 +299,7 @@ func (s scoreEnv) restedness(candidate Candidate) float64 {
 	}
 	// A configured window is a floor you are meant to clear comfortably, so
 	// "rested" means twice it.
-	consider := func(last time.Time, window time.Duration) {
+	consider := func(last lastAiring, window time.Duration) {
 		restedAt(last, 2*window)
 	}
 	if readiness, ok := s.turnReadiness[queueKey(candidate.SourceID, candidate.Ref)]; ok {
@@ -306,7 +313,9 @@ func (s scoreEnv) restedness(candidate Candidate) float64 {
 			value = readiness
 		}
 	} else {
-		consider(s.lastByRef[candidate.Ref], s.separationItem)
+		// Item separation still reads a plain timestamp: it scales by the
+		// candidate's OWN credit, which is the same fact from the other end.
+		consider(lastAiring{At: s.lastByRef[candidate.Ref], Exposure: 1}, s.separationItem)
 	}
 	if candidate.Traits.SharedCreator {
 		// The show, not the source row — otherwise the same programme arriving

@@ -144,11 +144,9 @@ func (s *Server) uploadMusicPlaylistCover(w http.ResponseWriter, r *http.Request
 		writeCatalogError(w, err)
 		return
 	}
-	if err := s.applyPlaylistProjection(r, updated); err != nil {
-		writeError(w, http.StatusInternalServerError, err.Error())
+	if !s.commitPlaylist(w, r, updated) {
 		return
 	}
-	s.publishCatalogChange(r, "playlist", "updated", id)
 
 	item, err := s.catalog.MusicPlaylistForUser(principal.User.ID, id)
 	if err != nil {

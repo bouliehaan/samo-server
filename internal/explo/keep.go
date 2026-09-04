@@ -144,7 +144,26 @@ func (s *Service) keepOne(ctx context.Context, id, root string, dirs []string, r
 		return "", fmt.Errorf("source file is unreadable: %w", err)
 	}
 
-	dest := keepDestination(root, track, filepath.Ext(source))
+	// Identity check BEFORE the path check. The path check below can only see
+	// a copy filed under the exact name this call would compute, and that name
+	// is built from mutable, unnormalized metadata — so a library copy under
+	// any other spelling is invisible to it. "Outlandos d\u2019Amour/3 - Roxanne"
+	// and "Outlandos D'Amour/03 - Roxanne" are the same song by two
+	// apostrophes, one capital letter and a zero; Keep duplicated it. Asking
+	// the catalog what it already HAS, rather than asking the filesystem about
+	// one guessed path, is the check that actually means "already in library".
+	if twinID, twinPath := s.findLibraryTwin(ctx, track); twinID != "" {
+		res.AlreadyInLibrary = true
+		res.LibraryTrackID = twinID
+		res.Path = twinPath
+		return "", nil
+	}
+
+	albumTitle, err := s.keepAlbumTitle(ctx, id, track)
+	if err != nil {
+		return "", err
+	}
+	dest := keepDestination(root, track, albumTitle, filepath.Ext(source))
 	if _, err := os.Stat(dest); err == nil {
 		// Not an error and not a no-op: Path is set so the id resolver below
 		// still hands back the existing library track.
@@ -162,7 +181,7 @@ func (s *Service) keepOne(ctx context.Context, id, root string, dirs []string, r
 	tmp := dest + ".samo-keep-tmp" + filepath.Ext(dest)
 	defer func() { _ = os.Remove(tmp) }()
 
-	if err := s.remuxWithTags(ctx, source, tmp, track, s.keepCoverPath(ctx, id, track)); err != nil {
+	if err := s.remuxWithTags(ctx, source, tmp, track, albumTitle, s.keepCoverPath(ctx, id, track)); err != nil {
 		return "", err
 	}
 	info, err := os.Stat(tmp)
@@ -177,8 +196,8 @@ func (s *Service) keepOne(ctx context.Context, id, root string, dirs []string, r
 
 // remuxWithTags copies the audio stream untouched and rewrites the tags around
 // it. `-c copy` means no re-encode, so this is lossless and fast.
-func (s *Service) remuxWithTags(ctx context.Context, source, dest string, track catalog.MusicTrack, coverPath string) error {
-	cmd := exec.CommandContext(ctx, s.ffmpegPath, remuxArgs(source, dest, coverPath, track)...)
+func (s *Service) remuxWithTags(ctx context.Context, source, dest string, track catalog.MusicTrack, albumTitle, coverPath string) error {
+	cmd := exec.CommandContext(ctx, s.ffmpegPath, remuxArgs(source, dest, coverPath, albumTitle, track)...)
 	if out, err := cmd.CombinedOutput(); err != nil {
 		detail := strings.TrimSpace(string(out))
 		if len(detail) > 200 {
@@ -207,7 +226,7 @@ func (s *Service) remuxWithTags(ctx context.Context, source, dest string, track 
 //     it, they are the same image anyway.
 //   - Without one, `-map 0` keeps whatever the source had, embedded art
 //     included.
-func remuxArgs(source, dest, coverPath string, track catalog.MusicTrack) []string {
+func remuxArgs(source, dest, coverPath, albumTitle string, track catalog.MusicTrack) []string {
 	args := []string{"-nostdin", "-y", "-loglevel", "error", "-i", source}
 	if coverPath != "" {
 		args = append(args, "-i", coverPath, "-map", "0:a", "-map", "1:v")
@@ -233,7 +252,7 @@ func remuxArgs(source, dest, coverPath string, track catalog.MusicTrack) []strin
 	}
 	add("title", track.Title)
 	add("artist", track.DisplayArtist)
-	add("album", track.AlbumTitle)
+	add("album", albumTitle)
 	add("album_artist", firstNonEmpty(track.AlbumArtistNames))
 	if track.TrackNumber > 0 {
 		add("track", fmt.Sprintf("%d", track.TrackNumber))
@@ -282,8 +301,10 @@ func (s *Service) keepCoverPath(ctx context.Context, trackID string, track catal
 }
 
 // keepDestination builds <root>/<album artist>/<album>/<NN> - <title>.<ext>,
-// matching the layout the rest of the library already uses.
-func keepDestination(root string, track catalog.MusicTrack, ext string) string {
+// matching the layout the rest of the library already uses. albumTitle is the
+// RESOLVED name from keepAlbumTitle, never track.AlbumTitle — see there for
+// why the catalog's own value cannot be trusted for a drop.
+func keepDestination(root string, track catalog.MusicTrack, albumTitle, ext string) string {
 	artist := firstNonEmpty(track.AlbumArtistNames)
 	if artist == "" {
 		artist = track.DisplayArtist
@@ -299,7 +320,7 @@ func keepDestination(root string, track catalog.MusicTrack, ext string) string {
 	return filepath.Join(
 		root,
 		safeComponent(artist, "Unknown Artist"),
-		safeComponent(track.AlbumTitle, "Unknown Album"),
+		safeComponent(albumTitle, "Unknown Album"),
 		name+ext,
 	)
 }
@@ -472,6 +493,208 @@ func (s *Service) Keepable(trackID string) bool {
 	for _, file := range track.AudioFiles {
 		if file.Path != "" {
 			return underAnyDir(file.Path, dirs)
+		}
+	}
+	return false
+}
+
+// keepDurationToleranceSeconds is how far two encodings of the same recording
+// may drift and still be treated as the same song. Silence trimming and
+// encoder padding move a track by a second or two; three seconds absorbs that
+// without letting a genuinely different edit collapse into it.
+const keepDurationToleranceSeconds = 3
+
+// findLibraryTwin answers the question Keep actually needs answered before it
+// copies anything: does the library ALREADY have this recording, under any
+// name at all?
+//
+// Two rungs, strongest first:
+//
+//  1. The MusicBrainz recording id. Two files carrying the same recording id
+//     are the same performance by definition, whatever either one is called.
+//  2. Normalized artist + title + duration, for the (common) library tracks
+//     that were never tagged with MusicBrainz ids. Normalization folds away
+//     exactly what defeated the old path check — case, apostrophe style, and
+//     every other punctuation difference — and the duration gate is what keeps
+//     a same-titled remix or live cut from matching the studio version.
+//
+// Explo drops are excluded (is_explo = 0): the drop folder is full of tracks
+// that ARE this track, and matching one of those would report every keep as
+// already done.
+func (s *Service) findLibraryTwin(ctx context.Context, track catalog.MusicTrack) (string, string) {
+	if s.db == nil {
+		return "", ""
+	}
+	if recording := strings.TrimSpace(track.ExternalIDs.MusicBrainzRecordingID); recording != "" {
+		var id, path string
+		err := s.db.QueryRowContext(ctx, `
+			SELECT mt.id, COALESCE(mf.path, '')
+			FROM music_tracks mt
+			LEFT JOIN media_files mf ON mf.track_id = mt.id
+			WHERE mt.is_explo = 0 AND mt.id <> ? AND mt.external_ids_json LIKE ?
+			LIMIT 1`,
+			track.ID, `%"musicBrainzRecordingId":"`+recording+`"%`).Scan(&id, &path)
+		if err == nil && strings.TrimSpace(id) != "" {
+			return id, path
+		}
+		if err != nil && err != sql.ErrNoRows {
+			s.logger("explo: keep: recording-id twin lookup failed for %s: %v", track.ID, err)
+		}
+	}
+
+	title := normalizeKeepIdentity(track.Title)
+	artist := normalizeKeepIdentity(keepArtistName(track))
+	if title == "" || artist == "" || track.DurationSeconds <= 0 {
+		return "", ""
+	}
+	// Narrowed by duration in SQL and decided in Go: the normalization that
+	// makes this correct (Unicode-aware, punctuation-folding) is not something
+	// both supported databases can express, and a duration window is a cheap,
+	// indexed-enough filter that leaves only a few hundred rows to walk.
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT mt.id, mt.title, mt.display_artist, COALESCE(mf.path, '')
+		FROM music_tracks mt
+		LEFT JOIN media_files mf ON mf.track_id = mt.id
+		WHERE mt.is_explo = 0 AND mt.id <> ? AND mt.duration_seconds BETWEEN ? AND ?`,
+		track.ID,
+		track.DurationSeconds-keepDurationToleranceSeconds,
+		track.DurationSeconds+keepDurationToleranceSeconds)
+	if err != nil {
+		s.logger("explo: keep: twin lookup failed for %s: %v", track.ID, err)
+		return "", ""
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var id, candidateTitle, candidateArtist, path string
+		if err := rows.Scan(&id, &candidateTitle, &candidateArtist, &path); err != nil {
+			return "", ""
+		}
+		if normalizeKeepIdentity(candidateTitle) != title {
+			continue
+		}
+		if !keepArtistsMatch(artist, normalizeKeepIdentity(candidateArtist)) {
+			continue
+		}
+		return id, path
+	}
+	return "", ""
+}
+
+// keepArtistName is the artist identity used for twin matching, preferring the
+// album artist so a track credited "A feat. B" still lines up with the same
+// song filed under A.
+func keepArtistName(track catalog.MusicTrack) string {
+	if name := firstNonEmpty(track.AlbumArtistNames); name != "" {
+		return name
+	}
+	if track.DisplayArtist != "" {
+		return track.DisplayArtist
+	}
+	return firstNonEmpty(track.ArtistNames)
+}
+
+// keepArtistsMatch compares two normalized artist strings. Containment counts:
+// the same release is routinely credited "Artist" in one place and
+// "Artist, Guest" in another, and requiring equality would let that difference
+// alone mint a duplicate — which is the whole class of bug this is here to stop.
+func keepArtistsMatch(a, b string) bool {
+	if a == "" || b == "" {
+		return false
+	}
+	return a == b || strings.Contains(a, b) || strings.Contains(b, a)
+}
+
+// normalizeKeepIdentity reduces a title or artist to its letters and digits,
+// lowercased. Everything that distinguishes "Outlandos d’Amour" from
+// "Outlandos D'Amour" — case, and a typographic apostrophe against an ASCII
+// one — is exactly what this removes, because none of it makes two files
+// different recordings.
+func normalizeKeepIdentity(value string) string {
+	var out strings.Builder
+	for _, r := range strings.ToLower(strings.TrimSpace(value)) {
+		if unicode.IsLetter(r) || unicode.IsDigit(r) {
+			out.WriteRune(r)
+		}
+	}
+	return out.String()
+}
+
+// keepAlbumTitle resolves the album a kept copy is filed under.
+//
+// track.AlbumTitle is NOT usable here. For a drop it is whatever the sharer
+// tagged the file with — Soulseek rips come off hits compilations, so it reads
+// "Het Beste Uit 20 Jaar Top 2000" — and for an untagged drop the scanner
+// falls back to the containing folder, which is the rotating drop folder
+// itself. Both were being written into the library as real album names, and a
+// folder name is how "Weekly-Exploration" became an album.
+//
+// The identified release group is the answer, and the ledger already stores it
+// from identification time, so this is one cheap lookup for the name. Falling
+// back to the catalog title is allowed only when it is not a drop folder's
+// name: a MusicBrainz outage should not block keeping a reasonably tagged
+// track, but nothing justifies writing the drop folder to disk.
+func (s *Service) keepAlbumTitle(ctx context.Context, trackID string, track catalog.MusicTrack) (string, error) {
+	groupID := strings.TrimSpace(track.ExternalIDs.MusicBrainzReleaseGroupID)
+	recordingID := strings.TrimSpace(track.ExternalIDs.MusicBrainzRecordingID)
+	if s.db != nil {
+		var ledgerGroup, ledgerRecording string
+		err := s.db.QueryRowContext(ctx, `
+			SELECT COALESCE(musicbrainz_release_group_id, ''), COALESCE(musicbrainz_recording_id, '')
+			FROM explo_tracks WHERE track_id = ?`, trackID).Scan(&ledgerGroup, &ledgerRecording)
+		if err != nil && err != sql.ErrNoRows {
+			s.logger("explo: keep: ledger lookup failed for %s: %v", trackID, err)
+		}
+		if groupID == "" {
+			groupID = strings.TrimSpace(ledgerGroup)
+		}
+		if recordingID == "" {
+			recordingID = strings.TrimSpace(ledgerRecording)
+		}
+	}
+
+	if groupID != "" {
+		s.throttleMusicBrainz(ctx)
+		title, err := fetchReleaseGroupTitle(ctx, s.httpClient, groupID)
+		if err != nil {
+			s.logger("explo: keep: release group title lookup failed for %s: %v", groupID, err)
+		} else if title != "" {
+			return title, nil
+		}
+	}
+	if recordingID != "" {
+		s.throttleMusicBrainz(ctx)
+		refs, err := fetchRecordingReleaseRefs(ctx, s.httpClient, recordingID)
+		if err != nil {
+			s.logger("explo: keep: recording release lookup failed for %s: %v", recordingID, err)
+		} else if refs.ReleaseGroupTitle != "" {
+			return refs.ReleaseGroupTitle, nil
+		}
+	}
+
+	fallback := strings.TrimSpace(track.AlbumTitle)
+	if fallback == "" || s.isDropFolderName(fallback) {
+		return "", fmt.Errorf(
+			"no album identified for this track yet — keeping it now would file it under %q",
+			firstNonEmpty([]string{fallback, "Unknown Album"}))
+	}
+	return fallback, nil
+}
+
+// isDropFolderName reports whether a name is one of the configured drop
+// folders, which is how the scanner names the "album" of a drop that carries
+// no album tag of its own.
+func (s *Service) isDropFolderName(name string) bool {
+	target := normalizeKeepIdentity(name)
+	if target == "" {
+		return false
+	}
+	for _, dir := range s.effectiveDirs() {
+		clean := strings.TrimRight(filepath.Clean(dir), string(filepath.Separator))
+		if clean == "" {
+			continue
+		}
+		if normalizeKeepIdentity(filepath.Base(clean)) == target {
+			return true
 		}
 	}
 	return false

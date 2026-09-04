@@ -33,10 +33,10 @@ type constraintEnv struct {
 	cutAtBoundary bool
 
 	lastByRef     map[string]time.Time
-	lastBySource  map[string]time.Time
-	lastByShow    map[string]time.Time
-	lastByCreator map[string]time.Time
-	lastByFamily  map[string]time.Time
+	lastBySource  map[string]lastAiring
+	lastByShow    map[string]lastAiring
+	lastByCreator map[string]lastAiring
+	lastByFamily  map[string]lastAiring
 
 	airings     map[string]int
 	lastAirings map[string]time.Time
@@ -95,13 +95,44 @@ type constraint struct {
 func standardConstraints() []constraint {
 	return []constraint{
 		{
+			// An episode being saved for the morning must actually be saved.
+			//
+			// holdForListeningDay suppresses the OWED flag on an overnight drop
+			// so the station does not spend it on an empty room — and that was
+			// the whole of the hold. The episode stayed in the candidate set as
+			// ordinary programming, where `recency` is a 0.9-weighted term that
+			// loves the newest thing on the shelf above everything else in the
+			// archive. So the station reliably played the episode it was saving,
+			// hours early, to nobody; the airing earned no credit because the
+			// block was worth none, so the episode was still owed when the day
+			// opened; and the airing then blocked its own show under separation.
+			// That is one episode simultaneously spent, still owed, and in the
+			// way — which is the exact state the station was in at 09:12 on
+			// 2026-09-03, with both S-tier Dude Grows episodes refused for
+			// "this show aired 0s ago" while sitting at credit 0%.
+			//
+			// Relaxed FIRST of everything. It is a rule about timing rather than
+			// about quality, and if the alternative is silence then an episode
+			// going out early is plainly the lesser fault — much more plainly
+			// than, say, running two shows by the same host back to back.
+			Name:       "heldForTheListeningDay",
+			RelaxOrder: 9,
+			Check: func(c Candidate, _ constraintEnv) (bool, string) {
+				if !c.Held {
+					return true, ""
+				}
+				return false, "new, and being saved for the listening day rather than spent now"
+			},
+		},
+		{
 			Name:       "familySeparation",
 			RelaxOrder: 8,
 			Check: func(c Candidate, env constraintEnv) (bool, string) {
 				if c.Family == "" || env.separationFamily <= 0 {
 					return true, ""
 				}
-				return sinceOK(env.lastByFamily[c.Family], env.now, env.separationFamily, c.Family)
+				last := env.lastByFamily[c.Family]
+				return sinceOK(last, env.now, separationFor(c, last, env.separationFamily), c.Family)
 			},
 		},
 		{
@@ -115,7 +146,8 @@ func standardConstraints() []constraint {
 				if fitted, ok := env.separationByCreator[c.Creator]; ok {
 					window = fitted
 				}
-				return sinceOK(env.lastByCreator[c.Creator], env.now, window, c.Creator)
+				last := env.lastByCreator[c.Creator]
+				return sinceOK(last, env.now, separationFor(c, last, window), c.Creator)
 			},
 		},
 		{
@@ -136,10 +168,10 @@ func standardConstraints() []constraint {
 				// is unchanged; the later of the two is taken so the rule can
 				// only ever get stricter than it was.
 				last := env.lastBySource[c.SourceID]
-				if byShow := env.lastByShow[c.Show]; c.Show != "" && byShow.After(last) {
+				if byShow := env.lastByShow[c.Show]; c.Show != "" && byShow.At.After(last.At) {
 					last = byShow
 				}
-				return sinceOK(last, env.now, env.separationSource, "this show")
+				return sinceOK(last, env.now, separationFor(c, last, env.separationSource), "this show")
 			},
 		},
 		{
@@ -192,7 +224,10 @@ func standardConstraints() []constraint {
 						return true, ""
 					}
 				}
-				return sinceOK(env.lastByRef[c.Ref], env.now, window, "this item")
+				// The discount for an airing nobody heard is already applied
+				// above, as the candidate's own credit, so this one does not go
+				// through separationFor as well.
+				return sinceOK(lastAiring{At: env.lastByRef[c.Ref], Exposure: 1}, env.now, window, "this item")
 			},
 		},
 		{
@@ -289,11 +324,17 @@ func standardConstraints() []constraint {
 				// routinely two sources — the episodes on disk and the feed —
 				// and resting one while the other stays eligible is the same as
 				// not rationing at all.
+				// Deliberately the raw airing, not the exposure-scaled one the
+				// separation rules use. Rationing is not a statement about
+				// whether you heard it; it is about what a six-hour episode
+				// costs the rest of the day. That cost is paid whether or not
+				// anybody was listening, so an overnight giant still buys its
+				// show a rest.
 				last, ok := env.lastByShow[c.Show]
-				if !ok || last.IsZero() {
+				if !ok || last.At.IsZero() {
 					return true, ""
 				}
-				if since := env.now.Sub(last); since < env.longFormRest {
+				if since := env.now.Sub(last.At); since < env.longFormRest {
 					return false, fmt.Sprintf("%s long, and this show aired %s ago (a giant rests %s)",
 						round(c.Duration), round(since), round(env.longFormRest))
 				}
@@ -331,8 +372,8 @@ func standardConstraints() []constraint {
 				// preemption nobody heard must not spend a whole day's
 				// allowance. That is a reduction, and it survives.
 				count := env.airings[c.Ref]
-				if c.Owed && int(c.Credit) < count {
-					count = int(c.Credit)
+				if c.Owed {
+					count = chargeableAirings(count, c.Credit)
 				}
 				seconds := int(c.Duration / time.Second)
 				if mayAirAgain(seconds, count) {
@@ -467,11 +508,76 @@ func showQuietAfter(length, ceiling time.Duration) time.Duration {
 
 // sinceOK is every separation rule, which are all the same rule asked about a
 // different attribute.
-func sinceOK(last, now time.Time, window time.Duration, what string) (bool, string) {
-	if last.IsZero() {
+// separationFor is the window a candidate is actually held to, given what the
+// previous airing was worth.
+//
+// Scaled ONLY for something the station owes, and that restriction is the whole
+// design. Two readings of "an airing nobody heard" are both true and they point
+// opposite ways:
+//
+//   - The running order is a fact about the station. Two episodes of one show
+//     back to back is sloppy radio at 06:00 as much as at 18:00, and exposure 0
+//     means "this does not count toward surfacing new episodes", not "there is
+//     definitely nobody there". So ordinary programming keeps the full window.
+//   - What the station OWES you is a fact about you. Refusing to surface a new
+//     episode because its show was on air at four in the morning is the station
+//     spending your subscription on an empty room and then charging you for it.
+//
+// itemSeparation already draws the line in exactly this place, scaling its
+// window by credit for owed candidates and leaving back catalogue alone. This
+// is the same rule one level up, at the source, the show, the creator and the
+// family — which is where it was missing, and where it cost two S-tier episodes
+// on the morning of 2026-09-03.
+func separationFor(c Candidate, last lastAiring, window time.Duration) time.Duration {
+	if !c.Owed {
+		return window
+	}
+	return last.heard(window)
+}
+
+// unheardAiringAllowance is how many airings that reached nobody the station
+// will pay for before an item is capped on raw airtime instead of on credit.
+//
+// Not zero, because the whole point of charging the cap by credit is that a
+// wasted airing must not spend the allowance the listener has not had yet. Not
+// unbounded either: see chargeableAirings.
+const unheardAiringAllowance = 2
+
+// chargeableAirings is how many of today's airings of an item count against its
+// daily cap.
+//
+// Credit may only ever LOWER the count — an airing at 03:00 into a block worth
+// nothing must not spend the one slot a long episode gets in a day. But
+// int(credit) TRUNCATES, so anything owed sitting below a single full credit
+// resolved to zero, mayAirAgain was handed zero, and it returns true
+// unconditionally. The cap did not merely relax for those items; it switched
+// off. An episode that keeps airing where nothing counts never accrues credit,
+// never settles, and could go round all day — which is exactly the "don't play
+// re-runs of episodes same-day" complaint, arrived at from the other end.
+//
+// So the count is the credited one OR the raw one less the allowance,
+// whichever is larger. Every airing still reaches the listener before it is
+// charged, and the airtime an item may burn on an empty room is finite.
+func chargeableAirings(aired int, credit float64) int {
+	count := aired
+	if credited := int(credit); credited < count {
+		count = credited
+	}
+	if unheard := aired - unheardAiringAllowance; unheard > count {
+		count = unheard
+	}
+	return count
+}
+
+// sinceOK is the shared "has enough gone by" test for the separation rules.
+func sinceOK(last lastAiring, now time.Time, window time.Duration, what string) (bool, string) {
+	if last.At.IsZero() {
 		return true, ""
 	}
-	since := now.Sub(last)
+	if window <= 0 {
+		return true, ""
+	}
+	since := now.Sub(last.At)
 	if since >= window {
 		return true, ""
 	}

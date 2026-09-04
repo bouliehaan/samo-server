@@ -22,7 +22,14 @@ const musicbrainzUserAgent = "SamoServer/0.1 ( https://github.com/bouliehaan/sam
 // when the release group itself has none).
 type recordingReleaseRefs struct {
 	ReleaseGroupID string
-	ReleaseIDs     []string
+	// ReleaseGroupTitle is the canonical name of the record this recording
+	// belongs to. It is the ONLY trustworthy album name for an explo drop:
+	// the file's own tag was written by whoever shared it (typically a rip of
+	// a hits compilation), and when there is no tag at all the scanner falls
+	// back to the drop folder's name. Both routinely reached disk as the
+	// album of a kept track.
+	ReleaseGroupTitle string
+	ReleaseIDs        []string
 }
 
 // fetchRecordingReleaseRefs resolves a MusicBrainz recording MBID to its
@@ -55,6 +62,7 @@ func fetchRecordingReleaseRefs(ctx context.Context, client *http.Client, recordi
 			ID           string `json:"id"`
 			ReleaseGroup struct {
 				ID             string   `json:"id"`
+				Title          string   `json:"title"`
 				PrimaryType    string   `json:"primary-type"`
 				SecondaryTypes []string `json:"secondary-types"`
 			} `json:"release-group"`
@@ -79,6 +87,7 @@ func fetchRecordingReleaseRefs(ctx context.Context, client *http.Client, recordi
 		if rank < bestRank {
 			bestRank = rank
 			refs.ReleaseGroupID = rgID
+			refs.ReleaseGroupTitle = strings.TrimSpace(r.ReleaseGroup.Title)
 		}
 	}
 	// Order candidate releases so the chosen release group's own releases
@@ -95,4 +104,44 @@ func fetchRecordingReleaseRefs(ctx context.Context, client *http.Client, recordi
 		}
 	}
 	return refs, nil
+}
+
+// musicbrainzReleaseGroupURL is the MusicBrainz release-group lookup base. A
+// package var so tests can point it at a stub server.
+var musicbrainzReleaseGroupURL = "https://musicbrainz.org/ws/2/release-group/"
+
+// fetchReleaseGroupTitle resolves a release-group MBID to its title.
+//
+// The ledger already stores the release group chosen at identification time,
+// so this is the cheap path when only the NAME is missing — which is the
+// common case for rows identified before album titles were resolved. Returns
+// "" with no error when MusicBrainz has no title for the id; a non-nil error
+// is transient and the caller should keep the existing name rather than
+// treat the album as unnamed.
+func fetchReleaseGroupTitle(ctx context.Context, client *http.Client, releaseGroupMBID string) (string, error) {
+	id := strings.TrimSpace(releaseGroupMBID)
+	if id == "" {
+		return "", nil
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, musicbrainzReleaseGroupURL+id+"?fmt=json", nil)
+	if err != nil {
+		return "", err
+	}
+	req.Header.Set("User-Agent", musicbrainzUserAgent)
+	req.Header.Set("Accept", "application/json")
+	resp, err := client.Do(req)
+	if err != nil {
+		return "", err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return "", fmt.Errorf("musicbrainz release-group lookup %s: status %d", id, resp.StatusCode)
+	}
+	var body struct {
+		Title string `json:"title"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
+		return "", err
+	}
+	return strings.TrimSpace(body.Title), nil
 }

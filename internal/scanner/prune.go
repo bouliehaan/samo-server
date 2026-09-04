@@ -119,6 +119,7 @@ func (s *Scanner) ScanWithProgress(ctx context.Context, libraries []Library, opt
 		return s.ScanWithProgressExternal(ctx, libraries, opts)
 	}
 	s.trackIDMigrations = map[string]string{}
+	s.albumCanonical = map[string]string{}
 	if opts.OnActivity != nil {
 		opts.OnActivity("loading metadata overrides")
 	}

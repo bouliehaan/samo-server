@@ -130,6 +130,9 @@ type Scanner struct {
 	scanSubpaths         []string
 	fileIndex            map[string]indexedFile
 	trackIDMigrations    map[string]string
+	// albumCanonical caches record-identity lookups for this scan (see
+	// canonicalAlbumID); reset alongside trackIDMigrations.
+	albumCanonical map[string]string
 }
 
 func New(db *sql.DB) *Scanner {

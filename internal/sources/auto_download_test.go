@@ -85,7 +85,7 @@ func TestUpdatePodcastFeedAutoDownloadEnabled(t *testing.T) {
 
 	service := New(db)
 	feedURL := "https://example.com/feed.xml"
-	if err := service.savePodcastFeed(ctx, feedURL, parsedPodcastFeed{Title: "Test Show"}); err != nil {
+	if _, err := service.savePodcastFeed(ctx, feedURL, parsedPodcastFeed{Title: "Test Show"}); err != nil {
 		t.Fatal(err)
 	}
 	feedID := podcastFeedID(feedURL)
@@ -119,12 +119,12 @@ func TestSavePodcastFeedPreservesAutoDownloadOnRefresh(t *testing.T) {
 
 	service := New(db)
 	feedURL := "https://example.com/feed.xml"
-	if err := service.savePodcastFeed(ctx, feedURL, parsedPodcastFeed{Title: "Test Show"}, feedSaveOptions{autoDownloadOnInsert: true}); err != nil {
+	if _, err := service.savePodcastFeed(ctx, feedURL, parsedPodcastFeed{Title: "Test Show"}, feedSaveOptions{autoDownloadOnInsert: true}); err != nil {
 		t.Fatal(err)
 	}
 	feedID := podcastFeedID(feedURL)
 
-	if err := service.savePodcastFeed(ctx, feedURL, parsedPodcastFeed{Title: "Renamed Show"}); err != nil {
+	if _, err := service.savePodcastFeed(ctx, feedURL, parsedPodcastFeed{Title: "Renamed Show"}); err != nil {
 		t.Fatal(err)
 	}
 	feed, err := service.GetPodcastFeed(ctx, feedID)

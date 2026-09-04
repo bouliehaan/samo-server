@@ -68,8 +68,10 @@ func (s *Server) postCatalogReload(w http.ResponseWriter, r *http.Request) {
 	if _, ok := s.requireAdmin(w, r); !ok {
 		return
 	}
-	if err := s.reloadCatalogProjection(r); err != nil {
-		writeError(w, http.StatusInternalServerError, err.Error())
+	// This is the end of a deferred-reload batch (see applyMetadata), so it is
+	// where that batch's notification belongs. Library-scoped because a batch
+	// can have touched anything.
+	if !s.commitCatalog(w, r, scopeLibrary, actionUpdated, "", nil) {
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})

@@ -122,6 +122,59 @@ func (d ListeningDay) NextStart(at time.Time) time.Time {
 	return start
 }
 
+// Overlap is how much of [from, to) falls inside the listening day.
+//
+// Exposure is a property of a SPAN, not of an instant, and sampling it at one
+// point is the difference between "nobody heard this" and "they heard most of
+// it". An episode that starts at 07:00 and runs to 09:12 against an 08:00 day
+// plays seventy-two of its hundred and thirty-two minutes to somebody who is
+// awake; asked only about 07:00, the station records that as reaching nobody,
+// leaves the episode owed, and still counts the airing against every rule that
+// reads the play log.
+//
+// Walked calendar day by calendar day rather than in fixed 24-hour steps: a
+// window is a pair of wall-clock times, and on the days the clocks change those
+// are not a fixed distance from midnight. The walk opens a day early because a
+// window that crosses midnight belongs to the previous calendar date and can
+// still be running when the span begins.
+func (d ListeningDay) Overlap(from, to time.Time) time.Duration {
+	if !to.After(from) {
+		return 0
+	}
+	day := d.normalized()
+	loc := from.Location()
+	total := time.Duration(0)
+	cursor := startOfDay(from, loc).AddDate(0, 0, -1)
+	// A span long enough to need this many iterations is a corrupt duration
+	// rather than a programme; stop walking rather than loop on it.
+	for steps := 0; steps < 400 && !cursor.After(to); steps++ {
+		start := wallClock(cursor, day.StartMinute, loc)
+		end := wallClock(cursor, day.EndMinute, loc)
+		if !end.After(start) {
+			// Crosses midnight: awake late, asleep in the small hours.
+			end = wallClock(startOfDay(cursor.AddDate(0, 0, 1), loc), day.EndMinute, loc)
+		}
+		total += overlapping(from, to, start, end)
+		cursor = startOfDay(cursor.AddDate(0, 0, 1), loc)
+	}
+	return total
+}
+
+// overlapping is how much two intervals share.
+func overlapping(aFrom, aTo, bFrom, bTo time.Time) time.Duration {
+	start, end := aFrom, aTo
+	if bFrom.After(start) {
+		start = bFrom
+	}
+	if bTo.Before(end) {
+		end = bTo
+	}
+	if !end.After(start) {
+		return 0
+	}
+	return end.Sub(start)
+}
+
 // holdForListeningDay reports whether a new release should wait rather than be
 // spent on an empty room.
 //

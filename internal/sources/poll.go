@@ -136,21 +136,28 @@ func (s *Service) RunPodcastPollCycle(ctx context.Context, now time.Time) (PollC
 			continue
 		}
 
-		updated, err := s.pollRefreshFeed(ctx, feed.ID)
+		refresh, err := s.pollRefreshFeed(ctx, feed.ID)
 		if err != nil {
 			item.Status = PollStatusError
 			item.Error = err.Error()
 			result.Failed++
 		} else {
-			item.Status = updated.Status
+			item.Status = refresh.Feed.Status
+			item.NewEpisodes = refresh.NewEpisodes
 			result.Updated++
+			// Updated counts feeds POLLED; Changed counts feeds that actually
+			// gained something. Only the second is a reason to rebuild
+			// anything.
+			if refresh.Changed() {
+				result.Changed++
+			}
 		}
 		result.Results = append(result.Results, item)
 	}
 	return result, nil
 }
 
-func (s *Service) pollRefreshFeed(ctx context.Context, id string) (PodcastFeed, error) {
+func (s *Service) pollRefreshFeed(ctx context.Context, id string) (PodcastRefresh, error) {
 	return s.RefreshPodcastFeed(ctx, id)
 }
 
@@ -295,7 +302,15 @@ func (p *Poller) runOnce(ctx context.Context) {
 		p.logger("podcast poll cycle failed: %v", err)
 		return
 	}
-	if result.Updated == 0 && result.Failed == 0 {
+	// Reload only when the catalog actually moved.
+	//
+	// This used to fire on `Updated > 0 || Failed > 0`, where Updated counts
+	// every feed that polled WITHOUT ERROR rather than every feed that gained
+	// an episode. So each feed coming due rebuilt the whole projection — about
+	// 6.1s of work on a 100k-track library, eleven map builds and ten slice
+	// clones — for a feed that had published nothing. A failed poll triggered
+	// it too, and a failure changes nothing at all.
+	if result.Changed == 0 {
 		return
 	}
 	if p.reloadCatalog != nil {

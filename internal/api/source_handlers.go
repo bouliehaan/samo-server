@@ -58,8 +58,7 @@ func (s *Server) attachPodcastShowFeed(w http.ResponseWriter, r *http.Request) {
 		writeSourceError(w, err)
 		return
 	}
-	if err := s.reloadCatalogProjection(r); err != nil {
-		writeError(w, http.StatusInternalServerError, err.Error())
+	if !s.commitCatalog(w, r, scopePodcast, actionUpdated, feed.PodcastID, nil) {
 		return
 	}
 	writeJSON(w, http.StatusCreated, feed)
@@ -78,8 +77,7 @@ func (s *Server) createPodcastFeed(w http.ResponseWriter, r *http.Request) {
 		writeSourceError(w, err)
 		return
 	}
-	if err := s.reloadCatalogProjection(r); err != nil {
-		writeError(w, http.StatusInternalServerError, err.Error())
+	if !s.commitCatalog(w, r, scopePodcast, actionUpdated, feed.PodcastID, nil) {
 		return
 	}
 	writeJSON(w, http.StatusCreated, feed)
@@ -119,9 +117,8 @@ func (s *Server) runPodcastPollCycle(w http.ResponseWriter, r *http.Request) {
 		writeSourceError(w, err)
 		return
 	}
-	if result.Updated > 0 {
-		if err := s.reloadCatalogProjection(r); err != nil {
-			writeError(w, http.StatusInternalServerError, err.Error())
+	if result.Changed > 0 {
+		if !s.commitCatalog(w, r, scopePodcast, actionUpdated, "", nil) {
 			return
 		}
 	}
@@ -132,16 +129,19 @@ func (s *Server) refreshPodcastFeed(w http.ResponseWriter, r *http.Request) {
 	if _, ok := s.requireAdmin(w, r); !ok {
 		return
 	}
-	feed, err := s.sourcesService().RefreshPodcastFeed(r.Context(), r.PathValue("id"))
+	refresh, err := s.sourcesService().RefreshPodcastFeed(r.Context(), r.PathValue("id"))
 	if err != nil {
 		writeSourceError(w, err)
 		return
 	}
-	if err := s.reloadCatalogProjection(r); err != nil {
-		writeError(w, http.StatusInternalServerError, err.Error())
-		return
+	// An explicit refresh that found nothing new changed nothing to tell anyone
+	// about, and rebuilding the projection for it is the waste this reports.
+	if refresh.Changed() {
+		if !s.commitCatalog(w, r, scopePodcast, actionUpdated, refresh.Feed.PodcastID, nil) {
+			return
+		}
 	}
-	writeJSON(w, http.StatusOK, feed)
+	writeJSON(w, http.StatusOK, refresh.Feed)
 }
 
 func (s *Server) deletePodcastFeed(w http.ResponseWriter, r *http.Request) {
@@ -152,8 +152,7 @@ func (s *Server) deletePodcastFeed(w http.ResponseWriter, r *http.Request) {
 		writeSourceError(w, err)
 		return
 	}
-	if err := s.reloadCatalogProjection(r); err != nil {
-		writeError(w, http.StatusInternalServerError, err.Error())
+	if !s.commitCatalog(w, r, scopePodcast, actionDeleted, r.PathValue("id"), nil) {
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)

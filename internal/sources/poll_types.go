@@ -20,19 +20,24 @@ type UpdatePodcastFeedInput struct {
 }
 
 type PollCycleResult struct {
-	Checked int              `json:"checked"`
+	Checked int `json:"checked"`
+	// Updated counts feeds that refreshed without error — including the many
+	// that had nothing new. Changed counts the ones that actually gained an
+	// episode, and is the only one worth rebuilding a projection for.
 	Updated int              `json:"updated"`
+	Changed int              `json:"changed"`
 	Failed  int              `json:"failed"`
 	Skipped int              `json:"skipped"`
 	Results []PollFeedResult `json:"results"`
 }
 
 type PollFeedResult struct {
-	FeedID  string `json:"feedId"`
-	Title   string `json:"title"`
-	Status  string `json:"status"`
-	Error   string `json:"error,omitempty"`
-	Skipped bool   `json:"skipped,omitempty"`
+	FeedID      string `json:"feedId"`
+	Title       string `json:"title"`
+	Status      string `json:"status"`
+	Error       string `json:"error,omitempty"`
+	NewEpisodes int    `json:"newEpisodes,omitempty"`
+	Skipped     bool   `json:"skipped,omitempty"`
 }
 
 type PollSchedule struct {

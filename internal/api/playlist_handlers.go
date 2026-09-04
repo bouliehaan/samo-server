@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"strings"
 
+	"github.com/bouliehaan/samo-server/internal/catalog"
 	"github.com/bouliehaan/samo-server/internal/playlists"
 )
 
@@ -23,11 +24,9 @@ func (s *Server) createMusicPlaylist(w http.ResponseWriter, r *http.Request) {
 		writePlaylistError(w, err)
 		return
 	}
-	if err := s.applyPlaylistProjection(r, item); err != nil {
-		writeError(w, http.StatusInternalServerError, err.Error())
+	if !s.commitPlaylist(w, r, item) {
 		return
 	}
-	s.publishCatalogChange(r, "playlist", "updated", item.ID)
 	writeJSON(w, http.StatusCreated, item)
 }
 
@@ -54,11 +53,9 @@ func (s *Server) importMusicPlaylist(w http.ResponseWriter, r *http.Request) {
 		// Import stays on the full reload: it can create many playlists at
 		// once and resolve tracks as it goes, so there is no single row to
 		// install.
-		if err := s.reloadCatalogProjection(r); err != nil {
-			writeError(w, http.StatusInternalServerError, err.Error())
+		if !s.commitCatalog(w, r, scopeLibrary, actionUpdated, "", nil) {
 			return
 		}
-		s.publishCatalogChange(r, "library", "updated", "")
 	}
 	writeJSON(w, http.StatusOK, result)
 }
@@ -69,18 +66,55 @@ func (s *Server) listMusicPlaylistTracks(w http.ResponseWriter, r *http.Request)
 		writeError(w, http.StatusUnauthorized, "unauthorized")
 		return
 	}
+	page, err := readPage(r)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
 	if _, err := s.catalog.MusicPlaylistForUser(principal.User.ID, r.PathValue("id")); err != nil {
 		writeCatalogError(w, err)
 		return
 	}
-	items := s.catalog.MusicTracksForPlaylist(r.PathValue("id"))
+
+	all := s.catalog.MusicTracksForPlaylist(r.PathValue("id"))
+	items := all
+	// This route accepted `limit` and `offset` and then ignored both, which is
+	// worse than not supporting them: a client walking the offsets got the
+	// WHOLE list back on every page. Both of ours walk it — the TypeScript core
+	// through collectSamoPages and Android through fetchAllPages — so a
+	// 1,095-track playlist was answered three times over, and the caller
+	// concatenated the three into 3,285 rows with every track listed three
+	// times. Measured through samo-proxy: 3 x 450 KB for one playlist opening.
+	//
+	// Paginating only when asked keeps the old contract for a caller that sends
+	// neither parameter, which is what this route has always answered with and
+	// what readPage's 50-item default would silently truncate.
+	if pageRequested(r) {
+		items = catalog.Paginate(all, page).Items
+	}
+
+	// After the slice, not before: the overlay is a per-track database read, so
+	// a paged caller now pays for its page rather than for the whole playlist.
 	var overlayErr error
 	items, overlayErr = s.musicTracksWithUserPlayback(r.Context(), principal.User.ID, items)
 	if overlayErr != nil {
 		writeError(w, http.StatusInternalServerError, overlayErr.Error())
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"items": items, "total": len(items)})
+	// total is the length of the LIST, not of the page — it is what a client
+	// plans its remaining offsets against.
+	writeJSON(w, http.StatusOK, map[string]any{"items": items, "total": len(all)})
+}
+
+// pageRequested reports whether the caller actually asked to be paginated.
+//
+// readPage cannot answer this: it folds "no limit given" and "limit=50" into
+// the same PageRequest, and the difference matters on a route that has always
+// returned everything.
+func pageRequested(r *http.Request) bool {
+	query := r.URL.Query()
+	return strings.TrimSpace(query.Get("limit")) != "" ||
+		strings.TrimSpace(query.Get("offset")) != ""
 }
 
 func (s *Server) updateMusicPlaylist(w http.ResponseWriter, r *http.Request) {
@@ -102,11 +136,9 @@ func (s *Server) updateMusicPlaylist(w http.ResponseWriter, r *http.Request) {
 	// installed from that rather than re-read — the response and what the next
 	// GET serves are the same object by construction, which is the property a
 	// full reload was being used to buy.
-	if err := s.applyPlaylistProjection(r, item); err != nil {
-		writeError(w, http.StatusInternalServerError, err.Error())
+	if !s.commitPlaylist(w, r, item) {
 		return
 	}
-	s.publishCatalogChange(r, "playlist", "updated", item.ID)
 	writeJSON(w, http.StatusOK, item)
 }
 
@@ -120,11 +152,9 @@ func (s *Server) deleteMusicPlaylist(w http.ResponseWriter, r *http.Request) {
 		writePlaylistError(w, err)
 		return
 	}
-	if err := s.removePlaylistProjection(r, r.PathValue("id")); err != nil {
-		writeError(w, http.StatusInternalServerError, err.Error())
+	if !s.commitPlaylistRemoval(w, r, r.PathValue("id")) {
 		return
 	}
-	s.publishCatalogChange(r, "playlist", "deleted", r.PathValue("id"))
 	w.WriteHeader(http.StatusNoContent)
 }
 

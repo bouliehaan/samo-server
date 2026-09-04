@@ -74,7 +74,14 @@ func (s *Scanner) scanMusicFile(ctx context.Context, library Library, root strin
 	}
 	releaseDate := firstTag(tags, "date", "year", "originaldate", "originalyear")
 	albumArtistNames := resolveMusicAlbumArtistNames(tags, albumSidecar)
-	albumID := resolveMusicAlbumID(tags, albumTitle, relAlbumDir, albumArtistNames)
+	albumDisplayArtist := resolveMusicAlbumDisplayArtist(tags, albumSidecar, albumArtistNames)
+	albumVersion := firstTag(tags, "albumversion", "album_version")
+	// Resolved before the track PID below, which is derived from the album id:
+	// joining the record's existing row has to happen first or the track would
+	// be keyed to an album that is about to be discarded.
+	albumID := s.canonicalAlbumID(ctx,
+		resolveMusicAlbumID(tags, albumTitle, relAlbumDir, albumArtistNames),
+		albumDisplayArtist, albumTitle, albumVersion)
 	trackPID := computeTrackPID(library.ID, relPath, tags, albumID)
 	contentHash := contentHashFromProbe(library.ID, relPath, tags, albumID, probe)
 	if len(albumArtistNames) == 0 {
@@ -108,8 +115,8 @@ func (s *Scanner) scanMusicFile(ctx context.Context, library Library, root strin
 		ID:                  albumID,
 		Title:               albumTitle,
 		SortTitle:           firstTag(tags, "albumsort", "album_sort", "sortalbum"),
-		Version:             firstTag(tags, "albumversion", "album_version"),
-		DisplayArtist:       resolveMusicAlbumDisplayArtist(tags, albumSidecar, albumArtistNames),
+		Version:             albumVersion,
+		DisplayArtist:       albumDisplayArtist,
 		AlbumArtistIDs:      artistIDs(albumArtists),
 		AlbumArtistNames:    albumArtistNames,
 		ReleaseDate:         releaseDate,

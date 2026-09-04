@@ -36,8 +36,7 @@ func (s *Server) deleteMusicAlbum(w http.ResponseWriter, r *http.Request) {
 		writeCatalogDeleteError(w, err)
 		return
 	}
-	if err := s.reloadCatalogProjection(r); err != nil {
-		writeError(w, http.StatusInternalServerError, err.Error())
+	if !s.commitCatalog(w, r, scopeAlbum, actionDeleted, r.PathValue("id"), nil) {
 		return
 	}
 	writeJSON(w, http.StatusOK, result)
@@ -60,8 +59,7 @@ func (s *Server) deleteAudiobook(w http.ResponseWriter, r *http.Request) {
 		writeCatalogDeleteError(w, err)
 		return
 	}
-	if err := s.reloadCatalogProjection(r); err != nil {
-		writeError(w, http.StatusInternalServerError, err.Error())
+	if !s.commitCatalog(w, r, scopeAudiobook, actionDeleted, r.PathValue("id"), nil) {
 		return
 	}
 	writeJSON(w, http.StatusOK, result)
@@ -84,8 +82,7 @@ func (s *Server) deletePodcastShow(w http.ResponseWriter, r *http.Request) {
 		writeCatalogDeleteError(w, err)
 		return
 	}
-	if err := s.reloadCatalogProjection(r); err != nil {
-		writeError(w, http.StatusInternalServerError, err.Error())
+	if !s.commitCatalog(w, r, scopePodcast, actionDeleted, r.PathValue("id"), nil) {
 		return
 	}
 	writeJSON(w, http.StatusOK, result)

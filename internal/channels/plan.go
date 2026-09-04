@@ -681,6 +681,37 @@ func (p Plan) listeningDay() (ListeningDay, bool) {
 // model, and the one a station with an unusual shape needs. Everything else
 // falls back to the listening day, which is the same rule the engine used to
 // have hard-coded, now expressed as a default rather than as a law.
+// ExposureOver is ExposureFor asked about a SPAN rather than an instant.
+//
+// The block's own stated exposure is still a scalar, deliberately: which block
+// an item belongs to is settled when it starts, and a rating a person wrote
+// against a block is a statement about that block rather than about a clock.
+// The LISTENING DAY is different — it is a clock — so falling back to it has to
+// measure how much of the item actually lands inside it.
+//
+// This is the difference between a station that says "you were owed this and
+// nobody heard it" about an episode you sat through most of, and one that
+// knows it played you seventy-two minutes.
+func (p Plan) ExposureOver(block Block, from, to time.Time, fallback ListeningDay) float64 {
+	if block.Exposure != nil {
+		return clampExposure(*block.Exposure)
+	}
+	day := fallback
+	if planDay, ok := p.listeningDay(); ok {
+		day = planDay
+	}
+	span := to.Sub(from)
+	if span <= 0 {
+		// No length to average over — a live stream, or an item nobody has
+		// probed. The instant is the best answer there is.
+		if day.Contains(from) {
+			return 1
+		}
+		return 0
+	}
+	return clampExposure(float64(day.Overlap(from, to)) / float64(span))
+}
+
 func (p Plan) ExposureFor(block Block, at time.Time, fallback ListeningDay) float64 {
 	if block.Exposure != nil {
 		value := *block.Exposure

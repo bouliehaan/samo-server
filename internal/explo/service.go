@@ -840,7 +840,7 @@ func (s *Service) identify(ctx context.Context, path string) (identifiedTrack, b
 func (s *Service) identifyWithFallback(ctx context.Context, candidate candidateTrack) (identifiedTrack, bool, error) {
 	match, matched, err := s.identify(ctx, candidate.path)
 	if matched {
-		return match, true, nil
+		return s.resolveAlbumTitle(ctx, match), true, nil
 	}
 
 	fallback, fallbackMatched, fallbackErr := s.identifyByTextSearch(ctx, candidate.path, candidate.title, candidate.artist, candidate.durationSeconds)
@@ -848,9 +848,59 @@ func (s *Service) identifyWithFallback(ctx context.Context, candidate candidateT
 		s.logger("explo: fallback text search failed for %q: %v", candidate.path, fallbackErr)
 	}
 	if fallbackMatched {
-		return fallback, true, nil
+		return s.resolveAlbumTitle(ctx, fallback), true, nil
 	}
 	return identifiedTrack{}, false, err
+}
+
+// resolveAlbumTitle fills in an album name the identifiers left blank.
+//
+// Both paths leave it blank routinely: AcoustID reports no release groups for
+// plenty of recordings, and the text-search fallback deliberately discards a
+// DERIVED release's title rather than call a disco sampler the track's album.
+// Blank used to mean "keep whatever the scanner read off the file", and for an
+// explo drop that is the worst available answer — the file was tagged by
+// whoever shared it (Soulseek rips are overwhelmingly ripped from hits
+// compilations), and an untagged drop falls back to the drop FOLDER's name, so
+// tracks landed in the library under "Weekly-Exploration". A match that knows
+// the recording knows the record: ask MusicBrainz for the release group and
+// use its title.
+//
+// Every failure leaves the match untouched rather than clearing it — a
+// MusicBrainz hiccup should cost an album name, never replace a good one with
+// nothing.
+func (s *Service) resolveAlbumTitle(ctx context.Context, match identifiedTrack) identifiedTrack {
+	if strings.TrimSpace(match.Album) != "" {
+		return match
+	}
+	// The release group is already known often enough (AcoustID reports one
+	// even when its title is unusable) that the single-lookup path is worth
+	// keeping separate from the recording lookup.
+	if group := strings.TrimSpace(match.MusicBrainzReleaseGroupID); group != "" {
+		s.throttleMusicBrainz(ctx)
+		title, err := fetchReleaseGroupTitle(ctx, s.httpClient, group)
+		if err != nil {
+			s.logger("explo: release group title lookup failed for %s: %v", group, err)
+			return match
+		}
+		match.Album = title
+		return match
+	}
+	recording := strings.TrimSpace(match.MusicBrainzRecordingID)
+	if recording == "" {
+		return match
+	}
+	s.throttleMusicBrainz(ctx)
+	refs, err := fetchRecordingReleaseRefs(ctx, s.httpClient, recording)
+	if err != nil {
+		s.logger("explo: recording release lookup failed for %s: %v", recording, err)
+		return match
+	}
+	if refs.ReleaseGroupID != "" {
+		match.MusicBrainzReleaseGroupID = refs.ReleaseGroupID
+	}
+	match.Album = refs.ReleaseGroupTitle
+	return match
 }
 
 // throttleAcoustID blocks until acoustidMinInterval has passed since the

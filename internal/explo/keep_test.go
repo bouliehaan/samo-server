@@ -1,6 +1,7 @@
 package explo
 
 import (
+	"context"
 	"database/sql"
 	"errors"
 	"path/filepath"
@@ -21,7 +22,7 @@ func TestKeepDestinationMatchesLibraryLayout(t *testing.T) {
 		AlbumTitle:       "xx",
 		TrackNumber:      3,
 	}
-	got := keepDestination("/mnt/music", track, ".flac")
+	got := keepDestination("/mnt/music", track, "xx", ".flac")
 	want := filepath.Join("/mnt/music", "The xx", "xx", "03 - Crystalised.flac")
 	if got != want {
 		t.Fatalf("destination = %q, want %q", got, want)
@@ -38,7 +39,7 @@ func TestKeepDestinationPrefersAlbumArtist(t *testing.T) {
 		AlbumTitle:       "Spider-Man: Into the Spider-Verse",
 		TrackNumber:      1,
 	}
-	if dir := filepath.Base(filepath.Dir(filepath.Dir(keepDestination("/m", track, ".mp3")))); dir != "Various Artists" {
+	if dir := filepath.Base(filepath.Dir(filepath.Dir(keepDestination("/m", track, "Spider-Man: Into the Spider-Verse", ".mp3")))); dir != "Various Artists" {
 		t.Fatalf("album artist folder = %q, want %q", dir, "Various Artists")
 	}
 }
@@ -46,7 +47,7 @@ func TestKeepDestinationPrefersAlbumArtist(t *testing.T) {
 // A track with no number should not be prefixed with "00 - ".
 func TestKeepDestinationOmitsMissingTrackNumber(t *testing.T) {
 	track := catalog.MusicTrack{Title: "Untitled Demo", DisplayArtist: "Someone", AlbumTitle: "Demos"}
-	if base := filepath.Base(keepDestination("/m", track, ".flac")); base != "Untitled Demo.flac" {
+	if base := filepath.Base(keepDestination("/m", track, "Demos", ".flac")); base != "Untitled Demo.flac" {
 		t.Fatalf("basename = %q, want %q", base, "Untitled Demo.flac")
 	}
 }
@@ -112,7 +113,7 @@ func containsRune(s, sub string) bool {
 // identification — so a copy that only writes text tags lands in the library
 // with no artwork at all.
 func TestRemuxArgsEmbedsTheCover(t *testing.T) {
-	args := remuxArgs("/drop/x.flac", "/lib/x.flac", "/covers/c.jpg", catalog.MusicTrack{Title: "Roxanne"})
+	args := remuxArgs("/drop/x.flac", "/lib/x.flac", "/covers/c.jpg", "Outlandos d\u2019Amour", catalog.MusicTrack{Title: "Roxanne"})
 	joined := strings.Join(args, " ")
 
 	if !strings.Contains(joined, "-i /drop/x.flac -i /covers/c.jpg") {
@@ -135,7 +136,7 @@ func TestRemuxArgsEmbedsTheCover(t *testing.T) {
 // With no cover to add, the source's own streams must still come across whole
 // — a file that DID carry embedded art must not lose it.
 func TestRemuxArgsWithoutCoverKeepsSourceStreams(t *testing.T) {
-	joined := strings.Join(remuxArgs("/drop/x.flac", "/lib/x.flac", "", catalog.MusicTrack{Title: "Roxanne"}), " ")
+	joined := strings.Join(remuxArgs("/drop/x.flac", "/lib/x.flac", "", "Outlandos d\u2019Amour", catalog.MusicTrack{Title: "Roxanne"}), " ")
 	if !strings.Contains(joined, "-map 0 -c copy") {
 		t.Fatalf("source streams are not mapped whole: %s", joined)
 	}
@@ -147,7 +148,7 @@ func TestRemuxArgsWithoutCoverKeepsSourceStreams(t *testing.T) {
 // The tags samo holds as overrides are the point of remuxing rather than
 // copying, so they have to reach the file alongside the cover.
 func TestRemuxArgsWritesEffectiveTags(t *testing.T) {
-	joined := strings.Join(remuxArgs("/a.flac", "/b.flac", "/c.jpg", catalog.MusicTrack{
+	joined := strings.Join(remuxArgs("/a.flac", "/b.flac", "/c.jpg", "Outlandos D'Amour", catalog.MusicTrack{
 		Title:            "Roxanne",
 		DisplayArtist:    "The Police",
 		AlbumTitle:       "Outlandos D'Amour",
@@ -252,5 +253,85 @@ func TestKeepableRejectsWithoutFFmpeg(t *testing.T) {
 	service.ffmpegPath = ""
 	if service.Keepable("t1") {
 		t.Fatal("without ffmpeg the keep would fail; do not offer it")
+	}
+}
+
+// The duplicate this dedupe exists to stop, byte for byte as it happened:
+// the library already held "Outlandos d’Amour/3 - Roxanne.flac" and Keep wrote
+// "Outlandos D'Amour/03 - Roxanne.flac" beside it. Two apostrophes and a
+// capital letter are not two recordings.
+func TestNormalizeKeepIdentityFoldsApostropheAndCase(t *testing.T) {
+	if got, want := normalizeKeepIdentity("Outlandos d’Amour"), normalizeKeepIdentity("Outlandos D'Amour"); got != want {
+		t.Fatalf("apostrophe style still distinguishes albums: %q vs %q", got, want)
+	}
+	if got, want := normalizeKeepIdentity("So Easy (To Fall in Love)"), normalizeKeepIdentity("So Easy (To Fall In Love)"); got != want {
+		t.Fatalf("title case still distinguishes tracks: %q vs %q", got, want)
+	}
+	// It must still tell genuinely different recordings apart — folding
+	// punctuation is not licence to collapse a remix into its original.
+	if normalizeKeepIdentity("Kids") == normalizeKeepIdentity("Kids (Soulwax remix)") {
+		t.Fatal("a remix must not normalize onto the original")
+	}
+}
+
+// The same release is credited "Artist" in one place and "Artist, Guest" in
+// another; requiring equality would let that alone mint a duplicate.
+func TestKeepArtistsMatchAllowsFeaturedCredits(t *testing.T) {
+	postMalone := normalizeKeepIdentity("Post Malone")
+	withGuest := normalizeKeepIdentity("Post Malone & Swae Lee")
+	if !keepArtistsMatch(postMalone, withGuest) {
+		t.Fatal("a featured credit must still match the primary artist")
+	}
+	if keepArtistsMatch(postMalone, normalizeKeepIdentity("Olivia Dean")) {
+		t.Fatal("unrelated artists must not match")
+	}
+	if keepArtistsMatch("", postMalone) {
+		t.Fatal("an empty artist must never match")
+	}
+}
+
+// The album a kept copy is filed under is the RESOLVED one, never the
+// catalog's — which for a drop is the sharer's compilation tag or the drop
+// folder's own name.
+func TestKeepDestinationUsesResolvedAlbumNotCatalogTitle(t *testing.T) {
+	track := catalog.MusicTrack{
+		Title:            "Kids",
+		DisplayArtist:    "MGMT",
+		AlbumArtistNames: []string{"MGMT"},
+		AlbumTitle:       "Weekly-Exploration", // what the scanner read off the folder
+		TrackNumber:      3,
+	}
+	got := keepDestination("/mnt/music", track, "Oracular Spectacular", ".flac")
+	want := filepath.Join("/mnt/music", "MGMT", "Oracular Spectacular", "03 - Kids.flac")
+	if got != want {
+		t.Fatalf("destination = %q, want %q", got, want)
+	}
+}
+
+// A drop folder name is never an album. Keeping such a track would put
+// "Weekly-Exploration" in the library permanently, so it fails with a reason
+// instead.
+func TestKeepAlbumTitleRefusesTheDropFolderName(t *testing.T) {
+	service := &Service{
+		dirs:   []string{"/mnt/data2tb/Music/explo/Weekly-Exploration"},
+		logger: func(string, ...any) {},
+	}
+	_, err := service.keepAlbumTitle(context.Background(), "track-1", catalog.MusicTrack{
+		Title:      "Kids",
+		AlbumTitle: "Weekly-Exploration",
+	})
+	if err == nil {
+		t.Fatal("keeping a track whose album is the drop folder must fail")
+	}
+	if !strings.Contains(err.Error(), "Weekly-Exploration") {
+		t.Fatalf("error should name what it refused to write, got %v", err)
+	}
+	// A real album tag is still usable when MusicBrainz has nothing to say.
+	got, err := service.keepAlbumTitle(context.Background(), "track-2", catalog.MusicTrack{
+		Title:      "Roxanne",
+		AlbumTitle: "Outlandos d'Amour",
+	})
+	if err != nil || got != "Outlandos d'Amour" {
+		t.Fatalf("got (%q, %v), want (Outlandos d'Amour, nil)", got, err)
 	}
 }

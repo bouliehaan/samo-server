@@ -103,6 +103,21 @@ type MemoryPlay struct {
 	// DurationSeconds is the fallback when the clock says nothing useful, the
 	// same as the stored column.
 	DurationSeconds int
+	// Exposure is how much this airing counted toward reaching anybody, 0..1.
+	//
+	// A pointer for the same reason Block.Exposure is one: nil means nobody
+	// said, and nobody saying has to read as a full airing. Zero is a real and
+	// different answer — "this went out to an empty room" — and the whole point
+	// of the field is that the separation rules can tell those two apart.
+	Exposure *float64
+}
+
+// exposure resolves what this play counted for, defaulting to a full airing.
+func (p MemoryPlay) exposure() float64 {
+	if p.Exposure == nil {
+		return 1
+	}
+	return clampExposure(*p.Exposure)
 }
 
 // NewMemoryHistory builds an empty in-memory history.
@@ -229,6 +244,7 @@ func (h *MemoryHistory) Tail(_ context.Context, window time.Duration, limit int,
 			Category:  entry.Category,
 			StartedAt: entry.StartedAt,
 			Aired:     airedDuration(entry.StartedAt, entry.EndedAt, int64(entry.DurationSeconds), cutoff, now),
+			Exposure:  entry.exposure(),
 		})
 	}
 	return out, nil

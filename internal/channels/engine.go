@@ -271,7 +271,134 @@ func (e *Engine) Decide(ctx context.Context, now time.Time, state ProgramState) 
 			}
 		}
 	}
+	// Nothing the BLOCK can reach will play, and every fallback above is about
+	// a boundary rather than about an empty shelf. Ask the whole station before
+	// giving up, because the alternative is not "the station waits" — it is
+	// dead air on a loop, five seconds at a time, for as long as the condition
+	// lasts.
+	//
+	// A block whose pools have gone empty is the ordinary way here: a feed that
+	// stopped resolving, a folder that got unmounted, every source in the pool
+	// suppressed after failing. None of those are reasons to stop broadcasting
+	// when the station still owns something playable, and all of them are
+	// invisible from the listening end — silence sounds identical to a crash.
+	if item, last, ok := e.playAnythingAtAll(ctx, now, timeline, block, tail, env); ok {
+		next := last.state
+		next.ItemCount++
+		return item, last.decision, next, nil
+	}
 	return PlaybackItem{}, attempt.decision, block.State, errors.New(attempt.decision.Error)
+}
+
+// lastResortPoolID names the synthetic pool that is the whole station.
+//
+// Double-underscored so it cannot collide with a pool somebody wrote: plan
+// validation would reject this as an id, which is the point — it is not part of
+// anybody's plan, it exists for the seconds when their plan cannot answer.
+const lastResortPoolID = "__everything"
+
+// playAnythingAtAll is the floor: something the station owns, rather than
+// nothing at all.
+//
+// Deliberately the LAST thing tried and never a shortcut. It runs only once the
+// ordinary pipeline, the whole relaxation ladder and every boundary fallback
+// have each come back with nothing — which in practice means the block's pools
+// have gone empty, not that the station is merely short of options. A feed that
+// stopped resolving, a folder that got unmounted, every source in the pool
+// suppressed after failing: none of those are reasons to stop broadcasting when
+// the station still owns something playable, and all of them sound exactly like
+// a crash from the listening end.
+//
+// Three tiers, and what each one is allowed to give up is the whole design:
+//
+//  1. The pool the plan NOMINATED for filling gaps, if there is one. Where the
+//     station's owner has said what to reach for, reach for that.
+//  2. Everything the station owns. The block's pools stand down; nothing else
+//     does.
+//  3. The same, accepting that the item will be faded out on a boundary — and
+//     only when there is a gap worth filling.
+//
+// What it never gives up: run limits stay in force, so this cannot extend a
+// ninety-minute talk run to three hours; and an appointment still starts on its
+// own second, because CutAtBoundary caps the item at the boundary and fades it
+// rather than running over. Anything the ladder does give up is recorded, so a
+// station running on its floor is visible rather than merely audible.
+func (e *Engine) playAnythingAtAll(
+	ctx context.Context,
+	now time.Time,
+	timeline Timeline,
+	block BlockDecision,
+	tail []PlayTailEntry,
+	env enumerationContext,
+) (PlaybackItem, selection, bool) {
+	ids := make([]string, 0, len(e.Sources))
+	for _, src := range e.Sources {
+		if src.Enabled && !TraitsFor(src).Interstitial {
+			ids = append(ids, src.ID)
+		}
+	}
+	if len(ids) == 0 {
+		return PlaybackItem{}, selection{}, false
+	}
+
+	// A copy rather than a mutation: the engine is shared across a simulated
+	// run, and a station that quietly kept an extra pool after one bad minute
+	// would be a different station from the one the plan describes.
+	wide := *e
+	wide.Plan = e.Plan
+	wide.Plan.Pools = make([]Pool, 0, len(e.Plan.Pools)+1)
+	wide.Plan.Pools = append(wide.Plan.Pools, e.Plan.Pools...)
+	wide.Plan.Pools = append(wide.Plan.Pools, Pool{ID: lastResortPoolID, SourceIDs: ids})
+
+	// Limits are deliberately left alone. Clearing them here would let the
+	// floor do the one thing the engine says it will never do — run a category
+	// past the limit its owner set — and would do it silently, because a rule
+	// removed before the ladder runs is a rule the record never mentions.
+	open := block
+	open.Block.Pattern = nil
+	open.Block.Breaks = nil
+
+	type tier struct {
+		pool string
+		cut  bool
+		note string
+	}
+	tiers := make([]tier, 0, 3)
+	if e.Plan.UnderrunPool != "" {
+		tiers = append(tiers, tier{
+			pool: e.Plan.UnderrunPool,
+			note: "nothing this block could reach would play, so the station fell back to the pool the plan nominates for gaps",
+		})
+	}
+	tiers = append(tiers, tier{
+		pool: lastResortPoolID,
+		note: "nothing this block could reach would play, so the station fell back to everything it owns",
+	})
+	// Only worth a fade if there is a gap worth filling. Below minBoundaryFill
+	// a faded stub is a fault the listener can hear, and the appointment that
+	// starts a few seconds early is one nobody can.
+	if timeline.Window() >= minBoundaryFill {
+		tiers = append(tiers, tier{
+			pool: lastResortPoolID,
+			cut:  true,
+			note: "nothing would fit the gap whole, so this is faded out on the boundary rather than leaving silence",
+		})
+	}
+
+	for _, attempt := range tiers {
+		candidateBlock := open
+		candidateBlock.Block.Pools = []PoolRef{{Pool: attempt.pool, Weight: 1}}
+		candidateBlock.CutAtBoundary = attempt.cut
+		item, sel := wide.selectIn(ctx, now, timeline, candidateBlock, tail, env)
+		if !sel.ok {
+			continue
+		}
+		sel.decision.Note = strings.TrimSpace(sel.decision.Note + " " + attempt.note)
+		sel.decision.Relaxed = append(sel.decision.Relaxed, "the block's own pools")
+		e.logf("channel %s: %s", e.Channel.ID, attempt.note)
+		return item, sel, true
+	}
+	return PlaybackItem{}, selection{}, false
 }
 
 // bringAppointmentForward opens the next booked block early, at a join where
@@ -526,7 +653,7 @@ func (e *Engine) playQueued(
 		}
 		e.applyDuration(&item, *chosen, intent, timeline, block)
 		item.BlockID = intent.Block.ID
-		item.Exposure = e.Plan.ExposureFor(block.Block, now, e.listeningDay())
+		item.Exposure = e.exposureOf(block.Block, item, now)
 
 		decision := Decision{At: now, ChannelID: e.Channel.ID, Timezone: zoneName(e.location(), now)}
 		decision.applyIntent(intent, timeline)
@@ -597,7 +724,7 @@ func (e *Engine) playBreak(
 	}
 	e.applyDuration(&item, first, intent, timeline, block)
 	item.BlockID = intent.Block.ID
-	item.Exposure = intent.Exposure
+	item.Exposure = e.exposureOf(intent.Block, item, now)
 
 	decision := Decision{At: now, ChannelID: e.Channel.ID, Timezone: zoneName(e.location(), now)}
 	decision.applyIntent(intent, timeline)
@@ -809,6 +936,7 @@ func (e *Engine) selectIn(
 	}
 
 	survivors = dropBackCatalogueOfShowsAwaitingTheirNewEpisode(candidates, survivors, &out.decision)
+	survivors = e.dropBackCatalogueRunningIntoAHeldEpisode(now, candidates, survivors, cenv, &out.decision)
 	survivors = preferOwedWithinCategory(survivors, &out.decision)
 	survivors = preferDueLongForm(survivors, cenv, &out.decision)
 	survivors = preferNoStub(survivors, intent.PlayCeiling, &out.decision)
@@ -838,7 +966,12 @@ func (e *Engine) selectIn(
 		// Stamped at decision time, not looked up when the item ends: the credit
 		// an airing earns belongs to the block that was on air when it STARTED,
 		// and by the time it finishes the station may be somewhere else.
-		item.Exposure = intent.Exposure
+		//
+		// Measured across the item's whole span rather than sampled at its
+		// first second. A ninety-minute episode that begins before the day
+		// opens is mostly heard, and reading the clock once at the moment it
+		// starts is what recorded it as reaching nobody at all.
+		item.Exposure = e.exposureOf(intent.Block, item, now)
 		out.decision.Selected = &SelectedSummary{
 			Ref:      item.ItemRef,
 			Title:    item.Title,
@@ -1074,7 +1207,7 @@ func (e *Engine) constraintEnv(
 		now:               now,
 		window:            intent.Window,
 		cutAtBoundary:     intent.CutAtBoundary,
-		lastByRef:         withEndTimes(lastByRef, tail, func(e PlayTailEntry) string { return e.ItemRef }),
+		lastByRef:         airedAt(withEndTimes(lastByRef, tail, func(e PlayTailEntry) string { return e.ItemRef })),
 		lastBySource:      mergedBySource,
 		lastByShow:        e.lastByShow(mergedBySource),
 		lastByCreator:     e.lastByCreator(tail),
@@ -1131,6 +1264,7 @@ func (e *Engine) scoreEnv(
 	if err != nil {
 		lastBySource = map[string]time.Time{}
 	}
+	airedBySource := withExposure(lastBySource, tail, func(e PlayTailEntry) string { return e.SourceID })
 
 	env := scoreEnv{
 		now:               now,
@@ -1140,8 +1274,8 @@ func (e *Engine) scoreEnv(
 		sourceShare:       e.sourceShares(intent, candidates),
 		airtime:           airtime,
 		lastByRef:         lastByRef,
-		lastBySource:      lastBySource,
-		lastByShow:        e.lastByShow(lastBySource),
+		lastBySource:      airedBySource,
+		lastByShow:        e.lastByShow(airedBySource),
 		lastByCreator:     e.lastByCreator(tail),
 		separationItem:    e.Plan.separationItem(),
 		separationSource:  e.Plan.separationSource(),
@@ -1301,6 +1435,36 @@ func endedAt(entry PlayTailEntry) time.Time {
 	return entry.StartedAt
 }
 
+// lastAiring is when something was last on air and how much that airing counted
+// toward reaching anybody.
+//
+// The two travel together because separation cannot be decided from either one
+// alone. "This show was on forty seconds ago" and "nobody heard it" are both
+// true of an overnight airing, and a rule handed only the timestamp enforces a
+// forty-five-minute cooldown for an event that, by the station's own exposure
+// model, did not happen — which is how a new episode ends up simultaneously
+// owed and blocked.
+type lastAiring struct {
+	At time.Time
+	// Exposure is 0..1. An airing with no recorded exposure is fully binding:
+	// not knowing has to mean "assume they heard it", or every row written
+	// before the column existed would quietly stop separating anything.
+	Exposure float64
+}
+
+// heard is the airing scaled by how much of it landed on anybody, which is the
+// window a separation rule should actually enforce.
+//
+// Mirrors what itemSeparation already does with an obligation's credit: no
+// exposure means no separation, half exposure means half the window, a full
+// airing means the whole thing.
+func (a lastAiring) heard(window time.Duration) time.Duration {
+	if a.At.IsZero() {
+		return 0
+	}
+	return time.Duration(float64(window) * clampExposure(a.Exposure))
+}
+
 // lastByCreator reads the recent running order for who was last on air.
 //
 // The item's own attribution wins where it has one — a playlist is one source
@@ -1308,15 +1472,15 @@ func endedAt(entry PlayTailEntry) time.Time {
 // to the source's creator, which is what a show has.
 // lastByShow folds per-source airings onto the programme they came from, so a
 // show added twice — episodes on disk, plus the RSS feed — rests as one show.
-func (e *Engine) lastByShow(lastBySource map[string]time.Time) map[string]time.Time {
-	out := map[string]time.Time{}
-	for sourceID, at := range lastBySource {
+func (e *Engine) lastByShow(lastBySource map[string]lastAiring) map[string]lastAiring {
+	out := map[string]lastAiring{}
+	for sourceID, airing := range lastBySource {
 		src, ok := e.source(sourceID)
 		if !ok {
 			continue
 		}
-		if show := ShowOf(src); at.After(out[show]) {
-			out[show] = at
+		if show := ShowOf(src); airing.At.After(out[show].At) {
+			out[show] = airing
 		}
 	}
 	return out
@@ -1339,8 +1503,8 @@ func (e *Engine) giantsByShow(bySource map[string]LongFormAiring) map[string]Lon
 	return out
 }
 
-func (e *Engine) lastByCreator(tail []PlayTailEntry) map[string]time.Time {
-	out := map[string]time.Time{}
+func (e *Engine) lastByCreator(tail []PlayTailEntry) map[string]lastAiring {
+	out := map[string]lastAiring{}
 	for _, entry := range tail {
 		creator := strings.TrimSpace(entry.Artist)
 		if creator == "" {
@@ -1353,15 +1517,15 @@ func (e *Engine) lastByCreator(tail []PlayTailEntry) map[string]time.Time {
 		if creator == "" {
 			continue
 		}
-		if ended := endedAt(entry); ended.After(out[creator]) {
-			out[creator] = ended
+		if ended := endedAt(entry); ended.After(out[creator].At) {
+			out[creator] = lastAiring{At: ended, Exposure: clampExposure(entry.Exposure)}
 		}
 	}
 	return out
 }
 
-func (e *Engine) lastByFamily(tail []PlayTailEntry) map[string]time.Time {
-	out := map[string]time.Time{}
+func (e *Engine) lastByFamily(tail []PlayTailEntry) map[string]lastAiring {
+	out := map[string]lastAiring{}
 	for _, entry := range tail {
 		src, ok := e.source(entry.SourceID)
 		if !ok {
@@ -1371,8 +1535,8 @@ func (e *Engine) lastByFamily(tail []PlayTailEntry) map[string]time.Time {
 		if family == "" {
 			continue
 		}
-		if ended := endedAt(entry); ended.After(out[family]) {
-			out[family] = ended
+		if ended := endedAt(entry); ended.After(out[family].At) {
+			out[family] = lastAiring{At: ended, Exposure: clampExposure(entry.Exposure)}
 		}
 	}
 	return out
@@ -1385,19 +1549,71 @@ func (e *Engine) lastByFamily(tail []PlayTailEntry) map[string]time.Time {
 // right answer for "when did this last come round" but the wrong one for
 // separation. The tail knows how long each item ran, so anything recent enough
 // to matter gets measured properly, and the long tail keeps the cheap answer.
-func withEndTimes(byStart map[string]time.Time, tail []PlayTailEntry, key func(PlayTailEntry) string) map[string]time.Time {
-	out := make(map[string]time.Time, len(byStart))
+func withEndTimes(byStart map[string]time.Time, tail []PlayTailEntry, key func(PlayTailEntry) string) map[string]lastAiring {
+	out := make(map[string]lastAiring, len(byStart))
 	for id, at := range byStart {
-		out[id] = at
+		// The aggregate knows nothing about exposure — it is a MAX() over
+		// months, and anything old enough to have fallen out of the tail is far
+		// outside every separation window anyway. Fully binding is the safe
+		// reading, and the tail overwrites it for everything recent.
+		out[id] = lastAiring{At: at, Exposure: 1}
 	}
 	for _, entry := range tail {
 		id := key(entry)
 		if id == "" {
 			continue
 		}
-		if ended := endedAt(entry); ended.After(out[id]) {
-			out[id] = ended
+		if ended := endedAt(entry); ended.After(out[id].At) {
+			out[id] = lastAiring{At: ended, Exposure: clampExposure(entry.Exposure)}
 		}
+	}
+	return out
+}
+
+// airedAt drops the exposure again, for the one rule that must not see it.
+//
+// itemSeparation already discounts an airing nobody heard, from the other end:
+// it scales its window by the obligation's own credit. Handing it the airing's
+// exposure as well would apply the same correction twice.
+func airedAt(airings map[string]lastAiring) map[string]time.Time {
+	out := make(map[string]time.Time, len(airings))
+	for id, airing := range airings {
+		out[id] = airing.At
+	}
+	return out
+}
+
+// withExposure attaches how much each key's most recent airing counted, without
+// touching the times themselves.
+//
+// The scoring half measures restedness from the store's start times while the
+// rules measure separation from end times, and reconciling those is a different
+// change from this one. What both halves must agree on is whether the airing
+// happened to anybody: a rule that waves a show through because nobody heard it
+// and a preference that goes on docking the same show for the same airing is
+// exactly the "below the contender band, a preference is a ban" failure
+// adoptSeparation exists to prevent.
+func withExposure(byTime map[string]time.Time, tail []PlayTailEntry, key func(PlayTailEntry) string) map[string]lastAiring {
+	recent := make(map[string]lastAiring, len(tail))
+	for _, entry := range tail {
+		id := key(entry)
+		if id == "" {
+			continue
+		}
+		if entry.StartedAt.After(recent[id].At) {
+			recent[id] = lastAiring{At: entry.StartedAt, Exposure: clampExposure(entry.Exposure)}
+		}
+	}
+	out := make(map[string]lastAiring, len(byTime))
+	for id, at := range byTime {
+		exposure := 1.0
+		// Only when the tail is describing the SAME airing the aggregate found.
+		// An older, fully-exposed airing must not lend its exposure to a newer
+		// one the tail has not seen, nor the other way round.
+		if seen, ok := recent[id]; ok && !seen.At.Before(at) {
+			exposure = seen.Exposure
+		}
+		out[id] = lastAiring{At: at, Exposure: exposure}
 	}
 	return out
 }
@@ -1603,6 +1819,95 @@ func dropBackCatalogueOfShowsAwaitingTheirNewEpisode(
 			" %d older episodes set aside: the station owes you a new episode of"+
 				" that show and could not fit it, so it is not filling the gap with"+
 				" the same show's back catalogue", dropped))
+	}
+	return out
+}
+
+// plannedSpan is how long an item is expected to occupy the air, which is what
+// its exposure has to be averaged over.
+//
+// The play ceiling wins where there is one: an item cut off at a boundary
+// occupies the air until the boundary and not a second longer, and averaging
+// over its full length would credit it with reaching an audience during minutes
+// it never played.
+func plannedSpan(item PlaybackItem) time.Duration {
+	length := time.Duration(item.DurationSeconds) * time.Second
+	if item.MaxDuration > 0 && (length <= 0 || item.MaxDuration < length) {
+		return item.MaxDuration
+	}
+	return length
+}
+
+// exposureOf is what airing this item, starting now, is worth toward the
+// obligations it satisfies.
+func (e *Engine) exposureOf(block Block, item PlaybackItem, now time.Time) float64 {
+	return e.Plan.ExposureOver(block, now, now.Add(plannedSpan(item)), e.listeningDay())
+}
+
+// dropBackCatalogueRunningIntoAHeldEpisode keeps the run-up to the morning
+// clear of the very show the morning is being saved for.
+//
+// The sibling rule above says: if there is no room for a show's new episode,
+// there is no room for that show. This is the same sentence with the clock as
+// the reason instead of the gap. An overnight drop is HELD rather than aired,
+// so it is not spent on an empty room — and nothing stopped the same block from
+// filling the hours before the day starts with that show's back catalogue. The
+// hold then delivers the new episode directly on top of it: the listener wakes
+// to the tail of a 2023 rerun followed immediately by this morning's episode of
+// the same programme.
+//
+// Seen in the simulator as "Mon 08:00 Top Show: top archive 6 then top episode
+// 0", and on the real station on 2026-09-03, where the run-up to the listening
+// day went to one show's back catalogue and both of that show's new S-tier
+// episodes were then refused for "this show aired 0s ago".
+//
+// Scoped to the collision rather than the night. A show with a held episode is
+// perfectly playable at 02:00 — five hours is not a collision — so this only
+// refuses an item that would still be running, or would have only just
+// finished, when the day opens. Anything else would empty the overnight
+// schedule of the station's best shows precisely because they are the ones
+// publishing.
+func (e *Engine) dropBackCatalogueRunningIntoAHeldEpisode(
+	now time.Time,
+	candidates, survivors []Candidate,
+	env constraintEnv,
+	decision *Decision,
+) []Candidate {
+	held := map[string]bool{}
+	for _, candidate := range candidates {
+		if candidate.Held && candidate.Show != "" {
+			held[candidate.Show] = true
+		}
+	}
+	if len(held) == 0 {
+		return survivors
+	}
+	// Held is only ever set outside the listening day, so this is always the
+	// morning the episodes are waiting for.
+	dayStart := e.listeningDay().NextStart(now.In(e.location()))
+	clear := dayStart.Add(-env.separationSource)
+
+	out := make([]Candidate, 0, len(survivors))
+	dropped := 0
+	for _, candidate := range survivors {
+		// An unknown length reads as "ends now", which is the conservative
+		// answer: it only refuses the item inside the window before the day.
+		if held[candidate.Show] && !candidate.Owed &&
+			now.Add(candidate.Duration).After(clear) {
+			dropped++
+			continue
+		}
+		out = append(out, candidate)
+	}
+	// Never to the point of silence, for the same reason as the rule above: if
+	// that show is all the station has left, it plays.
+	if dropped == 0 || len(out) == 0 {
+		return survivors
+	}
+	if decision != nil {
+		decision.Note = strings.TrimSpace(decision.Note + fmt.Sprintf(
+			" %d items set aside: their show has a new episode waiting for %s and this"+
+				" would still be running into it", dropped, dayStart.Format("15:04")))
 	}
 	return out
 }

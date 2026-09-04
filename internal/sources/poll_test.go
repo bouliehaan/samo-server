@@ -23,7 +23,7 @@ func TestUpdatePodcastFeedPreservesPollScheduleOnRefresh(t *testing.T) {
 
 	service := New(db)
 	feedURL := "https://example.com/feed.xml"
-	if err := service.savePodcastFeed(ctx, feedURL, parsedPodcastFeed{Title: "Test Show"}); err != nil {
+	if _, err := service.savePodcastFeed(ctx, feedURL, parsedPodcastFeed{Title: "Test Show"}); err != nil {
 		t.Fatal(err)
 	}
 	feedID := podcastFeedID(feedURL)
@@ -54,7 +54,7 @@ func TestUpdatePodcastFeedPreservesPollScheduleOnRefresh(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if err := service.savePodcastFeed(ctx, feedURL, parsedPodcastFeed{Title: "Renamed Show"}); err != nil {
+	if _, err := service.savePodcastFeed(ctx, feedURL, parsedPodcastFeed{Title: "Renamed Show"}); err != nil {
 		t.Fatal(err)
 	}
 
@@ -79,7 +79,7 @@ func TestUpdatePodcastFeedPreservesNextPollForMetadataOnlyEdit(t *testing.T) {
 
 	service := New(db)
 	feedURL := "https://example.com/feed.xml"
-	if err := service.savePodcastFeed(ctx, feedURL, parsedPodcastFeed{Title: "Test Show"}); err != nil {
+	if _, err := service.savePodcastFeed(ctx, feedURL, parsedPodcastFeed{Title: "Test Show"}); err != nil {
 		t.Fatal(err)
 	}
 	feedID := podcastFeedID(feedURL)
@@ -109,7 +109,7 @@ func TestListDuePodcastFeedsRespectsNextPollAt(t *testing.T) {
 	futureURL := "https://future.example/feed.xml"
 
 	for _, feedURL := range []string{dueURL, futureURL} {
-		if err := service.savePodcastFeed(ctx, feedURL, parsedPodcastFeed{Title: "Show"}); err != nil {
+		if _, err := service.savePodcastFeed(ctx, feedURL, parsedPodcastFeed{Title: "Show"}); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -141,4 +141,99 @@ func TestListDuePodcastFeedsRespectsNextPollAt(t *testing.T) {
 
 func strPtr(value string) *string {
 	return &value
+}
+
+// --- change detection ----------------------------------------------------
+//
+// These guard the distinction between "we polled a feed" and "the feed
+// changed". Conflating them made every routine poll rebuild the entire catalog
+// projection — ~6.1s on a 100k-track library — for feeds that had published
+// nothing.
+
+func TestSavePodcastFeedCountsOnlyNewEpisodes(t *testing.T) {
+	ctx := context.Background()
+	db := storagetest.Open(t)
+	service := New(db)
+	feedURL := "https://example.com/counted.xml"
+
+	feed := parsedPodcastFeed{
+		Title: "Counted Show",
+		Episodes: []parsedPodcastEpisode{
+			{GUID: "ep-1", Title: "One", EnclosureURL: "https://example.com/1.mp3"},
+			{GUID: "ep-2", Title: "Two", EnclosureURL: "https://example.com/2.mp3"},
+		},
+	}
+
+	added, err := service.savePodcastFeed(ctx, feedURL, feed)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if added != 2 {
+		t.Fatalf("first save added %d episodes, want 2", added)
+	}
+
+	// The same feed again. Nothing is new, so nothing downstream should treat
+	// this as a change.
+	added, err = service.savePodcastFeed(ctx, feedURL, feed)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if added != 0 {
+		t.Fatalf("re-saving an unchanged feed added %d episodes, want 0", added)
+	}
+
+	feed.Episodes = append(feed.Episodes, parsedPodcastEpisode{
+		GUID: "ep-3", Title: "Three", EnclosureURL: "https://example.com/3.mp3",
+	})
+	added, err = service.savePodcastFeed(ctx, feedURL, feed)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if added != 1 {
+		t.Fatalf("a feed with one new episode added %d, want 1", added)
+	}
+}
+
+func TestPollCycleSeparatesPolledFromChanged(t *testing.T) {
+	ctx := context.Background()
+	db := storagetest.Open(t)
+	service := New(db)
+	feedURL := "https://example.com/unchanged.xml"
+
+	if _, err := service.savePodcastFeed(ctx, feedURL, parsedPodcastFeed{
+		Title: "Show",
+		Episodes: []parsedPodcastEpisode{
+			{GUID: "ep-1", Title: "One", EnclosureURL: "https://example.com/1.mp3"},
+		},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	// A cycle over a feed that is not due yet checks nothing and therefore
+	// changes nothing — the cheapest proof that Changed tracks content rather
+	// than activity.
+	result, err := service.RunPodcastPollCycle(ctx, time.Now().UTC().Add(-time.Hour))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Changed != 0 {
+		t.Fatalf("Changed = %d on a cycle that polled nothing, want 0", result.Changed)
+	}
+}
+
+// The reload is the expensive half. It must be driven by Changed, never by
+// Updated (which counts feeds that refreshed without error, including every
+// feed that had nothing new) and never by Failed (which changes nothing at all).
+func TestPollerDoesNotReloadWhenNothingChanged(t *testing.T) {
+	reloads := 0
+	poller := NewPoller(PollerOptions{
+		Sources:       New(storagetest.Open(t)),
+		ReloadCatalog: func(context.Context) error { reloads++; return nil },
+	})
+
+	poller.runOnce(context.Background())
+
+	if reloads != 0 {
+		t.Fatalf("reloaded the catalog %d time(s) for a poll cycle with no changes", reloads)
+	}
 }

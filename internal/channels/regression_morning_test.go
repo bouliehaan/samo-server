@@ -537,8 +537,8 @@ func TestOwedIsJudgedTheSameWayAsWhatWouldReplaceIt(t *testing.T) {
 		{"pod-ryan", "Scott Payne", 230},
 	}
 	owed := []Candidate{}
-	lastSource := map[string]time.Time{}
-	lastCreator := map[string]time.Time{}
+	lastSource := map[string]lastAiring{}
+	lastCreator := map[string]lastAiring{}
 	for _, show := range shows {
 		owed = append(owed, Candidate{
 			Ref: "episode:" + show.id, Title: show.title, SourceID: show.id,
@@ -548,8 +548,8 @@ func TestOwedIsJudgedTheSameWayAsWhatWouldReplaceIt(t *testing.T) {
 		})
 		// Every one of them was on earlier today, which is what tripped the
 		// separation: the station had been playing their back catalogue.
-		lastSource[show.id] = now.Add(-time.Hour)
-		lastCreator[show.id] = now.Add(-time.Hour)
+		lastSource[show.id] = fullyHeard(now.Add(-time.Hour))
+		lastCreator[show.id] = fullyHeard(now.Add(-time.Hour))
 	}
 
 	env := constraintEnv{
@@ -557,7 +557,7 @@ func TestOwedIsJudgedTheSameWayAsWhatWouldReplaceIt(t *testing.T) {
 		window:            99 * time.Minute,
 		lastBySource:      lastSource,
 		lastByCreator:     lastCreator,
-		lastByShow:        map[string]time.Time{},
+		lastByShow:        map[string]lastAiring{},
 		lastByRef:         map[string]time.Time{},
 		airings:           map[string]int{},
 		lastAirings:       map[string]time.Time{},

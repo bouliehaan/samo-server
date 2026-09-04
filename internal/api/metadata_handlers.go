@@ -49,9 +49,12 @@ func (s *Server) applyMetadata(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
+	// A deferred reload leaves the projection deliberately stale so a batch of
+	// applies can pay for one reload at the end. Publishing here would tell
+	// every client to refetch that stale projection, so the explicit
+	// /catalog/reload at the end of the batch is what notifies.
 	if !request.DeferCatalogReload {
-		if err := s.reloadCatalogProjection(r); err != nil {
-			writeError(w, http.StatusInternalServerError, err.Error())
+		if !s.commitCatalog(w, r, scopeMetadata, actionUpdated, metadataTargetID(request), nil) {
 			return
 		}
 	}
@@ -78,8 +81,7 @@ func (s *Server) deleteMetadataOverride(w http.ResponseWriter, r *http.Request) 
 		writeMetadataApplyError(w, err)
 		return
 	}
-	if err := s.reloadCatalogProjection(r); err != nil {
-		writeError(w, http.StatusInternalServerError, err.Error())
+	if !s.commitCatalog(w, r, scopeMetadata, actionUpdated, r.PathValue("targetId"), nil) {
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
@@ -97,8 +99,7 @@ func (s *Server) clearMetadataOverrideFields(w http.ResponseWriter, r *http.Requ
 		writeMetadataApplyError(w, err)
 		return
 	}
-	if err := s.reloadCatalogProjection(r); err != nil {
-		writeError(w, http.StatusInternalServerError, err.Error())
+	if !s.commitCatalog(w, r, scopeMetadata, actionUpdated, r.PathValue("targetId"), nil) {
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
@@ -218,4 +219,10 @@ func writeMetadataError(w http.ResponseWriter, err error) {
 	default:
 		writeError(w, http.StatusInternalServerError, err.Error())
 	}
+}
+
+// metadataTargetID names the item an apply changed, so a client can invalidate
+// just that one rather than everything.
+func metadataTargetID(request metadata.MetadataApplyRequest) string {
+	return strings.TrimSpace(request.TargetID)
 }

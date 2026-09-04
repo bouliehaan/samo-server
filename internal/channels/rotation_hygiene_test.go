@@ -515,10 +515,10 @@ func TestADominantArtistIsNotHeldToTheSameSpacing(t *testing.T) {
 	env := constraintEnv{
 		now:               now,
 		separationCreator: 90 * time.Minute,
-		lastByCreator:     map[string]time.Time{},
+		lastByCreator:     map[string]lastAiring{},
 		lastByRef:         map[string]time.Time{},
-		lastBySource:      map[string]time.Time{},
-		lastByShow:        map[string]time.Time{},
+		lastBySource:      map[string]lastAiring{},
+		lastByShow:        map[string]lastAiring{},
 		airings:           map[string]int{},
 		lastAirings:       map[string]time.Time{},
 		listened:          map[string]bool{},
@@ -541,7 +541,7 @@ func TestADominantArtistIsNotHeldToTheSameSpacing(t *testing.T) {
 	}
 
 	// And Elvis played ten minutes ago is still refused.
-	fitted.lastByCreator["Elvis Presley"] = now.Add(-2 * time.Minute)
+	fitted.lastByCreator["Elvis Presley"] = fullyHeard(now.Add(-2 * time.Minute))
 	for _, rule := range standardConstraints() {
 		if rule.Name != "creatorSeparation" {
 			continue

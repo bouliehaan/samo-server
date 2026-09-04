@@ -47,8 +47,7 @@ func (s *Server) uploadPodcastCover(w http.ResponseWriter, r *http.Request) {
 		writeCatalogDeleteError(w, err)
 		return
 	}
-	if err := s.reloadCatalogProjection(r); err != nil {
-		writeError(w, http.StatusInternalServerError, err.Error())
+	if !s.commitCatalog(w, r, scopePodcast, actionUpdated, id, nil) {
 		return
 	}
 

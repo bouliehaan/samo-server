@@ -15,7 +15,7 @@ func TestSavePodcastFeedPreservesOverriddenTitleInDatabase(t *testing.T) {
 
 	service := New(db)
 	feedURL := "https://example.com/feed.xml"
-	if err := service.savePodcastFeed(ctx, feedURL, parsedPodcastFeed{Title: "Original Show"}); err != nil {
+	if _, err := service.savePodcastFeed(ctx, feedURL, parsedPodcastFeed{Title: "Original Show"}); err != nil {
 		t.Fatal(err)
 	}
 	feedID := podcastFeedID(feedURL)
@@ -26,7 +26,7 @@ func TestSavePodcastFeedPreservesOverriddenTitleInDatabase(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if err := service.savePodcastFeed(ctx, feedURL, parsedPodcastFeed{Title: "RSS Replacement"}); err != nil {
+	if _, err := service.savePodcastFeed(ctx, feedURL, parsedPodcastFeed{Title: "RSS Replacement"}); err != nil {
 		t.Fatal(err)
 	}
 

@@ -232,6 +232,11 @@ func Simulate(ctx context.Context, engine *Engine, opts SimOptions) (SimResult, 
 				_ = engine.Obligations.Credit(ctx, item.ItemRef, credit, ends)
 			}
 		}
+		// The simulator's whole value is that it runs the real rules against a
+		// virtual clock, so it has to write down the same fact the streamer
+		// does: an overnight airing that reached nobody must separate nothing
+		// in the simulated morning either.
+		exposure := item.Exposure
 		history.Record(MemoryPlay{
 			SourceID:        item.SourceID,
 			ItemRef:         item.ItemRef,
@@ -240,6 +245,7 @@ func Simulate(ctx context.Context, engine *Engine, opts SimOptions) (SimResult, 
 			StartedAt:       now,
 			EndedAt:         ends,
 			DurationSeconds: int(length / time.Second),
+			Exposure:        &exposure,
 		})
 		result.Steps = append(result.Steps, SimStep{
 			At: now, Ends: ends, Length: length, Item: item, Decision: decision,

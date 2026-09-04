@@ -91,8 +91,7 @@ func (s *Server) deleteLibrary(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.invalidateMediaRoots()
-	if err := s.reloadCatalogProjection(r); err != nil {
-		writeError(w, http.StatusInternalServerError, err.Error())
+	if !s.commitCatalog(w, r, scopeLibrary, actionDeleted, r.PathValue("id"), nil) {
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
@@ -217,8 +216,7 @@ func (s *Server) removeAllMissingFiles(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if result.Removed > 0 {
-		if err := s.reloadCatalogProjection(r); err != nil {
-			writeError(w, http.StatusInternalServerError, err.Error())
+		if !s.commitCatalog(w, r, scopeLibrary, actionUpdated, r.URL.Query().Get("library_id"), nil) {
 			return
 		}
 	}
@@ -233,8 +231,7 @@ func (s *Server) removeMissingFile(w http.ResponseWriter, r *http.Request) {
 		writeLibraryError(w, err)
 		return
 	}
-	if err := s.reloadCatalogProjection(r); err != nil {
-		writeError(w, http.StatusInternalServerError, err.Error())
+	if !s.commitCatalog(w, r, scopeLibrary, actionUpdated, "", nil) {
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)

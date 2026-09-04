@@ -186,7 +186,11 @@ func (s *Server) postExploKeep(w http.ResponseWriter, r *http.Request) {
 	// something actually landed: a run that found everything already present
 	// changed nothing and should cost connected clients nothing.
 	if kept > 0 {
-		s.publishCatalogChange(r, "library", "updated", "")
+		// The scan that ran above already refreshed the projection, so this
+		// commit only has the notification half left to do.
+		if !s.commitCatalog(w, r, scopeLibrary, actionUpdated, "", noProjectionChange) {
+			return
+		}
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
 		"alreadyInLibrary": alreadyInLibrary,

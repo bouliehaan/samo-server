@@ -114,9 +114,11 @@ func (s *Service) identifyByTextSearch(ctx context.Context, path, tagTitle, tagA
 		derived, _ := result.Raw["releaseIsDerived"].(bool)
 		if releaseTitle, ok := result.Raw["releaseTitle"].(string); ok && !derived {
 			// A derived release's title is a sampler's name, not this
-			// track's album — leave the album title alone in that case
-			// (the scanner's tag, when present, is better than "Ultimate
-			// Disco Vol. 7").
+			// track's album, so it is not taken. Leaving Album blank is not
+			// "keep the scanner's tag" any more: resolveAlbumTitle then asks
+			// MusicBrainz for the recording's own release group. That is a
+			// real answer, where the scanner's tag on a drop is whatever the
+			// sharer typed — usually the very compilation being rejected here.
 			match.Album = strings.TrimSpace(releaseTitle)
 		}
 		if !derived {

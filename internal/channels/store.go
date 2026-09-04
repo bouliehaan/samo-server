@@ -564,10 +564,14 @@ func RecordPlayStart(ctx context.Context, db *sql.DB, channelID string, item Pla
 	// — re-labelling a source tomorrow must not rewrite what last night sounded
 	// like.
 	category := item.Category
+	// Exposure is stamped here rather than looked up later, for the same reason
+	// the obligation's credit is: it belongs to the block that was on air when
+	// this STARTED, and by the time anyone asks the station has moved on.
 	_, err = db.ExecContext(ctx, `
-		INSERT INTO channel_play_log (id, channel_id, source_id, item_ref, title, artist, kind, category, started_at, duration_seconds)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		INSERT INTO channel_play_log (id, channel_id, source_id, item_ref, title, artist, kind, category, started_at, duration_seconds, exposure)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		id, channelID, item.SourceID, item.ItemRef, item.Title, item.Artist, item.Kind, string(category), now, item.DurationSeconds,
+		clampExposure(item.Exposure),
 	)
 	if err != nil {
 		return "", fmt.Errorf("record play start: %w", err)
@@ -805,6 +809,27 @@ type PlayTailEntry struct {
 	// news bulletins and one five-hour podcast are both "ten items" and are not
 	// remotely the same amount of somebody talking.
 	Aired time.Duration
+	// Exposure is how much this airing counted toward reaching anybody, 0..1,
+	// as the block that started it rated the moment. Separation asks how long
+	// ago the listener heard this show, and an airing into an empty room is not
+	// a time they heard it — so the windows scale by this rather than treating
+	// every row in the log as an equal event.
+	Exposure float64
+}
+
+// clampExposure keeps a stored exposure inside 0..1.
+//
+// Defensive rather than decorative: the column is written from a plan field a
+// person edits, and a separation window scaled by 1.4 or by -1 is a rule nobody
+// can reason about.
+func clampExposure(value float64) float64 {
+	if value < 0 {
+		return 0
+	}
+	if value > 1 {
+		return 1
+	}
+	return value
 }
 
 // PlayLogTail returns the channel's most recent plays in reverse order.
@@ -832,7 +857,7 @@ func PlayLogTail(ctx context.Context, db *sql.DB, channelID string, window time.
 	// it over the line is usually the one that started before the window did.
 	since := cutoff.Format(time.RFC3339)
 	rows, err := db.QueryContext(ctx, `
-		SELECT source_id, item_ref, artist, category, started_at, ended_at, duration_seconds FROM channel_play_log
+		SELECT source_id, item_ref, artist, category, started_at, ended_at, duration_seconds, exposure FROM channel_play_log
 		WHERE channel_id = ? AND source_id <> ''
 		  AND (started_at > ? OR ended_at = '' OR ended_at > ?)
 		ORDER BY started_at DESC
@@ -847,7 +872,8 @@ func PlayLogTail(ctx context.Context, db *sql.DB, channelID string, window time.
 	for rows.Next() {
 		var sourceID, itemRef, artist, category, startedAt, endedAt string
 		var durationSeconds int64
-		if err := rows.Scan(&sourceID, &itemRef, &artist, &category, &startedAt, &endedAt, &durationSeconds); err != nil {
+		var exposure float64
+		if err := rows.Scan(&sourceID, &itemRef, &artist, &category, &startedAt, &endedAt, &durationSeconds, &exposure); err != nil {
 			return nil, fmt.Errorf("scan play log tail: %w", err)
 		}
 		began := parseStoredTime(startedAt)
@@ -858,6 +884,7 @@ func PlayLogTail(ctx context.Context, db *sql.DB, channelID string, window time.
 			Category:  storedCategory(category),
 			StartedAt: began,
 			Aired:     airedDuration(began, parseStoredTime(endedAt), durationSeconds, cutoff, now),
+			Exposure:  clampExposure(exposure),
 		})
 	}
 	return out, rows.Err()

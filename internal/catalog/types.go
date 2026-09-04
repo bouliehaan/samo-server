@@ -122,7 +122,26 @@ type AudioFile struct {
 	SizeBytes          int64      `json:"sizeBytes,omitempty"`
 	ModifiedAt         *time.Time `json:"modifiedAt,omitempty"`
 	Checksum           string     `json:"checksum,omitempty"`
-	EmbeddedTags       Tags       `json:"embeddedTags,omitempty"`
+	// EmbeddedTags is the raw ID3/Vorbis dump for this file. It is server-side
+	// working data — fileDiscTrack reads it to order a multi-file audiobook —
+	// and it is deliberately NOT serialized.
+	//
+	// It used to be, and it was the largest single thing this server put on the
+	// wire. Measured on a real library: /api/v1/podcasts returned 4.7 MB, of
+	// which 4.0 MB was embedded tags on 646 files belonging to two local
+	// shows — 86% of the response, to render a list of 32 show titles. The same
+	// dump rode along on every audiobook and track list.
+	//
+	// No client has ever read it, and the Android one already knows:
+	// SamoCatalogSync walks each response and deletes every embeddedTags object
+	// it finds, with a test asserting the key "is never read anywhere in the
+	// repo". That is a client paying for the bytes over the uplink and then
+	// throwing them away — the fix belongs at the end that sends them.
+	//
+	// Storage is unaffected. media_files keeps its own embedded_tags_json
+	// column, written from this field and read straight back into it; neither
+	// direction goes through this struct's JSON tags.
+	EmbeddedTags Tags `json:"-"`
 }
 
 type Tags map[string][]string

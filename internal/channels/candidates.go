@@ -55,6 +55,14 @@ type Candidate struct {
 	// Separation is scaled by it: an airing nobody heard is not a time you
 	// heard it.
 	Credit float64
+	// Held marks a new episode the station owes but is deliberately saving for
+	// the listening day, rather than spending it on an empty room.
+	//
+	// Owed and Held are mutually exclusive by construction and mean different
+	// things to the running order: Owed is "play this now", Held is "this is
+	// coming the moment the day starts, so do not do anything tonight that
+	// would get in its way".
+	Held   bool
 	Traits Traits
 
 	source  Source
@@ -284,7 +292,9 @@ func (e *Engine) enumeratePodcast(ctx context.Context, src Source, base Candidat
 		if obligation, ok := env.owed.Get(candidate.Ref); ok && obligation.Pending() {
 			// Saving an overnight drop for the morning is the one thing the
 			// queue cannot decide on its own: it is a question about NOW.
-			if !holdForListeningDay(candidate.Published, env.now, env.day, freshFor) {
+			if holdForListeningDay(candidate.Published, env.now, env.day, freshFor) {
+				candidate.Held = true
+			} else {
 				candidate.Owed = true
 				candidate.Urgency = obligation.Urgency(env.now, freshness)
 				candidate.Credit = obligation.Credit
