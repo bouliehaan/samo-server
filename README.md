@@ -1,85 +1,102 @@
-# Samo Server
+# samo-server
 
-A unified self-hosted listening server for music, audiobooks, podcasts, and radio.
+A self-hosted media server for music, audiobooks, podcasts and radio — one
+library, one queue, one history. Not a wrapper around Navidrome or
+Audiobookshelf: the four media kinds are first-class domains that share
+playback state, recents and browsing.
 
-Samo Server is not a Navidrome wrapper.
-Samo Server is not an Audiobookshelf wrapper.
-Samo Server is a native media server built around unified listening history, playback state, devices, queues, and cross-media browsing.
+The clients live in [bouliehaan/samo](https://github.com/bouliehaan/samo) —
+Android and desktop.
 
-## Initial scope
+## Install
 
-V0 focuses on:
-
-- running as a small Ubuntu-friendly Go server
-- PostgreSQL-backed metadata storage
-- running a deterministic 24/7 radio station from local media
-- adding local library folders
-- adding podcast RSS feeds
-- adding internet radio stream URLs
-- optional user-initiated metadata lookup providers
-- scanning music files
-- exposing a Samo-native API
-- streaming original audio files
-- accepting playback/scrobble events
-- powering Samo-native recents
-
-## First module: Samo Radio
-
-The first server module is a 24/7 station that rotates configured podcasts, old radio, commercials, music, or other local audio into a streamable endpoint.
-
-- Configure stations with `SAMO_RADIO_CONFIG` or the default `data/radio.json`.
-- Open `/radio/{id}/playlist.m3u` in an audio client.
-- Use `/api/v1/radio/stations/{id}/now` and `/api/v1/radio/stations/{id}/schedule` for Samo-native clients.
-
-See [docs/radio.md](docs/radio.md) for the config format and current stream behavior.
-
-## API
-
-Samo exposes a native `/api/v1` surface for music, audiobooks, podcasts, radio, and catalog overview data. See [docs/api.md](docs/api.md) for the first route map and metadata contracts.
-
-Music, audiobooks, podcasts, and radio are independent first-class domains. Each has its own URL namespace (`/api/v1/music`, `/api/v1/audiobooks`, `/api/v1/podcasts`, `/api/v1/radio`) and its own DTOs — there is no shared "shelf" / longform parent. Podcast RSS feeds are added through `/api/v1/podcasts/feeds`. Internet radio streams are added through `/api/v1/internet-radio/stations` and get public M3U/redirect links for audio clients.
-
-External metadata lookup is disabled by default and can be enabled later with `SAMO_METADATA_PROVIDERS`. See [docs/metadata.md](docs/metadata.md) for provider names and search routes.
-
-Last.fm scrobbling is configured with `SAMO_LASTFM_API_KEY` and `SAMO_LASTFM_SHARED_SECRET`. See [docs/lastfm.md](docs/lastfm.md) for account linking and playback/scrobble behavior.
-
-## Storage and scanning
-
-Samo stores catalog metadata in **PostgreSQL**, pointed at with `SAMO_DB_DSN=postgres://...` (the bundled `docker compose` sets this up for you). It scans configured music, audiobook, and podcast folders using bundled `ffmpeg`/`ffprobe` on Ubuntu. See [docs/install-ubuntu.md](docs/install-ubuntu.md) for deployment layout and [docs/storage-and-scanning.md](docs/storage-and-scanning.md) for scanner environment variables.
-
-Schema changes are plain SQL files in `migrations/postgres/`, applied automatically at startup; add a new numbered file, never edit an old one.
-
-## Running with Docker + Postgres
-
-The whole stack — server plus Postgres — runs in two containers on a Linux host. `./install.sh` opens the firewall ports and boots everything:
+Linux host with Docker. Two containers: the server and its Postgres.
 
 ```bash
+git clone https://github.com/bouliehaan/samo-server.git
+cd samo-server
+cp .env.example .env      # set POSTGRES_PASSWORD and your media path
 sudo ./install.sh
-# open http://<this machine's LAN IP>:6969
 ```
 
-The server runs with Docker **host networking**, so it listens on the host directly — HTTP on `6969/tcp` and UDP autodiscovery on `7360/udp`. That is what makes discovery work: LAN broadcasts (`"Who is SamoServer?"`) reach the listener and it replies with the host's real LAN IP. Docker's default bridge can't do this — it drops LAN broadcasts and would advertise an unreachable container-internal address. Postgres stays in its own container, published only on `127.0.0.1`, never exposed to the LAN.
+Then open `http://<this-machine's-LAN-IP>:6969/setup`.
 
-Because host networking means your firewall now applies to those ports (bridge used to bypass it), `install.sh` runs `ufw`/`firewalld allow` for `6969/tcp` and `7360/udp`. A blocked `7360/udp` is the most common reason discovery goes silent. Prefer to do it by hand? Copy `.env.example` to `.env`, allow those two ports, and `docker compose up -d --build`.
+`install.sh` pulls [`ghcr.io/bouliehaan/samo-server:latest`](https://github.com/bouliehaan/samo-server/pkgs/container/samo-server),
+opens the firewall for `6969/tcp` and `7360/udp`, and starts the stack. It is
+safe to re-run — that is also how you update.
 
-Still on an old SQLite install? Samo is Postgres-only now — migrate first using a pre-removal build's `migrate-postgres` command (it copies every row and verifies counts), then upgrade. See **[MIGRATING-TO-POSTGRES.md](MIGRATING-TO-POSTGRES.md)**.
+Prefer to drive compose yourself:
 
-### Running the tests
+```bash
+docker compose pull && docker compose up -d
+```
 
-Tests run against a real PostgreSQL (each test gets its own database cloned from a migrated template). `make test` starts a disposable container on port 55432 and runs the suite; point `SAMO_TEST_PG_DSN` at your own server to skip the container.
+### The two things you must set
 
-## Philosophy
+In `.env`:
+
+| | |
+|---|---|
+| `POSTGRES_PASSWORD` | Baked into the database on the first boot. Change it before then. |
+| `SAMO_MEDIA_HOST_DIR` | Absolute path to your media, mounted into the container at the **same** path. Point `SAMO_MUSIC_DIRS` / `SAMO_AUDIOBOOK_DIRS` / `SAMO_PODCAST_DIRS` at subfolders of it. |
+
+Everything else in `.env.example` is optional and commented.
+
+### Ports
+
+`6969/tcp` is the web UI and API. `7360/udp` is LAN autodiscovery — clients
+broadcast `Who is SamoServer?` and get back this machine's real address.
+
+The server runs with Docker **host networking** so both bind to the host
+directly; the default bridge drops LAN broadcasts and would advertise an
+unreachable container address. That also means your firewall now applies to
+those ports, and a blocked `7360/udp` is the usual reason discovery goes
+silent. `install.sh` opens both. Postgres stays in its own container on
+`127.0.0.1`, never on the LAN.
+
+## What it does
+
+- Scans local music, audiobook and podcast folders with bundled `ffmpeg`.
+- Adds podcast RSS feeds and internet radio stream URLs.
+- Runs 24/7 radio channels programmed from your own library — see
+  [docs/channels.md](docs/channels.md).
+- Streams original files, and serves artwork through a thumbnail ladder.
+- Records playback and scrobbles, optionally to Last.fm.
+- Exposes a native `/api/v1` surface plus a read-only Subsonic adapter.
+
+## Docs
+
+| | |
+|---|---|
+| [docs/api.md](docs/api.md) | The `/api/v1` route map and DTOs |
+| [docs/channels.md](docs/channels.md) | Radio channels: plans, pools, blocks |
+| [docs/radio.md](docs/radio.md) | Station config and stream behaviour |
+| [docs/storage-and-scanning.md](docs/storage-and-scanning.md) | Scanner environment variables |
+| [docs/metadata.md](docs/metadata.md) | External lookup providers (off by default) |
+| [docs/lastfm.md](docs/lastfm.md) | Scrobbling and account linking |
+| [docs/samo-radio.md](docs/samo-radio.md) | Aux-port playback devices |
+
+## Developing
+
+```bash
+make test     # starts a disposable Postgres on 55432 and runs the suite
+```
+
+Tests run against a real PostgreSQL — each gets its own database cloned from a
+migrated template. Point `SAMO_TEST_PG_DSN` at your own server to skip the
+container.
+
+Schema changes are plain SQL in `migrations/postgres/`, applied at startup. Add
+a new numbered file; never edit an old one.
+
+## House rules
 
 - no jank
 - no fake data
 - no throwaway glue-server architecture
 - small boring reliable pieces
-- client talks to Samo-native concepts, not backend-specific hacks
-
-## Clients
-
-The client half of the project lives in [bouliehaan/samo](https://github.com/bouliehaan/samo) — a desktop app (Electron) and an Android app, sharing one server client so both inherit the same behaviour.
+- the client talks to samo-native concepts, not backend-specific hacks
 
 ## Licence
 
-[GPL-3.0-only](LICENSE), matching the Samo client.
+[GPL-3.0-only](LICENSE), matching the samo client.

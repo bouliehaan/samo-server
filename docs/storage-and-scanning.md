@@ -85,7 +85,7 @@ Note that a deleted file is flagged missing rather than erased, and a library wh
 
 ## Scanner Requirements
 
-The scanner uses bundled `ffprobe` and `ffmpeg` binaries shipped with Samo Server (see [install-ubuntu.md](install-ubuntu.md)). No apt install is required on Ubuntu. The scanner walks configured folders and accepts common audio extensions: `mp3`, `flac`, `m4a`, `m4b`, `aac`, `ogg`, `opus`, `wav`, `aif`, `aiff`, `alac`, and `wma`.
+The scanner uses the `ffprobe` and `ffmpeg` binaries bundled in the container image. Nothing to install on the host. The scanner walks configured folders and accepts common audio extensions: `mp3`, `flac`, `m4a`, `m4b`, `aac`, `ogg`, `opus`, `wav`, `aif`, `aiff`, `alac`, and `wma`.
 
 ## Music Scanner
 

@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
-# Samo Server — Docker installer for Linux hosts.
+# samo-server — Docker installer for Linux hosts.
 #
-# Boots the server + Postgres stack and opens the firewall ports that LAN
-# autodiscovery needs. The server runs with host networking (see
+# Pulls ghcr.io/bouliehaan/samo-server:latest, boots the server + Postgres
+# stack, and opens the firewall ports that LAN autodiscovery needs. The server runs with host networking (see
 # docker-compose.yml), so it listens on the host directly:
 #
 #   6969/tcp   web UI + API
@@ -86,12 +86,12 @@ fi
 # ---- boot --------------------------------------------------------------------
 
 if [ "${DO_UP}" -eq 0 ]; then
-  note "firewall done. Bring the stack up with:  ${COMPOSE[*]} up -d --build"
+  note "firewall done. Bring the stack up with:  ${COMPOSE[*]} pull && ${COMPOSE[*]} up -d"
   exit 0
 fi
 
-note "building and starting the stack..."
-( cd "${SCRIPT_DIR}" && "${COMPOSE[@]}" up -d --build )
+note "pulling ghcr.io/bouliehaan/samo-server:latest and starting the stack..."
+( cd "${SCRIPT_DIR}" && "${COMPOSE[@]}" pull && "${COMPOSE[@]}" up -d )
 
 HOST_IP="$(hostname -I 2>/dev/null | awk '{print $1}')"
 [ -n "${HOST_IP}" ] || HOST_IP="<this-machine-ip>"
@@ -103,6 +103,7 @@ Samo Server is up.
   Open:        http://${HOST_IP}:6969/
   Setup:       http://${HOST_IP}:6969/setup
   Logs:        ${COMPOSE[*]} logs -f server
+  Update:      sudo ./install.sh
   Stop:        ${COMPOSE[*]} down
 
   Autodiscovery is live on udp/7360 — LAN clients will find the server and get

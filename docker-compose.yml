@@ -1,7 +1,7 @@
-# Samo server + Postgres, in two containers. Linux host.
+# samo-server + Postgres, in two containers. Linux host.
 #
-#   1. ./install.sh            # opens the firewall ports and boots the stack
-#   2. Open http://<this machine's LAN IP>:6969
+#   1. sudo ./install.sh       # opens the firewall ports and boots the stack
+#   2. Open http://<this machine's LAN IP>:6969/setup
 #
 # The server runs with network_mode: host so it shares the host's network
 # stack. That is what makes UDP autodiscovery work: the discovery listener on
@@ -35,9 +35,8 @@ services:
       retries: 12
 
   server:
-    build: .
-    # Or, once you publish an image for installing on other machines:
-    # image: ghcr.io/bouliehaan/samo-server:latest
+    image: ghcr.io/bouliehaan/samo-server:latest
+    # Building from this checkout instead: swap the line above for `build: .`
     restart: unless-stopped
     # Share the host's network stack: HTTP on :6969 and UDP autodiscovery on
     # :7360 bind directly to the host, so LAN broadcasts reach the server and it
