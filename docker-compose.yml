@@ -35,8 +35,11 @@ services:
       retries: 12
 
   server:
+    # Published image, so install.sh can pull without a Go toolchain on the
+    # host. `build` is the fallback, and is what deploy-samo.sh uses to ship a
+    # working tree that is ahead of the release.
     image: ghcr.io/bouliehaan/samo-server:latest
-    # Building from this checkout instead: swap the line above for `build: .`
+    build: .
     restart: unless-stopped
     # Share the host's network stack: HTTP on :6969 and UDP autodiscovery on
     # :7360 bind directly to the host, so LAN broadcasts reach the server and it
