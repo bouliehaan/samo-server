@@ -10,48 +10,54 @@ Android and desktop.
 
 ## Install
 
-Linux host with Docker. Two containers: the server and its Postgres.
+One command. Nothing to download, nothing to edit.
 
 ```bash
-git clone https://github.com/bouliehaan/samo-server.git
-cd samo-server
-cp .env.example .env          # set POSTGRES_PASSWORD and your media path
-docker compose pull
-docker compose up -d
+docker compose -f oci://ghcr.io/bouliehaan/samo-server:compose up -d
 ```
 
-Then open `http://<this-machine's-LAN-IP>:6969/setup`.
+Then open `http://<this machine>:6969/setup` and the wizard takes it from there
+— admin account, library folders, first scan.
 
-Updating is the same two commands: `docker compose pull && docker compose up -d`.
+If your media is not at `/mnt/media`, say so on the same line; compose reads it
+from your shell, so there is still no file:
 
-### The two things you must set
+```bash
+SAMO_MEDIA_DIR=/srv/music docker compose -f oci://ghcr.io/bouliehaan/samo-server:compose up -d
+```
 
-In `.env`:
-
-| | |
-|---|---|
-| `POSTGRES_PASSWORD` | Baked into the database on the first boot. Change it before then. |
-| `SAMO_MEDIA_HOST_DIR` | Absolute path to your media, mounted into the container at the **same** path. Point `SAMO_MUSIC_DIRS` / `SAMO_AUDIOBOOK_DIRS` / `SAMO_PODCAST_DIRS` at subfolders of it. |
-
-Everything else in `.env.example` is optional and commented.
+Updating is the same command with `pull` first. The compose artifact lives in
+the same registry as the image and pins it by digest, so a given tag always
+brings up exactly the build it was published with.
 
 ### Ports, and the one that gets forgotten
 
 `6969/tcp` is the web UI and API. `7360/udp` is LAN autodiscovery — clients
-broadcast `Who is SamoServer?` and get back this machine's real address.
+broadcast `Who is SamoServer?` and get back this machine's real address, which
+is how the Android and desktop apps find you without being told an address.
 
-The server runs with Docker **host networking** so both bind to the host
-directly; the default bridge drops LAN broadcasts and would advertise an
-unreachable container address. That also means your firewall applies to those
-ports, where the bridge used to bypass it. If you run one, open them:
+The server uses host networking so both bind to the host directly; Docker's
+default bridge drops LAN broadcasts and would advertise an unreachable
+container address. That also means your firewall applies to those ports, where
+the bridge used to bypass it:
 
 ```bash
 sudo ufw allow 6969/tcp
 sudo ufw allow 7360/udp
 ```
 
-A blocked `7360/udp` is the usual reason discovery goes silent. Postgres stays
-in its own container on `127.0.0.1`, never on the LAN.
+A blocked `7360/udp` is the usual reason discovery goes silent.
+
+### The database
+
+Postgres runs alongside it with **no password and no TCP listener at all** —
+`listen_addresses` is empty and the two containers share a unix socket through a
+volume. There is nothing on the network to authenticate to, so there is no
+credential to set, leak, or bake into a published compose file.
+
+Optional integrations are passed through from your shell the same way as the
+media path: `SAMO_LASTFM_API_KEY`, `SAMO_LASTFM_SHARED_SECRET`,
+`SAMO_ACOUSTID_API_KEY`, `SAMO_EGRESS_PROXY_URL`.
 
 ## What it does
 
@@ -79,6 +85,9 @@ in its own container on `127.0.0.1`, never on the LAN.
 
 ```bash
 make test     # starts a disposable Postgres on 55432 and runs the suite
+
+# run a working tree that is ahead of the release
+docker compose -f docker-compose.yml -f docker-compose.build.yml up -d --build
 ```
 
 Tests run against a real PostgreSQL — each gets its own database cloned from a

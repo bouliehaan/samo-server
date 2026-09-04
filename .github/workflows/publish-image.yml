@@ -60,3 +60,31 @@ jobs:
                       ghcr.io/${{ github.repository }}:latest
                   cache-from: type=gha
                   cache-to: type=gha,mode=max
+
+            # The compose file is published to the same registry as the image,
+            # as an OCI artifact. That is what makes the documented install one
+            # command with no file to fetch or edit:
+            #
+            #   docker compose -f oci://ghcr.io/bouliehaan/samo-server:compose up -d
+            #
+            # --resolve-image-digests pins the image reference inside the
+            # artifact to the digest built immediately above, so a given compose
+            # tag always brings up exactly the image it was published with,
+            # rather than whatever :latest happens to be later.
+            - name: Publish the compose artifact
+              env:
+                  SAMO_MEDIA_DIR: /mnt/media
+              run: |
+                  docker compose -f docker-compose.yml publish --yes \
+                      --resolve-image-digests \
+                      "ghcr.io/${{ github.repository }}:compose-${{ steps.version.outputs.value }}"
+                  docker compose -f docker-compose.yml publish --yes \
+                      --resolve-image-digests \
+                      "ghcr.io/${{ github.repository }}:compose"
+
+            # A published artifact nobody can resolve is worse than none: the
+            # documented install would fail on the very first command.
+            - name: Check the published artifact resolves
+              run: |
+                  docker compose -f "oci://ghcr.io/${{ github.repository }}:compose" config >/dev/null
+                  echo "oci://ghcr.io/${{ github.repository }}:compose resolves"

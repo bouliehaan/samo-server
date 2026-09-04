@@ -163,7 +163,7 @@ func (c Config) Validate() (Config, error) {
 	case c.DataDir == "":
 		return Config{}, errors.New("data directory cannot be empty")
 	case c.DBDSN == "":
-		return Config{}, errors.New("SAMO_DB_DSN is required (e.g. postgres://samo:pass@localhost:5432/samo?sslmode=disable)")
+		return Config{}, errors.New("SAMO_DB_DSN is required (e.g. postgres://samo@/samo?host=/var/run/postgresql for a socket, or postgres://samo:pass@localhost:5432/samo?sslmode=disable over TCP)")
 	case c.RadioConfigPath == "":
 		return Config{}, errors.New("radio config path cannot be empty")
 	default:
