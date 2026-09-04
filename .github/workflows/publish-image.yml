@@ -97,7 +97,24 @@ jobs:
 
             # A published artifact nobody can resolve is worse than none: the
             # documented install would fail on the very first command.
-            - name: Check the published artifact resolves
+            - name: Check the published artifact resolves and is still configurable
               run: |
-                  docker compose -f "oci://ghcr.io/${{ github.repository }}:compose" config >/dev/null
-                  echo "oci://ghcr.io/${{ github.repository }}:compose resolves"
+                  set -euo pipefail
+                  ref="oci://ghcr.io/${{ github.repository }}:compose"
+
+                  # It has to pull and parse, or the documented install fails on
+                  # its very first command.
+                  docker compose -f "$ref" config >/dev/null
+                  echo "$ref resolves"
+
+                  # And SAMO_MEDIA_DIR has to still be a variable in it. The
+                  # README tells people to point it at their library on the
+                  # install line; if publishing baked the default in, that would
+                  # silently do nothing and everyone would mount /mnt/media.
+                  if ! SAMO_MEDIA_DIR=/probe/media docker compose -f "$ref" config \
+                        | grep -q '/probe/media'; then
+                      echo "publish baked the media path in: SAMO_MEDIA_DIR no longer overrides it" >&2
+                      echo "the README's install line would not work as documented" >&2
+                      exit 1
+                  fi
+                  echo "SAMO_MEDIA_DIR still overrides"

@@ -52,7 +52,11 @@ services:
     environment:
       # Over the shared socket, not the network. Nothing here is a secret.
       SAMO_DB_DSN: postgres://samo@/samo?host=/var/run/postgresql
-      SAMO_DATA_DIR: /data
+      # Where samo keeps its own state. A named volume by default; set
+      # SAMO_DATA_DIR to a host path to keep an existing data directory at the
+      # absolute path it already has, which matters because covers, radio.json
+      # and the podcast cache are referenced by absolute path in the database.
+      SAMO_DATA_DIR: ${SAMO_DATA_DIR:-/data}
       # Optional, and empty unless you export them. Passed through rather than
       # hardcoded so they can be set without a file:
       #   SAMO_LASTFM_API_KEY=... docker compose -f oci://... up -d
@@ -73,7 +77,10 @@ services:
     volumes:
       - pgsocket:/var/run/postgresql
       # samo's own state: extracted covers, podcast cache, radio config.
-      - samodata:/data
+      # A bare name is a named volume, a path is a bind mount, so this is both
+      # the fresh-install default and the way an existing install keeps its data
+      # directory where it already is.
+      - ${SAMO_DATA_DIR:-samodata}:${SAMO_DATA_DIR:-/data}
       # Your media, mounted at the same path inside the container so the
       # absolute paths stored in the database keep resolving. Add libraries
       # pointing at it in the setup wizard.
