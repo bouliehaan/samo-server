@@ -72,7 +72,7 @@ func resolveTool(name, envKey, dataDir string) (string, error) {
 	}
 
 	return "", fmt.Errorf(
-		"%w: %s (deploy bin/ffmpeg and bin/ffprobe beside samo-server on Ubuntu, or run ./scripts/bundle-ffmpeg.sh on Linux)",
+		"%w: %s (install ffmpeg, or set SAMO_FFMPEG_PATH and SAMO_FFPROBE_PATH; the container image ships them)",
 		ErrNotFound,
 		name,
 	)

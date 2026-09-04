@@ -15,21 +15,14 @@ Linux host with Docker. Two containers: the server and its Postgres.
 ```bash
 git clone https://github.com/bouliehaan/samo-server.git
 cd samo-server
-cp .env.example .env      # set POSTGRES_PASSWORD and your media path
-sudo ./install.sh
+cp .env.example .env          # set POSTGRES_PASSWORD and your media path
+docker compose pull
+docker compose up -d
 ```
 
 Then open `http://<this-machine's-LAN-IP>:6969/setup`.
 
-`install.sh` pulls [`ghcr.io/bouliehaan/samo-server:latest`](https://github.com/bouliehaan/samo-server/pkgs/container/samo-server),
-opens the firewall for `6969/tcp` and `7360/udp`, and starts the stack. It is
-safe to re-run — that is also how you update.
-
-Prefer to drive compose yourself:
-
-```bash
-docker compose pull && docker compose up -d
-```
+Updating is the same two commands: `docker compose pull && docker compose up -d`.
 
 ### The two things you must set
 
@@ -42,17 +35,23 @@ In `.env`:
 
 Everything else in `.env.example` is optional and commented.
 
-### Ports
+### Ports, and the one that gets forgotten
 
 `6969/tcp` is the web UI and API. `7360/udp` is LAN autodiscovery — clients
 broadcast `Who is SamoServer?` and get back this machine's real address.
 
 The server runs with Docker **host networking** so both bind to the host
 directly; the default bridge drops LAN broadcasts and would advertise an
-unreachable container address. That also means your firewall now applies to
-those ports, and a blocked `7360/udp` is the usual reason discovery goes
-silent. `install.sh` opens both. Postgres stays in its own container on
-`127.0.0.1`, never on the LAN.
+unreachable container address. That also means your firewall applies to those
+ports, where the bridge used to bypass it. If you run one, open them:
+
+```bash
+sudo ufw allow 6969/tcp
+sudo ufw allow 7360/udp
+```
+
+A blocked `7360/udp` is the usual reason discovery goes silent. Postgres stays
+in its own container on `127.0.0.1`, never on the LAN.
 
 ## What it does
 

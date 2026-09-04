@@ -37,9 +37,9 @@ one place instead of growing a half-version of each on the daemon.
 
 ## Registering a device
 
-1. Install the daemon on the machine with the sound card:
-   `sudo ./packaging/install.sh` in the samo-radio repo. It prints a **control
-   token** and the list of audio outputs.
+1. Install the daemon on the machine with the sound card — see the
+   [samo-radio README](https://github.com/bouliehaan/samo-radio). `samo-radio
+   --pairing` prints its **control token** and the URLs it answers on.
 2. In Samo: **RADIO → SAMO-RADIO → + ADD DEVICE**. Give it a name, the control
    URL (`http://127.0.0.1:7970` when it is on this machine) and that token.
 3. Samo pairs it immediately: it mints an API token, hands it over, and the
