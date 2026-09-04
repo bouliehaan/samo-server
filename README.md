@@ -23,8 +23,13 @@ If your media is not at `/mnt/media`, say so on the same line; compose reads it
 from your shell, so there is still no file:
 
 ```bash
-SAMO_MEDIA_DIR=/srv/music docker compose -f oci://ghcr.io/bouliehaan/samo-server:compose up -d
+SAMO_MEDIA_DIR=/mnt/data2tb SAMO_MUSIC_DIR=/mnt/data2tb/Music \
+  docker compose -f oci://ghcr.io/bouliehaan/samo-server:compose up -d
 ```
+
+Your media is mounted read-only so a scanner bug cannot eat a library, with
+`SAMO_MUSIC_DIR` writable on top of it because **Keep in Library** copies into
+it. Point both at the same place if you want the whole thing writable.
 
 Updating is the same command with `pull` first. The compose artifact lives in
 the same registry as the image and pins it by digest, so a given tag always

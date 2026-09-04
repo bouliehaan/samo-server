@@ -77,7 +77,15 @@ services:
       # Your media, mounted at the same path inside the container so the
       # absolute paths stored in the database keep resolving. Add libraries
       # pointing at it in the setup wizard.
+      #
+      # Read-only, so a scanner bug cannot eat a library.
       - ${SAMO_MEDIA_DIR:-/mnt/media}:${SAMO_MEDIA_DIR:-/mnt/media}:ro
+      # The music folder on top of it, writable, because "Keep in Library"
+      # copies into it. Listed after the read-only root and nested inside it:
+      # Docker applies the more specific path last, so the music library ends up
+      # writable while the drive around it stays read-only. Point it at the same
+      # place as SAMO_MEDIA_DIR if you want the whole thing writable.
+      - ${SAMO_MUSIC_DIR:-/mnt/media/Music}:${SAMO_MUSIC_DIR:-/mnt/media/Music}:rw
 
 volumes:
   pgdata:
