@@ -29,3 +29,8 @@ data/*.db-*
 # binary by //go:embed in migrations/migrations.go, so an untracked migration
 # is silently absent from every build made from a clean checkout — the schema
 # it creates just never exists. 0008_playlist_tombstones.sql was lost that way.
+
+# Maintainer tooling: deploy.sh ships a worktree to my dev boxes, commit.sh is
+# the gate before anything goes public. They live on my machine, not in the
+# repo — nobody cloning this can use them.
+*.sh
