@@ -61,10 +61,10 @@ Samo has three tiers of credentials:
 POST /api/v1/auth/login
 Content-Type: application/json
 
-{ "username": "jake", "password": "..." }
+{ "username": "admin", "password": "..." }
 
 200 {
-  "user": { "id": "user-...", "username": "jake", "displayName": "Jake", "role": "admin" },
+  "user": { "id": "user-...", "username": "admin", "displayName": "Admin", "role": "admin" },
   "token": "tok_...",
   "tokenMeta": { "id": "token-...", "label": "login", "createdAt": "..." }
 }
@@ -91,10 +91,10 @@ POST /api/v1/users/me/tokens
 Authorization: Bearer <login token>
 Content-Type: application/json
 
-{ "label": "Jake's iPhone" }
+{ "label": "My iPhone" }
 
 201 {
-  "token": { "id": "token-...", "label": "Jake's iPhone", "createdAt": "..." },
+  "token": { "id": "token-...", "label": "My iPhone", "createdAt": "..." },
   "secret": "tok_..."
 }
 ```
@@ -231,7 +231,7 @@ Create-admin example:
 POST /api/v1/setup/admin
 Content-Type: application/json
 
-{ "username": "jake", "password": "min-8-chars" }
+{ "username": "admin", "password": "min-8-chars" }
 
 201 { "user": {...}, "token": "tok_...", "tokenMeta": {...} }
 ```

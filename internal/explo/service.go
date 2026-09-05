@@ -467,7 +467,16 @@ func (s *Service) reconcileHiddenAlbums(ctx context.Context, dirs []string) (hid
 
 // reconcileExploTracks makes music_tracks.is_explo match the CURRENTLY
 // configured explo folder(s), in both directions, exactly like the album
-// flag: a track is explo iff its media file lives under an explo folder.
+// flag: a track is explo iff EVERY file backing it lives under an explo
+// folder (and it has at least one there).
+//
+// "Every", not "any", is what makes Keep in Library work. A kept track keeps
+// its drop-folder original until rotation clears it, so for a while it is
+// backed by two files: the drop and the library copy. Flagging on "any" left
+// that track siloed forever — the copy was on disk and in media_files, but
+// every library surface filters is_explo = 1, so Keep reported success and
+// the song never appeared. Pressing Keep again just found the destination
+// already there and reported success again.
 // This is the per-track silo marker the catalog projection reads — album
 // hiding keeps Recently Added clean, but only a track-level fact lets the
 // list/browse/search surfaces exclude explo content without path joins.
@@ -482,11 +491,14 @@ func (s *Service) reconcileExploTracks(ctx context.Context, dirs []string) (flag
 		WHERE is_explo = 0
 		  AND EXISTS (
 		    SELECT 1 FROM media_files mf
-		    WHERE mf.track_id = music_tracks.id AND %s)`, match)
+		    WHERE mf.track_id = music_tracks.id AND %s)
+		  AND NOT EXISTS (
+		    SELECT 1 FROM media_files mf
+		    WHERE mf.track_id = music_tracks.id AND NOT %s)`, match, match)
 	var res sql.Result
 	if err := storage.Retry(ctx, exploWriteAttempts, func() error {
 		var retryErr error
-		res, retryErr = s.db.ExecContext(ctx, flagSQL, args...)
+		res, retryErr = s.db.ExecContext(ctx, flagSQL, append(append([]any{}, args...), args...)...)
 		return retryErr
 	}); err != nil {
 		return 0, 0, fmt.Errorf("explo flag tracks: %w", err)
@@ -497,13 +509,17 @@ func (s *Service) reconcileExploTracks(ctx context.Context, dirs []string) (flag
 		UPDATE music_tracks
 		SET is_explo = 0, updated_at = CURRENT_TIMESTAMP
 		WHERE is_explo = 1
-		  AND NOT EXISTS (
-		    SELECT 1 FROM media_files mf
-		    WHERE mf.track_id = music_tracks.id AND %s)`, match)
+		  AND (
+		    NOT EXISTS (
+		      SELECT 1 FROM media_files mf
+		      WHERE mf.track_id = music_tracks.id AND %s)
+		    OR EXISTS (
+		      SELECT 1 FROM media_files mf
+		      WHERE mf.track_id = music_tracks.id AND NOT %s))`, match, match)
 	var res2 sql.Result
 	if err := storage.Retry(ctx, exploWriteAttempts, func() error {
 		var retryErr error
-		res2, retryErr = s.db.ExecContext(ctx, unflagSQL, args...)
+		res2, retryErr = s.db.ExecContext(ctx, unflagSQL, append(append([]any{}, args...), args...)...)
 		return retryErr
 	}); err != nil {
 		return flagged, 0, fmt.Errorf("explo unflag tracks: %w", err)
@@ -565,8 +581,28 @@ func (s *Service) pruneVanishedFiles(ctx context.Context, dirs []string) (int, e
 			// File present, or an ambiguous error — never prune on doubt.
 			continue
 		}
+		// A kept track still carries its drop-folder original until rotation
+		// clears it, so the vanishing file may not be the only one backing
+		// this track. media_files cascades from music_tracks, so deleting the
+		// track here would take the kept library copy's row with it and drop
+		// the song out of the catalog with the file still sitting on disk.
+		// Rotation would silently un-keep everything Keep had just kept.
+		var kept int
+		if err := s.db.QueryRowContext(ctx, fmt.Sprintf(`
+			SELECT COUNT(1) FROM media_files mf
+			WHERE mf.track_id = ? AND NOT %s`, clause),
+			append([]any{c.trackID}, args...)...).Scan(&kept); err != nil {
+			s.logger("explo: prune vanished track %s: library-copy lookup failed: %v", c.trackID, err)
+			continue
+		}
+		stmt, stmtArgs := `DELETE FROM music_tracks WHERE id = ?`, []any{c.trackID}
+		if kept > 0 {
+			// Retire just the rotated-out file and leave the track to the
+			// library, where reconcileExploTracks will now un-flag it.
+			stmt, stmtArgs = `DELETE FROM media_files WHERE track_id = ? AND path = ?`, []any{c.trackID, c.path}
+		}
 		if err := storage.Retry(ctx, exploWriteAttempts, func() error {
-			_, retryErr := s.db.ExecContext(ctx, `DELETE FROM music_tracks WHERE id = ?`, c.trackID)
+			_, retryErr := s.db.ExecContext(ctx, stmt, stmtArgs...)
 			return retryErr
 		}); err != nil {
 			s.logger("explo: prune vanished track %s failed: %v", c.trackID, err)

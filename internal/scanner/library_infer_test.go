@@ -3,7 +3,7 @@ package scanner
 import "testing"
 
 func TestLibraryKindFromPath(t *testing.T) {
-	if got := LibraryKindFromPath("/mnt/data2tb/Podcasts"); got != "podcast" {
+	if got := LibraryKindFromPath("/mnt/media/Podcasts"); got != "podcast" {
 		t.Fatalf("kind = %q, want podcast", got)
 	}
 	if got := LibraryKindFromPath("/media/Audiobooks"); got != "audiobook" {

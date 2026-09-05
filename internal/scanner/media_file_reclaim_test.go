@@ -14,15 +14,15 @@ func TestUpsertAudioFileReclaimsPathFromMusicTrack(t *testing.T) {
 	db := storagetest.Open(t)
 
 	scanner := New(db)
-	musicLib := Library{ID: "lib-music", Name: "Music", Kind: "music", Path: "/mnt/data2tb/Music"}
-	bookLib := Library{ID: "lib-books", Name: "Books", Kind: "audiobook", Path: "/mnt/data2tb/Books"}
+	musicLib := Library{ID: "lib-music", Name: "Music", Kind: "music", Path: "/mnt/media/Music"}
+	bookLib := Library{ID: "lib-books", Name: "Books", Kind: "audiobook", Path: "/mnt/media/Books"}
 	for _, lib := range []Library{musicLib, bookLib} {
 		if err := scanner.upsertLibrary(ctx, lib); err != nil {
 			t.Fatal(err)
 		}
 	}
 
-	const path = "/mnt/data2tb/Music/In the Shadow of the Valley.m4a"
+	const path = "/mnt/media/Music/In the Shadow of the Valley.m4a"
 	album := catalog.MusicAlbum{ID: "album-1", Title: "Valley"}
 	track := catalog.MusicTrack{ID: "track-1", Title: "In the Shadow of the Valley", AlbumID: album.ID, DurationSeconds: 100}
 	if err := scanner.upsertMusicAlbum(ctx, album); err != nil {
@@ -43,7 +43,7 @@ func TestUpsertAudioFileReclaimsPathFromMusicTrack(t *testing.T) {
 	book := catalog.AudiobookItem{
 		ID:        "audiobook-1",
 		LibraryID: bookLib.ID,
-		Path:      "/mnt/data2tb/Music",
+		Path:      "/mnt/media/Music",
 		Book:      &catalog.BookMetadata{Title: "In the Shadow of the Valley"},
 	}
 	if _, err := scanner.upsertAudiobook(ctx, book); err != nil {

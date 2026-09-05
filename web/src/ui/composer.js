@@ -202,7 +202,7 @@ export function composerRadioStation() {
 export function composerChannel() {
   const body =
     '<div class="composer-row">' +
-      fieldHTML("composerChannelName", "Name", "Jake's Radio", "text", "") +
+      fieldHTML("composerChannelName", "Name", "Late Night", "text", "") +
       fieldHTML("composerChannelDescription", "Description", "optional", "text", "") +
     '</div>' +
     '<div class="composer-row">' +
@@ -346,7 +346,7 @@ export function contentPickerHTML(prefix, options, single) {
   }
   html += group("file-pool",
     textAreaHTML(prefix + "Paths", "Files, folders or globs (one per line)",
-      "/mnt/data2tb/commercials\n/mnt/data2tb/oldies/*.mp3", "", "full"));
+      "/mnt/media/commercials\n/mnt/media/oldies/*.mp3", "", "full"));
   html += group("live-stream", single
     ? fieldHTML(prefix + "Url", "Stream URL", "https://example.com/live.mp3", "url", "", "full")
     : textAreaHTML(prefix + "Url", "Stream URLs (one per line)",

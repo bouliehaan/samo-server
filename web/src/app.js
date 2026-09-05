@@ -1632,7 +1632,7 @@ import { globalScanActionsHTML, libraryKindScanActionsHTML, libraryScanActionsHT
   }
 
   // A folder's own name is the last meaningful path segment, so
-  // /mnt/data2tb/commercials becomes "commercials" rather than the raw kind.
+  // /mnt/media/commercials becomes "commercials" rather than the raw kind.
   // A glob is skipped over — "oldies" is a name, "*.mp3" is not.
   function folderName(path) {
     const parts = String(path || "").split("/").filter(Boolean);

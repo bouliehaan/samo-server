@@ -23,7 +23,7 @@ If your media is not at `/mnt/media`, say so on the same line; compose reads it
 from your shell, so there is still no file:
 
 ```bash
-SAMO_MEDIA_DIR=/mnt/data2tb SAMO_MUSIC_DIR=/mnt/data2tb/Music \
+SAMO_MEDIA_DIR=/srv/media SAMO_MUSIC_DIR=/srv/media/music \
   docker compose -f oci://ghcr.io/bouliehaan/samo-server:compose up -d
 ```
 

@@ -5,7 +5,7 @@
         <div class="form-row-split">
           <label class="field">
             <span class="field-label">USERNAME</span>
-            <input type="text" id="adminUsername" autocomplete="username" placeholder="jake">
+            <input type="text" id="adminUsername" autocomplete="username" placeholder="admin">
           </label>
           <label class="field">
             <span class="field-label">PASSWORD</span>
@@ -110,4 +110,4 @@
           <a class="btn primary" href="/">OPEN DASHBOARD &rarr;</a>
         </div>
       `}function N(){if(m)switch(m.currentStep){case"admin":A();break;case"libraries":O();break;case"scan":L();break;default:D()}}b().catch(e=>{l.innerHTML='<div class="card-head"><span class="caret">&gt;</span> ERROR</div><h2>Setup unavailable</h2><p class="lede">'+r(e.message)+"</p>"})})();
-//# sourceMappingURL=setup-BOsFXgaI.js.map
+//# sourceMappingURL=setup-DVMe45d-.js.map

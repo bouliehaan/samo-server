@@ -13,12 +13,12 @@ func TestMusicRescanSamePathDifferentTrackPIDUpdatesRow(t *testing.T) {
 	db := storagetest.Open(t)
 
 	scanner := New(db)
-	library := Library{ID: "lib-music", Name: "Music", Kind: "music", Path: "/mnt/data2tb/Music"}
+	library := Library{ID: "lib-music", Name: "Music", Kind: "music", Path: "/mnt/media/Music"}
 	if err := scanner.upsertLibrary(ctx, library); err != nil {
 		t.Fatal(err)
 	}
 
-	const path = "/mnt/data2tb/Music/In the Shadow of the Valley.m4a"
+	const path = "/mnt/media/Music/In the Shadow of the Valley.m4a"
 	album := catalog.MusicAlbum{ID: "album-1", Title: "Valley"}
 	track := catalog.MusicTrack{ID: "track-1", Title: "In the Shadow of the Valley", AlbumID: album.ID}
 	if err := scanner.upsertMusicAlbum(ctx, album); err != nil {

@@ -161,3 +161,115 @@ func TestEligibilityExprPinsUTC(t *testing.T) {
 		t.Fatalf("UTC-pinned cutoff %q is %v away from real UTC now — session TimeZone leaked in", cutoff, diff)
 	}
 }
+
+// TestReconcileExploTracksUnflagsKeptTrack is the Keep in Library regression.
+//
+// A kept track is backed by two files for as long as rotation leaves the drop
+// original in place: the drop copy and the library copy. Flagging is_explo on
+// "any file under the folder" left it siloed forever, so Keep wrote the file,
+// catalogued it, reported success — and the song never showed up anywhere,
+// because every library surface filters is_explo = 1.
+func TestReconcileExploTracksUnflagsKeptTrack(t *testing.T) {
+	ctx := context.Background()
+	db, exploDir := setupExploTestDB(t)
+	svc := NewService(ServiceOptions{
+		DB:            db,
+		Dirs:          []string{exploDir},
+		MetadataApply: metadata.NewMetadataApplyServiceWithOptions(db, metadata.MetadataApplyOptions{}),
+		Playlists:     playlists.New(db),
+	})
+
+	assertIsExplo := func(trackID string, want int) {
+		t.Helper()
+		var got int
+		if err := db.QueryRowContext(ctx, `SELECT is_explo FROM music_tracks WHERE id = ?`, trackID).Scan(&got); err != nil {
+			t.Fatal(err)
+		}
+		if got != want {
+			t.Fatalf("is_explo(%s) = %d, want %d", trackID, got, want)
+		}
+	}
+
+	// Both start siloed, the state Keep is pressed from.
+	if _, _, err := svc.reconcileExploTracks(ctx, []string{exploDir}); err != nil {
+		t.Fatal(err)
+	}
+	assertIsExplo("track-matched", 1)
+	assertIsExplo("track-unmatched", 1)
+
+	// Keep copies the drop original into the library and the rescan catalogues
+	// it against the same track — which is what the scanner does when no
+	// library twin exists yet.
+	mustExec(t, db, `
+		INSERT INTO media_files (id, library_id, track_id, path, relative_path, file_name, duration_seconds)
+		VALUES ('file-kept', 'lib-1', 'track-matched', '/music/Artist/Album/02 Track Two.mp3', 'Artist/Album/02 Track Two.mp3', '02 Track Two.mp3', 320);
+	`)
+
+	flagged, unflagged, err := svc.reconcileExploTracks(ctx, []string{exploDir})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if flagged != 0 || unflagged != 1 {
+		t.Fatalf("flagged=%d unflagged=%d, want 0/1", flagged, unflagged)
+	}
+	// The kept one is a library track now; its untouched neighbour is not.
+	assertIsExplo("track-matched", 0)
+	assertIsExplo("track-unmatched", 1)
+
+	// Idempotent: the kept track does not flip back on the next pass.
+	flagged, unflagged, err = svc.reconcileExploTracks(ctx, []string{exploDir})
+	if err != nil || flagged != 0 || unflagged != 0 {
+		t.Fatalf("repeat run flagged=%d unflagged=%d err=%v, want 0/0/nil", flagged, unflagged, err)
+	}
+	assertIsExplo("track-matched", 0)
+}
+
+// TestPruneVanishedFilesKeepsLibraryCopy covers the other half of the same
+// bug. media_files cascades from music_tracks, so pruning a rotated-out drop
+// file by deleting its track took the kept library copy's row with it — the
+// file stayed on disk and the song fell out of the catalog. Rotation would
+// have silently un-kept everything Keep had just kept.
+func TestPruneVanishedFilesKeepsLibraryCopy(t *testing.T) {
+	ctx := context.Background()
+	db, exploDir := setupExploTestDB(t)
+	svc := NewService(ServiceOptions{
+		DB:            db,
+		Dirs:          []string{exploDir},
+		MetadataApply: metadata.NewMetadataApplyServiceWithOptions(db, metadata.MetadataApplyOptions{}),
+		Playlists:     playlists.New(db),
+	})
+
+	// track-matched was kept; track-unmatched was not. Neither seeded path
+	// exists on disk, so both drops read as rotated out.
+	mustExec(t, db, `
+		INSERT INTO media_files (id, library_id, track_id, path, relative_path, file_name, duration_seconds)
+		VALUES ('file-kept', 'lib-1', 'track-matched', '/music/Artist/Album/02 Track Two.mp3', 'Artist/Album/02 Track Two.mp3', '02 Track Two.mp3', 320);
+	`)
+
+	if _, err := svc.pruneVanishedFiles(ctx, []string{exploDir}); err != nil {
+		t.Fatal(err)
+	}
+
+	count := func(query string, args ...any) int {
+		t.Helper()
+		var n int
+		if err := db.QueryRowContext(ctx, query, args...).Scan(&n); err != nil {
+			t.Fatal(err)
+		}
+		return n
+	}
+	// The kept track survives, with only its drop file retired.
+	if n := count(`SELECT COUNT(1) FROM music_tracks WHERE id = 'track-matched'`); n != 1 {
+		t.Fatalf("kept track rows = %d, want 1 — rotation deleted a library track", n)
+	}
+	if n := count(`SELECT COUNT(1) FROM media_files WHERE id = 'file-kept'`); n != 1 {
+		t.Fatalf("library copy rows = %d, want 1 — the kept file lost its catalog entry", n)
+	}
+	if n := count(`SELECT COUNT(1) FROM media_files WHERE id = 'file-matched'`); n != 0 {
+		t.Fatalf("rotated drop file rows = %d, want 0", n)
+	}
+	// The un-kept one is backed by nothing now, so it goes entirely.
+	if n := count(`SELECT COUNT(1) FROM music_tracks WHERE id = 'track-unmatched'`); n != 0 {
+		t.Fatalf("un-kept track rows = %d, want 0", n)
+	}
+}

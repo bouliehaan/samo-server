@@ -72,7 +72,7 @@ import "./setup.css";
         <div class="form-row-split">
           <label class="field">
             <span class="field-label">USERNAME</span>
-            <input type="text" id="adminUsername" autocomplete="username" placeholder="jake">
+            <input type="text" id="adminUsername" autocomplete="username" placeholder="admin">
           </label>
           <label class="field">
             <span class="field-label">PASSWORD</span>

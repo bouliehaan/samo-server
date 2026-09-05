@@ -82,16 +82,16 @@ func TestSafeComponentFallsBackWhenEmpty(t *testing.T) {
 // Keep must refuse anything outside the drop folder, or the endpoint becomes a
 // way to duplicate arbitrary library files to a second path.
 func TestUnderAnyDirGuardsTheDropFolder(t *testing.T) {
-	dirs := []string{"/mnt/data2tb/Music/explo/Weekly-Exploration"}
+	dirs := []string{"/mnt/media/Music/explo/Weekly-Exploration"}
 
-	if !underAnyDir("/mnt/data2tb/Music/explo/Weekly-Exploration/a.flac", dirs) {
+	if !underAnyDir("/mnt/media/Music/explo/Weekly-Exploration/a.flac", dirs) {
 		t.Fatal("a file inside the drop folder must be keepable")
 	}
 	for _, outside := range []string{
-		"/mnt/data2tb/Music/Adele/25/01 - Hello.flac",
-		"/mnt/data2tb/Music/explo/Weekly-Exploration-Other/a.flac", // prefix, not a child
+		"/mnt/media/Music/Adele/25/01 - Hello.flac",
+		"/mnt/media/Music/explo/Weekly-Exploration-Other/a.flac", // prefix, not a child
 		"/etc/passwd",
-		"/mnt/data2tb/Music/explo/Weekly-Exploration", // the folder itself
+		"/mnt/media/Music/explo/Weekly-Exploration", // the folder itself
 	} {
 		if underAnyDir(outside, dirs) {
 			t.Fatalf("%q must not be keepable", outside)
@@ -313,7 +313,7 @@ func TestKeepDestinationUsesResolvedAlbumNotCatalogTitle(t *testing.T) {
 // instead.
 func TestKeepAlbumTitleRefusesTheDropFolderName(t *testing.T) {
 	service := &Service{
-		dirs:   []string{"/mnt/data2tb/Music/explo/Weekly-Exploration"},
+		dirs:   []string{"/mnt/media/Music/explo/Weekly-Exploration"},
 		logger: func(string, ...any) {},
 	}
 	_, err := service.keepAlbumTitle(context.Background(), "track-1", catalog.MusicTrack{
