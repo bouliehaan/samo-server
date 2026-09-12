@@ -65,27 +65,29 @@ func filterPodcastEpisodes(items []catalog.PodcastEpisode, query PodcastQuery, o
 	return matches
 }
 
-func podcastSearchText(item catalog.PodcastItem) string {
+// Each record's search text is split into the title the ranker scores and
+// the secondary text that is only its floor; the filter sees the two joined.
+
+func podcastSearchFields(item catalog.PodcastItem) (title, secondary string) {
 	values := []string{
 		item.ID, item.Path,
 		strings.Join(item.Tags, " "), strings.Join(item.Genres, " "),
 	}
 	if item.Podcast != nil {
 		values = append(values,
-			item.Podcast.Title, item.Podcast.Author, item.Podcast.Description,
+			item.Podcast.Author, item.Podcast.Description,
 			item.Podcast.FeedURL, item.Podcast.SiteURL, item.Podcast.OwnerEmail,
 			item.Podcast.ExternalIDs.FeedGUID, strings.Join(item.Podcast.ExternalIDs.URLs, " "),
 			strings.Join(item.Podcast.Categories, " "),
 		)
 	}
-	return joinFields(values...)
+	return podcastTitle(item), joinFields(values...)
 }
 
-func episodeSearchText(item catalog.PodcastEpisode) string {
-	return joinFields(
+func episodeSearchFields(item catalog.PodcastEpisode) (title, secondary string) {
+	return item.Title, joinFields(
 		item.ID,
 		item.PodcastID,
-		item.Title,
 		item.Subtitle,
 		item.Description,
 		item.EnclosureURL,
@@ -95,19 +97,41 @@ func episodeSearchText(item catalog.PodcastEpisode) string {
 	)
 }
 
+func podcastSearchText(item catalog.PodcastItem) string {
+	return joinFields(podcastSearchFields(item))
+}
+
+func episodeSearchText(item catalog.PodcastEpisode) string {
+	return joinFields(episodeSearchFields(item))
+}
+
 func sortPodcasts(items []catalog.PodcastItem, query PodcastQuery) {
+	if isRelevanceSort(query.Sort) {
+		sortByRelevance(items, query.Text, func(item catalog.PodcastItem) rankFields {
+			title, secondary := podcastSearchFields(item)
+			return rankFields{Title: title, Secondary: secondary, Plays: item.Progress.PlayCount}
+		})
+		return
+	}
 	sort.SliceStable(items, func(i, j int) bool {
-		return longformLess(query.Sort, query.Text,
-			podcastTitle(items[i]), items[i].AddedAt, items[i].Progress, podcastSearchText(items[i]),
-			podcastTitle(items[j]), items[j].AddedAt, items[j].Progress, podcastSearchText(items[j]))
+		return longformLess(query.Sort,
+			podcastTitle(items[i]), items[i].AddedAt, items[i].Progress,
+			podcastTitle(items[j]), items[j].AddedAt, items[j].Progress)
 	})
 }
 
 func sortPodcastEpisodes(items []catalog.PodcastEpisode, query PodcastQuery) {
+	if isRelevanceSort(query.Sort) {
+		sortByRelevance(items, query.Text, func(item catalog.PodcastEpisode) rankFields {
+			title, secondary := episodeSearchFields(item)
+			return rankFields{Title: title, Secondary: secondary, Plays: item.Progress.PlayCount}
+		})
+		return
+	}
 	sort.SliceStable(items, func(i, j int) bool {
-		return longformLess(query.Sort, query.Text,
-			items[i].Title, items[i].AddedAt, items[i].Progress, episodeSearchText(items[i]),
-			items[j].Title, items[j].AddedAt, items[j].Progress, episodeSearchText(items[j]))
+		return longformLess(query.Sort,
+			items[i].Title, items[i].AddedAt, items[i].Progress,
+			items[j].Title, items[j].AddedAt, items[j].Progress)
 	})
 }
 

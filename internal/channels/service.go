@@ -490,6 +490,26 @@ func (s *Service) Owed(ctx context.Context, channelID string) ([]Obligation, err
 		return obligations, nil
 	}
 	queue := NewObligationQueue(obligations, deps.now(), plan.Freshness)
+
+	// The order is what the station means; whether each thing could air right
+	// now is the decision's to say, and it says so through the same rules it
+	// decides with. Best effort: a queue without judgements is the queue as it
+	// always was.
+	if engine, state, err := NewScheduler(deps).engineFor(ctx, channelID); err == nil {
+		judged := engine.JudgeOwed(ctx, deps.now(), state)
+		for index := range queue.Pending {
+			judgement, ok := judged[queue.Pending[index].ItemRef]
+			if !ok {
+				continue
+			}
+			queue.Pending[index].Held = judgement.Held
+			// A source with no label leaves the queue naming episodes by raw
+			// id; the candidate knows the feed's own title.
+			if queue.Pending[index].SourceLabel == "" {
+				queue.Pending[index].SourceLabel = judgement.Show
+			}
+		}
+	}
 	return append(queue.Pending, queue.Satisfied...), nil
 }
 

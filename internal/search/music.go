@@ -153,69 +153,126 @@ func playbackMatches(query MusicQuery, playback catalog.PlaybackState, addedAt *
 	return true
 }
 
+// Each record's search text is split into the title the ranker scores and
+// the secondary text that is only its floor; the filter sees the two joined.
+
+func artistSearchFields(item catalog.MusicArtist) (title, secondary string) {
+	return item.Name, joinFields(item.SortName, item.Disambiguation, item.Country, strings.Join(item.Genres, " "))
+}
+
+func albumSearchFields(item catalog.MusicAlbum) (title, secondary string) {
+	return item.Title, joinFields(
+		item.SortTitle, item.DisplayArtist,
+		strings.Join(item.ArtistNames, " "), strings.Join(item.AlbumArtistNames, " "),
+		strings.Join(item.Genres, " "), strings.Join(item.Tags, " "),
+	)
+}
+
+func trackSearchFields(item catalog.MusicTrack) (title, secondary string) {
+	return item.Title, joinFields(
+		item.SortTitle, item.Subtitle, item.AlbumTitle, item.DisplayArtist,
+		strings.Join(item.ArtistNames, " "), strings.Join(item.AlbumArtistNames, " "),
+		strings.Join(item.Genres, " "), strings.Join(item.Tags, " "),
+	)
+}
+
+func playlistSearchFields(item catalog.MusicPlaylist) (title, secondary string) {
+	return item.Name, joinFields(item.Description)
+}
+
 func artistSearchText(item catalog.MusicArtist) string {
-	return joinFields(item.Name, item.SortName, item.Disambiguation, item.Country, strings.Join(item.Genres, " "))
+	return joinFields(artistSearchFields(item))
 }
 
 func albumSearchText(item catalog.MusicAlbum) string {
-	return joinFields(
-		item.Title, item.SortTitle, item.DisplayArtist,
-		strings.Join(item.ArtistNames, " "), strings.Join(item.AlbumArtistNames, " "),
-		strings.Join(item.Genres, " "), strings.Join(item.Tags, " "),
-	)
+	return joinFields(albumSearchFields(item))
 }
 
 func trackSearchText(item catalog.MusicTrack) string {
-	return joinFields(
-		item.Title, item.SortTitle, item.Subtitle, item.AlbumTitle, item.DisplayArtist,
-		strings.Join(item.ArtistNames, " "), strings.Join(item.AlbumArtistNames, " "),
-		strings.Join(item.Genres, " "), strings.Join(item.Tags, " "),
-	)
+	return joinFields(trackSearchFields(item))
 }
 
 func playlistSearchText(item catalog.MusicPlaylist) string {
-	return joinFields(item.Name, item.Description)
+	return joinFields(playlistSearchFields(item))
 }
 
 func sortMusicArtists(items []catalog.MusicArtist, query MusicQuery) {
+	if isRelevanceSort(query.Sort) {
+		sortByRelevance(items, query.Text, func(item catalog.MusicArtist) rankFields {
+			title, secondary := artistSearchFields(item)
+			return rankFields{Title: title, Secondary: secondary, Plays: item.Playback.PlayCount}
+		})
+		return
+	}
 	sort.SliceStable(items, func(i, j int) bool {
-		return musicLess(query, items[i].Name, items[i].AddedAt, items[i].Playback, artistSearchText(items[i]),
-			items[j].Name, items[j].AddedAt, items[j].Playback, artistSearchText(items[j]))
+		return musicLess(query, items[i].Name, items[i].AddedAt, items[i].Playback,
+			items[j].Name, items[j].AddedAt, items[j].Playback)
 	})
 }
 
 func sortMusicAlbums(items []catalog.MusicAlbum, query MusicQuery) {
+	if isRelevanceSort(query.Sort) {
+		sortByRelevance(items, query.Text, func(item catalog.MusicAlbum) rankFields {
+			title, secondary := albumSearchFields(item)
+			return rankFields{Title: title, Secondary: secondary, Plays: item.Playback.PlayCount}
+		})
+		return
+	}
 	sort.SliceStable(items, func(i, j int) bool {
-		return musicLess(query, items[i].Title, items[i].AddedAt, items[i].Playback, albumSearchText(items[i]),
-			items[j].Title, items[j].AddedAt, items[j].Playback, albumSearchText(items[j]))
+		return musicLess(query, items[i].Title, items[i].AddedAt, items[i].Playback,
+			items[j].Title, items[j].AddedAt, items[j].Playback)
 	})
 }
 
 func sortMusicTracks(items []catalog.MusicTrack, query MusicQuery) {
+	if isRelevanceSort(query.Sort) {
+		sortByRelevance(items, query.Text, func(item catalog.MusicTrack) rankFields {
+			title, secondary := trackSearchFields(item)
+			return rankFields{Title: title, Secondary: secondary, Plays: item.Playback.PlayCount}
+		})
+		return
+	}
 	sort.SliceStable(items, func(i, j int) bool {
-		return musicLess(query, items[i].Title, items[i].AddedAt, items[i].Playback, trackSearchText(items[i]),
-			items[j].Title, items[j].AddedAt, items[j].Playback, trackSearchText(items[j]))
+		return musicLess(query, items[i].Title, items[i].AddedAt, items[i].Playback,
+			items[j].Title, items[j].AddedAt, items[j].Playback)
 	})
 }
 
 func sortMusicPlaylists(items []catalog.MusicPlaylist, query MusicQuery) {
+	if isRelevanceSort(query.Sort) {
+		sortByRelevance(items, query.Text, func(item catalog.MusicPlaylist) rankFields {
+			title, secondary := playlistSearchFields(item)
+			return rankFields{Title: title, Secondary: secondary, Plays: item.Playback.PlayCount}
+		})
+		return
+	}
 	sort.SliceStable(items, func(i, j int) bool {
-		return musicLess(query, items[i].Name, items[i].CreatedAt, items[i].Playback, playlistSearchText(items[i]),
-			items[j].Name, items[j].CreatedAt, items[j].Playback, playlistSearchText(items[j]))
+		return musicLess(query, items[i].Name, items[i].CreatedAt, items[i].Playback,
+			items[j].Name, items[j].CreatedAt, items[j].Playback)
 	})
 }
 
-func musicLess(query MusicQuery, titleI string, addedI *time.Time, playbackI catalog.PlaybackState, textI string,
-	titleJ string, addedJ *time.Time, playbackJ catalog.PlaybackState, textJ string) bool {
+// isRelevanceSort mirrors the old comparator's default branch: anything that
+// is not one of the explicit orders ranks by relevance.
+func isRelevanceSort(sortMode string) bool {
+	switch sortMode {
+	case SortTitle, SortAdded, SortPlayed:
+		return false
+	default:
+		return true
+	}
+}
+
+// musicLess orders the explicit sort modes; relevance has its own path.
+func musicLess(query MusicQuery, titleI string, addedI *time.Time, playbackI catalog.PlaybackState,
+	titleJ string, addedJ *time.Time, playbackJ catalog.PlaybackState) bool {
 	switch query.Sort {
-	case SortTitle:
-		return strings.ToLower(titleI) < strings.ToLower(titleJ)
 	case SortAdded:
 		return timeAfter(addedI, addedJ)
 	case SortPlayed:
 		return timeAfter(playbackI.LastPlayedAt, playbackJ.LastPlayedAt)
 	default:
-		return ScoreText(textI, query.Text) > ScoreText(textJ, query.Text)
+		return strings.ToLower(titleI) < strings.ToLower(titleJ)
 	}
 }
 

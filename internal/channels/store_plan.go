@@ -169,19 +169,91 @@ func SaveProgramState(ctx context.Context, db *sql.DB, channelID string, state P
 
 // ---- why it played what it played --------------------------------------
 
-// decisionRetention is how many decisions are kept per channel.
+// decisionRetention is how long decisions are kept.
 //
-// Bounded because this is diagnostics, not an archive: a station makes
-// something like a decision a minute, and the question it answers — "why did it
-// just play that" — has a shelf life of about a day.
-const decisionRetention = 400
+// This record used to be bounded by count — a few hundred rows, on the theory
+// that "why did it just play that" has a shelf life of about a day. It does
+// not. The question arrives when somebody gets round to asking it, and on
+// 2026-09-09 that was five days after the choice in question; the row had
+// gone. Time is the budget the record is actually spent against, so time is
+// what bounds it.
+const decisionRetention = 7 * 24 * time.Hour
+
+// decisionCeiling is the most rows a channel keeps however young they are.
+//
+// A backstop, not the budget. A station makes a decision every few minutes,
+// which puts a week at a few thousand rows; the ceiling exists so that a
+// writer gone wrong cannot grow the table without limit before its week is up,
+// and sits far enough above anything the streamer's retry loop can produce
+// that it never decides what an ordinary channel remembers.
+const decisionCeiling = 5000
+
+// decisionRepeatWindow is how soon the same choice, made again, is the previous
+// decision repeated rather than a new one.
+//
+// A station keeps coming back for the same item when the item produces no
+// audio: the streamer discards the play-log row, backs off (thirty seconds at
+// most) and asks again, and the scheduler — its state rewound, the same slot
+// still booked — answers the same. Recorded as a fresh row every time, three
+// hours of an unreachable station wrote three hundred and fifty identical rows
+// and pruned five days of history to make room for them (2026-09-09, "Lofi
+// Weekday", 10:56Z to 14:00Z).
+//
+// Five minutes clears every retry cadence the streamer has — the backoff, the
+// first-byte budget and the stall watchdog, in any combination — while a choice
+// that comes round again after actually playing for a while stays the separate
+// decision it is.
+const decisionRepeatWindow = 5 * time.Minute
 
 // SaveDecision records one choice and prunes the old ones.
+//
+// The same choice made again inside decisionRepeatWindow — the same block, the
+// same selection, or the same way of selecting nothing — is folded into the row
+// it repeats: that row moves to the front of the record, its account becomes
+// the latest one, and it counts how many times it has been repeated and since
+// when. A station retrying a dead source therefore cannot fill the record with
+// one row repeated, and nothing about the outage is lost by that: one decision
+// reading "retried 349 times since 10:56" says more than three hundred and
+// fifty reading the same thing, and the latest account is the one that shows
+// the skip rule being relaxed because nothing else could play.
 func SaveDecision(ctx context.Context, db *sql.DB, channelID string, decision Decision) error {
 	channelID = strings.TrimSpace(channelID)
 	if channelID == "" {
 		return ErrInvalidID
 	}
+	if decision.At.IsZero() {
+		decision.At = time.Now()
+	}
+	decision.At = decision.At.UTC()
+	// Never carried in from the caller: a run is something the store observes.
+	decision.Retries = nil
+
+	previous, found, err := latestDecision(ctx, db, channelID)
+	if err != nil {
+		return err
+	}
+	if found && decision.repeats(previous.decision) && withinRepeatWindow(previous.decidedAt, decision.At) {
+		run := RetrySummary{Count: 1, Since: previous.decidedAt}
+		if earlier := previous.decision.Retries; earlier != nil {
+			run.Count = earlier.Count + 1
+			if !earlier.Since.IsZero() {
+				run.Since = earlier.Since
+			}
+		}
+		decision.Retries = &run
+		encoded, err := json.Marshal(decision)
+		if err != nil {
+			return fmt.Errorf("encode decision: %w", err)
+		}
+		if _, err := db.ExecContext(ctx, `
+			UPDATE channel_decisions SET decided_at = ?, decision_json = ? WHERE id = ?`,
+			decision.At.Format(time.RFC3339), string(encoded), previous.id,
+		); err != nil {
+			return fmt.Errorf("save repeated decision: %w", err)
+		}
+		return nil
+	}
+
 	id, err := newID("cdec")
 	if err != nil {
 		return err
@@ -190,34 +262,75 @@ func SaveDecision(ctx context.Context, db *sql.DB, channelID string, decision De
 	if err != nil {
 		return fmt.Errorf("encode decision: %w", err)
 	}
-	selected := ""
-	if decision.Selected != nil {
-		selected = decision.Selected.Ref
-	}
-	at := decision.At
-	if at.IsZero() {
-		at = time.Now()
-	}
 	if _, err := db.ExecContext(ctx, `
 		INSERT INTO channel_decisions (id, channel_id, decided_at, block_id, selected_ref, decision_json)
 		VALUES (?, ?, ?, ?, ?, ?)`,
-		id, channelID, at.UTC().Format(time.RFC3339), decision.BlockID, selected, string(encoded),
+		id, channelID, decision.At.Format(time.RFC3339), decision.BlockID, decision.selectedRef(), string(encoded),
 	); err != nil {
 		return fmt.Errorf("save decision: %w", err)
 	}
+	return pruneDecisions(ctx, db, channelID, decision.At)
+}
 
-	// Keep the tail bounded. Deleting by id from a sub-select is portable
-	// across the two engines this project has shipped on and does not depend on
-	// a window function.
+// storedDecision is the newest row as the coalescing check needs it: the row
+// to update, the time the column says it was decided (the sort key, which a
+// row written before the record carried its own time may not have in its
+// JSON), and the account itself.
+type storedDecision struct {
+	id        string
+	decidedAt time.Time
+	decision  Decision
+}
+
+// latestDecision reads the channel's newest decision, if it has one.
+func latestDecision(ctx context.Context, db *sql.DB, channelID string) (storedDecision, bool, error) {
+	var stored storedDecision
+	var decidedAt, raw string
+	err := db.QueryRowContext(ctx, `
+		SELECT id, decided_at, decision_json FROM channel_decisions
+		WHERE channel_id = ?
+		ORDER BY decided_at DESC
+		LIMIT 1`, channelID).Scan(&stored.id, &decidedAt, &raw)
+	if errors.Is(err, sql.ErrNoRows) {
+		return storedDecision{}, false, nil
+	}
+	if err != nil {
+		return storedDecision{}, false, fmt.Errorf("read latest decision: %w", err)
+	}
+	if err := json.Unmarshal([]byte(raw), &stored.decision); err != nil {
+		// A row that no longer parses cannot be the one being repeated.
+		return storedDecision{}, false, nil
+	}
+	stored.decidedAt = parseStoredTime(decidedAt)
+	return stored, true, nil
+}
+
+// withinRepeatWindow is whether a decision at `now` follows one at `previous`
+// closely enough to be the same decision made again. A clock that has gone
+// backwards is not a repeat of anything.
+func withinRepeatWindow(previous, now time.Time) bool {
+	if previous.IsZero() || now.Before(previous) {
+		return false
+	}
+	return now.Sub(previous) <= decisionRepeatWindow
+}
+
+// pruneDecisions drops what is older than the retention and, should a channel
+// have written more than the ceiling inside it, the oldest beyond that.
+func pruneDecisions(ctx context.Context, db *sql.DB, channelID string, now time.Time) error {
+	cutoff := now.Add(-decisionRetention).UTC().Format(time.RFC3339)
+	// Deleting by id from a sub-select is portable across the two engines this
+	// project has shipped on and does not depend on a window function.
 	if _, err := db.ExecContext(ctx, `
 		DELETE FROM channel_decisions
 		WHERE channel_id = ?
-		  AND id NOT IN (
+		  AND (decided_at < ?
+		    OR id NOT IN (
 			SELECT id FROM channel_decisions
 			WHERE channel_id = ?
 			ORDER BY decided_at DESC
 			LIMIT ?
-		  )`, channelID, channelID, decisionRetention); err != nil {
+		  ))`, channelID, cutoff, channelID, decisionCeiling); err != nil {
 		return fmt.Errorf("prune decisions: %w", err)
 	}
 	return nil

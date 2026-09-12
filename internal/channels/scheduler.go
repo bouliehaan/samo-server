@@ -154,10 +154,26 @@ type EpisodeProgress struct {
 	ProgressSeconds int
 }
 
+// EpisodeListening is who has been through an episode, in two parts that the
+// rules must never confuse.
+//
+// Listener is the furthest any PERSON on the server has got, merged across all
+// of them. Station is how far the radio's own airing got, written under the
+// station's own identity by EpisodeAiringRecorder. They come back together
+// because they are read together, and they come back apart because they answer
+// different questions: a person who has heard an episode does not want it
+// again, ever; the station having aired an episode once says nothing about
+// whether anybody was in the room, which is exactly what the obligation's
+// credit is for.
+type EpisodeListening struct {
+	Listener EpisodeProgress
+	Station  EpisodeProgress
+}
+
 // EpisodeProgressLookup reports playback progress for podcast episodes across
-// every listener on the server.
+// every listener on the server, with the station's own listening kept apart.
 type EpisodeProgressLookup interface {
-	EpisodeProgress(ctx context.Context, episodeIDs []string) (map[string]EpisodeProgress, error)
+	EpisodeProgress(ctx context.Context, episodeIDs []string) (map[string]EpisodeListening, error)
 }
 
 // EpisodeAiringRecorder writes back what the STATION itself got through.

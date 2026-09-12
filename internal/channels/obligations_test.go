@@ -339,3 +339,99 @@ func TestSkippingSpendsOneSurfacing(t *testing.T) {
 		t.Fatalf("skipping an S-tier episode twice still left it owed (%s)", twice.State)
 	}
 }
+
+// The queue is an order; the running order is the queue with the rules
+// applied. On 2026-09-12 the wall put an A-tier episode that had aired at
+// lunchtime and was owed a second hearing AHEAD of a show that had not aired at
+// all, because it read the queue as "what plays next" and nothing told it that
+// item separation was still holding the first one back. JudgeOwed is that
+// telling, from the decision's own rules.
+func TestJudgeOwedReportsWhatTheRulesHoldBack(t *testing.T) {
+	now := time.Date(2026, 9, 12, 10, 0, 0, 0, time.UTC)
+	sources := []Source{
+		podcastSource("dillon", "The Tim Dillon Show", "p-dillon"),
+		podcastSource("huberman", "Huberman Lab", "p-huberman"),
+	}
+	sources[0].Config["tier"] = "A"
+	sources[1].Config["tier"] = "B"
+	// Two new episodes on a shelf of back catalogue: the separation rules are
+	// fitted to what the library can satisfy, and a library of two episodes
+	// could not keep an eight-hour rule, so the shelf has to be real.
+	shelf := func(show string, fresh catalog.PodcastEpisode) []catalog.PodcastEpisode {
+		list := []catalog.PodcastEpisode{fresh}
+		for back := 0; back < 15; back++ {
+			list = append(list, episode(show+"-archive-"+string(rune('a'+back)), "Archive", now.AddDate(0, 0, -40-back), 60))
+		}
+		return list
+	}
+	cat := &stubCatalog{
+		episodes: map[string][]catalog.PodcastEpisode{
+			"p-dillon":   shelf("dillon", episode("dillon-1", "Episode 412", now.Add(-3*time.Hour), 60)),
+			"p-huberman": shelf("huberman", episode("huberman-1", "Sleep toolkit", now.Add(-4*time.Hour), 60)),
+		},
+	}
+	plan := Plan{
+		Version:    PlanVersion,
+		Categories: []CategoryDef{{ID: "talk", Target: 1}},
+		Pools:      []Pool{{ID: "talk", SourceIDs: []string{"dillon", "huberman"}}},
+		Blocks: []Block{{
+			ID: "general", Label: "General rotation", Default: true,
+			Pools: []PoolRef{{Pool: "talk"}},
+		}},
+		// A-tier episodes are owed twice, so one airing leaves it owed.
+		Freshness: FreshnessPolicy{Surfacings: map[string]int{"A": 2}},
+	}
+	s := newStation(t, plan, sources, cat, now)
+
+	// Obligations are noticed by decisions, not by looking; a judgement is a
+	// look. One decision first, as the streamer would have made by now.
+	s.decide()
+
+	// Before anything airs, nothing is held: both could go out now.
+	judged := s.engine.JudgeOwed(context.Background(), s.now, s.state)
+	for _, ref := range []string{"episode:dillon-1", "episode:huberman-1"} {
+		j, ok := judged[ref]
+		if !ok {
+			t.Fatalf("%s is owed and should have been judged: %v", ref, judged)
+		}
+		if j.Held != nil {
+			t.Fatalf("%s should be free to air before anything has aired, held by %s: %s", ref, j.Held.Rule, j.Held.Reason)
+		}
+	}
+	if judged["episode:dillon-1"].Show != "The Tim Dillon Show" {
+		t.Fatalf("a judgement names the show, got %q", judged["episode:dillon-1"].Show)
+	}
+
+	// The A-tier show airs (the more urgent of the two), which spends one of
+	// its two surfacings: still owed, and at the front of the queue.
+	first := s.play()
+	if first.ItemRef != "episode:dillon-1" {
+		t.Fatalf("the A-tier episode should air first, got %s", first.ItemRef)
+	}
+	s.now = s.now.Add(70 * time.Minute)
+
+	queue := s.engine.pendingObligations(context.Background(), s.now)
+	if queue.Len() != 2 || queue.Pending[0].ItemRef != "episode:dillon-1" {
+		t.Fatalf("after one airing the A-tier episode should still head the queue: %+v", queue.Pending)
+	}
+
+	// But it is not next: item separation holds it for eight hours after an
+	// airing that counted in full, and the queue's order does not say so.
+	judged = s.engine.JudgeOwed(context.Background(), s.now, s.state)
+	held := judged["episode:dillon-1"].Held
+	if held == nil {
+		t.Fatalf("the episode that just aired should be held by separation, judged free: %+v", judged)
+	}
+	if held.Rule != "itemSeparation" {
+		t.Fatalf("expected itemSeparation to be the hold, got %s: %s", held.Rule, held.Reason)
+	}
+	if judged["episode:huberman-1"].Held != nil {
+		t.Fatalf("the show that has not aired should be free: %+v", judged["episode:huberman-1"].Held)
+	}
+
+	// Once the separation has run its course, it is free again.
+	s.now = s.now.Add(8 * time.Hour)
+	if held := s.engine.JudgeOwed(context.Background(), s.now, s.state)["episode:dillon-1"].Held; held != nil {
+		t.Fatalf("nine hours on, the episode should be free to air again, still held by %s: %s", held.Rule, held.Reason)
+	}
+}

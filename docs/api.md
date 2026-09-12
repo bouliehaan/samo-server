@@ -286,6 +286,8 @@ only the owner can edit, delete, or change visibility.
 
 Music search supports optional filters on the same route: `genre`, `year`, `favorite`, `starred`, `recentlyPlayed`, `recentlyAdded`, `completed`, `minRating`, and `sort` (`relevance`, `title`, `added`, `played`). Playback-aware filters use the authenticated user's overlay.
 
+`relevance` (the default) ranks on the title: an exact title first, then titles that start with the query, then titles that contain it whole, then titles that merely contain its words. Artist, album, genre and description text only place a result whose title matched nothing. Ties go to the user's play count, then the title, so a client that shows the first few results gets the one the user typed. The same order applies to audiobook and podcast search.
+
 List routes support `limit` and `offset`.
 
 Browse routes return a `view` plus paginated `artists`, `albums`, `tracks`, and `playlists` slices. Each entity includes the authenticated user's playback overlay (`favorite`, `starred`, `lastPlayedAt`, progress, ratings, etc.). Recently-played is ordered by `lastPlayedAt` descending; recently-added uses entity `createdAt` / `addedAt`.

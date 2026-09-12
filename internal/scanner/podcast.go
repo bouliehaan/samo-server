@@ -64,7 +64,7 @@ func (s *Scanner) scanPodcast(ctx context.Context, library Library, root string,
 		audioPaths = append(audioPaths, probed.AudioFile.Path)
 		checksums = append(checksums, probed.AudioFile.Checksum)
 	}
-	cover := s.resolveCover(ctx, group.Root, audioPaths, checksums, nil)
+	cover := s.resolveCover(ctx, root, group.Root, audioPaths, checksums, nil)
 
 	item := catalog.PodcastItem{
 		ID:              podcastID,

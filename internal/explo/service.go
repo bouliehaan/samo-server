@@ -293,6 +293,11 @@ func (s *Service) ProcessNewTracks(ctx context.Context) (Result, error) {
 		}
 	}
 
+	// Album titles the identify loop above could not settle, or that predate
+	// the ledger keeping them. Before syncExploState so a title applied here
+	// reaches the projection in the same reload.
+	titlesResolved := s.backfillAlbumTitles(ctx)
+
 	// Re-derive which albums belong out of Recently Added, the ledger, and the
 	// playlist (existence + membership) from the folder that's *currently*
 	// configured. Fully self-correcting: narrowing (or clearing) the explo
@@ -306,7 +311,7 @@ func (s *Service) ProcessNewTracks(ctx context.Context) (Result, error) {
 	}
 	result.Hidden += hidden
 
-	if (result.Scanned > 0 || hidden > 0 || unhidden > 0 || otherChanged) && s.reloadCatalog != nil {
+	if (result.Scanned > 0 || hidden > 0 || unhidden > 0 || otherChanged || titlesResolved > 0) && s.reloadCatalog != nil {
 		if err := s.reloadCatalog(ctx); err != nil {
 			s.logger("explo: catalog reload failed: %v", err)
 		}
@@ -413,6 +418,20 @@ func exploPathClause(dirs []string) (string, []any) {
 //     point the folder at the real drop subfolder (or clear it) and every album
 //     that isn't actually under it comes back into Recently Added.
 //
+// An album stops being hidden for one of two reasons, and they mean different
+// things for its added_at:
+//   - A library-proper file arrived BESIDE its drop: Keep in Library copied a
+//     track out of the folder. The album is entering the library now, so
+//     added_at is set to now. It used to keep the date of the drop's first
+//     scan — the day explo fetched the file, not the day anyone chose it — so
+//     a fresh keep sorted into Recently Added at that week's position rather
+//     than the top, and the shelf never showed what had just been kept.
+//   - Nothing of it is under an explo folder any more: the folder was narrowed
+//     or cleared, or its drops were pruned. Those are library albums that were
+//     wrongly hidden, and their added_at is right as it stands. (A keep whose
+//     drop rotates out before any reconcile sees the copy lands here too and
+//     keeps its old date — a window of seconds, once a week.)
+//
 // Hiding is derived from the file PATH, not from the explo_tracks ledger, so it
 // is immediate (a fresh drop is hidden on the next scan, before AcoustID even
 // runs) and self-correcting (it can't get wedged by stale ledger rows). It only
@@ -421,48 +440,41 @@ func exploPathClause(dirs []string) (string, []any) {
 // Returns how many albums it newly hid and newly un-hid.
 func (s *Service) reconcileHiddenAlbums(ctx context.Context, dirs []string) (hidden, unhidden int64, err error) {
 	match, args := exploPathClause(dirs)
+	underFolder := fmt.Sprintf(`EXISTS (
+		    SELECT 1 FROM music_tracks mt JOIN media_files mf ON mf.track_id = mt.id
+		    WHERE mt.album_id = music_albums.id AND %s)`, match)
+	outsideFolder := fmt.Sprintf(`EXISTS (
+		    SELECT 1 FROM music_tracks mt JOIN media_files mf ON mf.track_id = mt.id
+		    WHERE mt.album_id = music_albums.id AND NOT %s)`, match)
 
-	hideSQL := fmt.Sprintf(`
+	hidden, err = s.execCount(ctx, `
 		UPDATE music_albums
 		SET hidden_from_recently_added = 1, updated_at = CURRENT_TIMESTAMP
 		WHERE hidden_from_recently_added = 0
-		  AND EXISTS (
-		    SELECT 1 FROM music_tracks mt JOIN media_files mf ON mf.track_id = mt.id
-		    WHERE mt.album_id = music_albums.id AND %s)
-		  AND NOT EXISTS (
-		    SELECT 1 FROM music_tracks mt JOIN media_files mf ON mf.track_id = mt.id
-		    WHERE mt.album_id = music_albums.id AND NOT %s)`, match, match)
-	var res sql.Result
-	if err := storage.Retry(ctx, exploWriteAttempts, func() error {
-		var retryErr error
-		res, retryErr = s.db.ExecContext(ctx, hideSQL, append(append([]any{}, args...), args...)...)
-		return retryErr
-	}); err != nil {
+		  AND `+underFolder+`
+		  AND NOT `+outsideFolder, repeatArgs(args, 2)...)
+	if err != nil {
 		return 0, 0, fmt.Errorf("explo hide albums: %w", err)
 	}
-	hidden, _ = res.RowsAffected()
 
-	unhideSQL := fmt.Sprintf(`
+	kept, err := s.execCount(ctx, `
+		UPDATE music_albums
+		SET hidden_from_recently_added = 0, added_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP
+		WHERE hidden_from_recently_added = 1
+		  AND `+underFolder+`
+		  AND `+outsideFolder, repeatArgs(args, 2)...)
+	if err != nil {
+		return hidden, 0, fmt.Errorf("explo unhide kept albums: %w", err)
+	}
+	gone, err := s.execCount(ctx, `
 		UPDATE music_albums
 		SET hidden_from_recently_added = 0, updated_at = CURRENT_TIMESTAMP
 		WHERE hidden_from_recently_added = 1
-		  AND (
-		    NOT EXISTS (
-		      SELECT 1 FROM music_tracks mt JOIN media_files mf ON mf.track_id = mt.id
-		      WHERE mt.album_id = music_albums.id AND %s)
-		    OR EXISTS (
-		      SELECT 1 FROM music_tracks mt JOIN media_files mf ON mf.track_id = mt.id
-		      WHERE mt.album_id = music_albums.id AND NOT %s))`, match, match)
-	var res2 sql.Result
-	if err := storage.Retry(ctx, exploWriteAttempts, func() error {
-		var retryErr error
-		res2, retryErr = s.db.ExecContext(ctx, unhideSQL, append(append([]any{}, args...), args...)...)
-		return retryErr
-	}); err != nil {
-		return hidden, 0, fmt.Errorf("explo unhide albums: %w", err)
+		  AND NOT `+underFolder, args...)
+	if err != nil {
+		return hidden, kept, fmt.Errorf("explo unhide albums: %w", err)
 	}
-	unhidden, _ = res2.RowsAffected()
-	return hidden, unhidden, nil
+	return hidden, kept + gone, nil
 }
 
 // reconcileExploTracks makes music_tracks.is_explo match the CURRENTLY
@@ -480,52 +492,76 @@ func (s *Service) reconcileHiddenAlbums(ctx context.Context, dirs []string) (hid
 // This is the per-track silo marker the catalog projection reads — album
 // hiding keeps Recently Added clean, but only a track-level fact lets the
 // list/browse/search surfaces exclude explo content without path joins.
+//
+// Un-flagging splits the same two ways as un-hiding an album, for the same
+// reason: a track that gains a library copy beside its drop is being added to
+// the library now and takes added_at = now, so the newest-first surfaces
+// (Unplayed, Discovery, sort=added) rank it as the arrival it is; a track
+// whose files simply stopped being under the folder keeps its date.
 // Bumps updated_at on flipped rows so delta-syncing clients re-pull them.
 // Returns how many rows it newly flagged and un-flagged.
 func (s *Service) reconcileExploTracks(ctx context.Context, dirs []string) (flagged, unflagged int64, err error) {
 	match, args := exploPathClause(dirs)
+	underFolder := fmt.Sprintf(`EXISTS (
+		    SELECT 1 FROM media_files mf
+		    WHERE mf.track_id = music_tracks.id AND %s)`, match)
+	outsideFolder := fmt.Sprintf(`EXISTS (
+		    SELECT 1 FROM media_files mf
+		    WHERE mf.track_id = music_tracks.id AND NOT %s)`, match)
 
-	flagSQL := fmt.Sprintf(`
+	flagged, err = s.execCount(ctx, `
 		UPDATE music_tracks
 		SET is_explo = 1, updated_at = CURRENT_TIMESTAMP
 		WHERE is_explo = 0
-		  AND EXISTS (
-		    SELECT 1 FROM media_files mf
-		    WHERE mf.track_id = music_tracks.id AND %s)
-		  AND NOT EXISTS (
-		    SELECT 1 FROM media_files mf
-		    WHERE mf.track_id = music_tracks.id AND NOT %s)`, match, match)
-	var res sql.Result
-	if err := storage.Retry(ctx, exploWriteAttempts, func() error {
-		var retryErr error
-		res, retryErr = s.db.ExecContext(ctx, flagSQL, append(append([]any{}, args...), args...)...)
-		return retryErr
-	}); err != nil {
+		  AND `+underFolder+`
+		  AND NOT `+outsideFolder, repeatArgs(args, 2)...)
+	if err != nil {
 		return 0, 0, fmt.Errorf("explo flag tracks: %w", err)
 	}
-	flagged, _ = res.RowsAffected()
 
-	unflagSQL := fmt.Sprintf(`
+	kept, err := s.execCount(ctx, `
+		UPDATE music_tracks
+		SET is_explo = 0, added_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP
+		WHERE is_explo = 1
+		  AND `+underFolder+`
+		  AND `+outsideFolder, repeatArgs(args, 2)...)
+	if err != nil {
+		return flagged, 0, fmt.Errorf("explo unflag kept tracks: %w", err)
+	}
+	gone, err := s.execCount(ctx, `
 		UPDATE music_tracks
 		SET is_explo = 0, updated_at = CURRENT_TIMESTAMP
 		WHERE is_explo = 1
-		  AND (
-		    NOT EXISTS (
-		      SELECT 1 FROM media_files mf
-		      WHERE mf.track_id = music_tracks.id AND %s)
-		    OR EXISTS (
-		      SELECT 1 FROM media_files mf
-		      WHERE mf.track_id = music_tracks.id AND NOT %s))`, match, match)
-	var res2 sql.Result
+		  AND NOT `+underFolder, args...)
+	if err != nil {
+		return flagged, kept, fmt.Errorf("explo unflag tracks: %w", err)
+	}
+	return flagged, kept + gone, nil
+}
+
+// execCount runs one write under the explo retry policy and reports how many
+// rows it changed.
+func (s *Service) execCount(ctx context.Context, query string, args ...any) (int64, error) {
+	var res sql.Result
 	if err := storage.Retry(ctx, exploWriteAttempts, func() error {
 		var retryErr error
-		res2, retryErr = s.db.ExecContext(ctx, unflagSQL, append(append([]any{}, args...), args...)...)
+		res, retryErr = s.db.ExecContext(ctx, query, args...)
 		return retryErr
 	}); err != nil {
-		return flagged, 0, fmt.Errorf("explo unflag tracks: %w", err)
+		return 0, err
 	}
-	unflagged, _ = res2.RowsAffected()
-	return flagged, unflagged, nil
+	n, _ := res.RowsAffected()
+	return n, nil
+}
+
+// repeatArgs returns args concatenated with itself n times, for a statement
+// that interpolates the same parameterised clause n times.
+func repeatArgs(args []any, n int) []any {
+	out := make([]any, 0, len(args)*n)
+	for i := 0; i < n; i++ {
+		out = append(out, args...)
+	}
+	return out
 }
 
 // pruneVanishedFiles deletes tracks whose file has disappeared from an explo
@@ -1042,15 +1078,18 @@ func (s *Service) recordProcessed(ctx context.Context, trackID, status string, m
 	// enforceable. The cover columns are deliberately untouched — the cover
 	// engine (covers.go) owns them. The release group MBID IS persisted here
 	// so that engine can build Cover Art Archive URLs without re-asking
-	// MusicBrainz for an id AcoustID already reported. Wrapped in
-	// storage.Retry: a transient Postgres failure (serialization/deadlock)
-	// here would otherwise drop the ledger update even when identification
-	// succeeded, leaving the track "unmatched" to re-run forever.
+	// MusicBrainz for an id AcoustID already reported — and its title with it,
+	// for the same reason: Keep files the copy under the album, and used to
+	// re-ask MusicBrainz for the name inside the request (see keepAlbumTitle).
+	// Wrapped in storage.Retry: a transient Postgres failure
+	// (serialization/deadlock) here would otherwise drop the ledger update
+	// even when identification succeeded, leaving the track "unmatched" to
+	// re-run forever.
 	return storage.Retry(ctx, exploWriteAttempts, func() error {
 		_, err := s.db.ExecContext(ctx, `
 			INSERT INTO explo_tracks (
-			  track_id, status, acoustid_id, musicbrainz_recording_id, musicbrainz_release_group_id, matched_title, matched_artist, score, error, processed_at, attempts
-			) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, 1)
+			  track_id, status, acoustid_id, musicbrainz_recording_id, musicbrainz_release_group_id, matched_title, matched_artist, matched_album, score, error, processed_at, attempts
+			) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, 1)
 			ON CONFLICT(track_id) DO UPDATE SET
 			  status = excluded.status,
 			  acoustid_id = excluded.acoustid_id,
@@ -1058,11 +1097,137 @@ func (s *Service) recordProcessed(ctx context.Context, trackID, status string, m
 			  musicbrainz_release_group_id = excluded.musicbrainz_release_group_id,
 			  matched_title = excluded.matched_title,
 			  matched_artist = excluded.matched_artist,
+			  matched_album = excluded.matched_album,
 			  score = excluded.score,
 			  error = excluded.error,
 			  processed_at = excluded.processed_at,
 			  attempts = explo_tracks.attempts + 1`,
-			trackID, status, match.AcoustID, match.MusicBrainzRecordingID, match.MusicBrainzReleaseGroupID, match.Title, match.Artist, match.Score, errText)
+			trackID, status, match.AcoustID, match.MusicBrainzRecordingID, match.MusicBrainzReleaseGroupID, match.Title, match.Artist, match.Album, match.Score, errText)
+		return err
+	})
+}
+
+// albumTitleBackfillBatch caps how many blank album titles one pass resolves.
+// Each is a throttled MusicBrainz call, so this bounds a pass at about two
+// minutes; whatever is left waits for the next one, which is never far off.
+const albumTitleBackfillBatch = 100
+
+// backfillAlbumTitles fills in matched_album for identified rows that have
+// none.
+//
+// Two kinds of row are blank. Rows identified before the column existed —
+// their title went into the album override at the time and nowhere else — and
+// rows identified while MusicBrainz was unreachable, where resolveAlbumTitle
+// left the match untouched rather than clear it. Both get exactly the lookup
+// identification would have made, from the ids the ledger already holds. The
+// answer is applied to the album ONLY when the album has no title override
+// yet — that is the second kind of row, whose album is still nameless. The
+// first kind already carries one, and a pass that exists to fill blanks has
+// no business rewriting what is on file.
+//
+// This runs on the pipeline's own passes because that is where MusicBrainz
+// traffic belongs. Keep reads the ledger and never asks the network: an
+// interactive request that waits on a rate-limited API behind a VPN is one
+// that times out on the phone while succeeding on the server.
+//
+// A lookup that fails stays blank and is simply retried next pass. Passes are
+// half an hour apart and the drop folder is small, so the pathological case —
+// a release group MusicBrainz has since merged away — costs one throttled
+// call per pass, which is nothing.
+func (s *Service) backfillAlbumTitles(ctx context.Context) int {
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT et.track_id, et.status, et.musicbrainz_recording_id, et.musicbrainz_release_group_id,
+		       et.matched_title, et.matched_artist, mt.album_id
+		FROM explo_tracks et
+		JOIN music_tracks mt ON mt.id = et.track_id
+		WHERE et.status IN ('matched', 'matched-fallback')
+		  AND et.matched_album = ''
+		  AND (et.musicbrainz_release_group_id <> '' OR et.musicbrainz_recording_id <> '')
+		ORDER BY et.processed_at DESC
+		LIMIT ?`, albumTitleBackfillBatch)
+	if err != nil {
+		s.logger("explo: album title backfill query failed: %v", err)
+		return 0
+	}
+	type owed struct {
+		trackID, albumID string
+		match            identifiedTrack
+	}
+	var due []owed
+	for rows.Next() {
+		var item owed
+		var status string
+		if err := rows.Scan(&item.trackID, &status, &item.match.MusicBrainzRecordingID,
+			&item.match.MusicBrainzReleaseGroupID, &item.match.Title, &item.match.Artist, &item.albumID); err != nil {
+			rows.Close()
+			s.logger("explo: album title backfill scan failed: %v", err)
+			return 0
+		}
+		item.match.Source = "acoustid"
+		if status == "matched-fallback" {
+			item.match.Source = "musicbrainz-search"
+		}
+		due = append(due, item)
+	}
+	rows.Close()
+	if len(due) == 0 {
+		return 0
+	}
+
+	s.logger("explo: resolving album titles for %d identified track(s)", len(due))
+	resolved := 0
+	for _, item := range due {
+		select {
+		case <-ctx.Done():
+			return resolved
+		default:
+		}
+		match := s.resolveAlbumTitle(ctx, item.match)
+		if strings.TrimSpace(match.Album) == "" {
+			continue
+		}
+		if err := storage.Retry(ctx, exploWriteAttempts, func() error {
+			_, err := s.db.ExecContext(ctx, `
+				UPDATE explo_tracks
+				SET matched_album = ?, musicbrainz_release_group_id = ?
+				WHERE track_id = ?`,
+				match.Album, match.MusicBrainzReleaseGroupID, item.trackID)
+			return err
+		}); err != nil {
+			s.logger("explo: album title backfill write failed for %s: %v", item.trackID, err)
+			continue
+		}
+		if s.overriddenAlbumTitle(ctx, item.albumID) == "" {
+			if err := s.applyAlbumTitle(ctx, item.albumID, match); err != nil {
+				s.logger("explo: apply album title failed for %s: %v", item.trackID, err)
+			}
+		}
+		resolved++
+	}
+	s.logger("explo: resolved %d of %d album title(s)", resolved, len(due))
+	return resolved
+}
+
+// applyAlbumTitle writes just the album's title override — the one field a
+// late-resolved title changes. The album half of applyMatch also writes the
+// display artist, which identification already put on file.
+func (s *Service) applyAlbumTitle(ctx context.Context, albumID string, match identifiedTrack) error {
+	if strings.TrimSpace(albumID) == "" || strings.TrimSpace(match.Album) == "" {
+		return nil
+	}
+	return storage.Retry(ctx, exploWriteAttempts, func() error {
+		_, err := s.metadataApply.Apply(ctx, metadata.MetadataApplyRequest{
+			TargetKind: string(metadata.ApplyTargetMusicAlbum),
+			TargetID:   albumID,
+			Candidate: metadata.SearchResult{
+				Provider:  match.Source,
+				MediaType: "album",
+				Title:     match.Album,
+				ID:        albumID,
+			},
+			Fields:             []string{"title"},
+			DeferCatalogReload: true,
+		})
 		return err
 	})
 }

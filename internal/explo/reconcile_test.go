@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/bouliehaan/samo-server/internal/playlists"
 	"github.com/bouliehaan/samo-server/internal/storage/storagetest"
@@ -111,10 +112,10 @@ func seedPathAlbums(t *testing.T, db *sql.DB) {
 	t.Helper()
 	mustExec(t, db, `
 		INSERT INTO libraries (id, name, kind, path) VALUES ('lib-1', 'Music', 'music', '/music');
-		INSERT INTO music_albums (id, title, track_count, duration_seconds, updated_at) VALUES
-		  ('album-explo', 'Explo', 2, 0, '2020-01-01 00:00:00'),
-		  ('album-real', 'Real', 2, 0, '2020-01-01 00:00:00'),
-		  ('album-empty', 'Empty', 0, 0, '2020-01-01 00:00:00');
+		INSERT INTO music_albums (id, title, track_count, duration_seconds, added_at, updated_at) VALUES
+		  ('album-explo', 'Explo', 2, 0, '2020-01-01 00:00:00', '2020-01-01 00:00:00'),
+		  ('album-real', 'Real', 2, 0, '2020-01-01 00:00:00', '2020-01-01 00:00:00'),
+		  ('album-empty', 'Empty', 0, 0, '2020-01-01 00:00:00', '2020-01-01 00:00:00');
 		INSERT INTO music_tracks (id, title, display_artist, album_id, duration_seconds) VALUES
 		  ('e1', 'a', 'x', 'album-explo', 200),
 		  ('e2', 'b', 'x', 'album-explo', 200),
@@ -200,6 +201,80 @@ func TestReconcileUnhidesWhenFolderNarrowsOrClears(t *testing.T) {
 	}
 	assertHidden(t, db, "album-explo", false)
 	assertHidden(t, db, "album-real", false)
+
+	// Recovery is not arrival: both albums were in the library all along, so
+	// neither may be re-dated to today by coming back into Recently Added.
+	assertAddedAt(t, db, "music_albums", "album-explo", "2020-01-01 00:00:00")
+	assertAddedAt(t, db, "music_albums", "album-real", "2020-01-01 00:00:00")
+}
+
+// TestReconcileRedatesAlbumWhenKeptCopyArrives is the regression for a kept
+// track never reaching the top of Recently Added. The drop and its library
+// copy share one album row, and that row's added_at was the drop's first
+// scan — the day explo fetched it — so un-hiding put the album back at that
+// week's position. Gaining a library-proper file beside the drop is the
+// album's arrival in the library, and its added_at has to say so.
+func TestReconcileRedatesAlbumWhenKeptCopyArrives(t *testing.T) {
+	ctx := context.Background()
+	db := newMigratedDB(t)
+	seedPathAlbums(t, db)
+	svc := &Service{db: db}
+
+	if h, _, err := svc.reconcileHiddenAlbums(ctx, []string{"/music/explo"}); err != nil || h != 1 {
+		t.Fatalf("initial hide = (%d, %v), want (1, nil)", h, err)
+	}
+	assertAddedAt(t, db, "music_albums", "album-explo", "2020-01-01 00:00:00")
+
+	// Keep copies e1 into the library; the rescan catalogues the copy against
+	// the same track, so the album is now backed from both sides of the folder.
+	mustExec(t, db, `
+		INSERT INTO media_files (id, library_id, track_id, path, relative_path, file_name, duration_seconds)
+		VALUES ('mf-e1-kept', 'lib-1', 'e1', '/music/real/Explo/01 - a.mp3', 'real/Explo/01 - a.mp3', '01 - a.mp3', 200)`)
+
+	h, u, err := svc.reconcileHiddenAlbums(ctx, []string{"/music/explo"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if h != 0 || u != 1 {
+		t.Fatalf("after keep hidden=%d unhidden=%d, want 0/1", h, u)
+	}
+	assertHidden(t, db, "album-explo", false)
+	var addedAt, updatedAt string
+	if err := db.QueryRowContext(ctx, `SELECT added_at, updated_at FROM music_albums WHERE id = 'album-explo'`).Scan(&addedAt, &updatedAt); err != nil {
+		t.Fatal(err)
+	}
+	if addedAt == "2020-01-01 00:00:00" {
+		t.Fatal("kept album still dated by the drop's first scan; it must be re-dated to the keep")
+	}
+	if addedAt[:10] != time.Now().UTC().Format("2006-01-02") {
+		t.Fatalf("kept album added_at = %q, want today", addedAt)
+	}
+	if updatedAt == "2020-01-01 00:00:00" {
+		t.Fatal("kept album updated_at must advance so the mirror re-syncs")
+	}
+	// Its untouched neighbour keeps its date.
+	assertAddedAt(t, db, "music_albums", "album-real", "2020-01-01 00:00:00")
+
+	// Idempotent: the album is visible now and a second pass does not re-date
+	// it, so a later keep into the same album leaves it where it was — the
+	// same as adding a track to any album already in the library.
+	mustExec(t, db, `UPDATE music_albums SET added_at = '2021-06-01 00:00:00' WHERE id = 'album-explo'`)
+	if h, u, _ := svc.reconcileHiddenAlbums(ctx, []string{"/music/explo"}); h != 0 || u != 0 {
+		t.Fatalf("second pass hidden=%d unhidden=%d, want 0/0", h, u)
+	}
+	assertAddedAt(t, db, "music_albums", "album-explo", "2021-06-01 00:00:00")
+}
+
+// assertAddedAt checks the added_at column of one row in table.
+func assertAddedAt(t *testing.T, db *sql.DB, table, id, want string) {
+	t.Helper()
+	var got string
+	if err := db.QueryRowContext(context.Background(), `SELECT added_at FROM `+table+` WHERE id = ?`, id).Scan(&got); err != nil {
+		t.Fatal(err)
+	}
+	if got != want {
+		t.Fatalf("%s %s added_at = %q, want %q", table, id, got, want)
+	}
 }
 
 // TestSyncExploStatePrunesLedgerAndPlaylist proves that narrowing the folder

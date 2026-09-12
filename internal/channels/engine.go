@@ -537,6 +537,116 @@ func (e *Engine) pendingObligations(ctx context.Context, now time.Time) Obligati
 	return NewObligationQueue(stored, now, e.Plan.Freshness)
 }
 
+// OwedJudgement is the decision's own view of one thing the station owes.
+type OwedJudgement struct {
+	// Held is the rule standing between it and the air right now, or nil.
+	Held *Hold
+	// Show is what the episode's show is called, as the candidate carries it:
+	// the source's label, or the feed's own title when the source has none.
+	Show string
+}
+
+// JudgeOwed asks the decision's own rules about what the station owes,
+// without deciding anything: for each pending obligation, whether it could
+// air at this moment, and the rule and reason when it could not.
+//
+// The queue orders what is owed by urgency, and that is the order the station
+// means to play them in -- but a decision filters before it scores, and an
+// episode the rules hold back is not next however urgent it is. The owed list
+// used to say only the order, and a wall reading it as a running order put an
+// episode with eight hours of separation still to run at the front. This is
+// the same enumeration, the same constraint environment and the same
+// applyConstraints the decision runs, asked about the owed set alone; there
+// is deliberately no second statement of any rule here.
+//
+// Every owed episode is judged from its own source whatever block is on: a
+// hold is a fact about the episode, and a block that is not offering podcasts
+// this hour is not holding anything. A peek, so obligations are READ and not
+// noticed, and nothing is committed.
+func (e *Engine) JudgeOwed(ctx context.Context, now time.Time, state ProgramState) map[string]OwedJudgement {
+	out := map[string]OwedJudgement{}
+	if e == nil || e.Obligations == nil {
+		return out
+	}
+	loc := e.location()
+	now = now.In(loc)
+
+	timeline := BuildTimeline(e.Plan, now, loc)
+	tail, err := e.History.Tail(ctx, 24*time.Hour, 200, now)
+	if err != nil {
+		tail = nil
+	}
+	env := e.enumerationEnv(ctx, now, loc)
+	env.owed = e.pendingObligations(ctx, now)
+	if env.owed.Len() == 0 {
+		return out
+	}
+
+	state = rollListeningDay(state, e.listeningDay(), loc, now)
+	cond := ConditionContext{
+		Window: timeline.Window(),
+		PoolAvailable: func(poolID string) bool {
+			return e.PoolHasContent(ctx, poolID, env)
+		},
+		ObligationsPending: env.owed.Len(),
+		EnteredToday:       state.EnteredToday,
+	}
+	block := ResolveBlock(e.Plan, timeline, state, cond, now)
+	intent := e.buildIntent(block, timeline, tail, env)
+
+	// What is owed, as candidates -- and what is being held for the listening
+	// day, which is owed too and refused by the first rule in the set.
+	owed := []Candidate{}
+	for _, src := range e.Sources {
+		if !src.Enabled || !TraitsFor(src).SupportsFreshness {
+			continue
+		}
+		for _, candidate := range e.enumerateSource(ctx, src, env) {
+			if candidate.Owed || candidate.Held {
+				owed = append(owed, candidate)
+				out[candidate.Ref] = OwedJudgement{Show: candidate.Artist}
+			}
+		}
+	}
+	if len(owed) == 0 {
+		return out
+	}
+
+	// The rules are fitted to the library exactly as the decision fits them,
+	// or a two-episode owed set would shrink an eight-hour separation to
+	// forty-five minutes: against what the block offers -- the owed set alone
+	// at a position that asks for something owed, the whole shelf otherwise --
+	// with the owed episodes added when the block is not offering them, so a
+	// music hour judges against the same shelf the next podcast position will.
+	library := owed
+	if intent.Want != WantObligation {
+		seen := map[string]bool{}
+		for _, candidate := range owed {
+			seen[candidate.Ref] = true
+		}
+		for _, candidate := range e.Enumerate(ctx, intent, env) {
+			if !seen[candidate.Ref] {
+				seen[candidate.Ref] = true
+				library = append(library, candidate)
+			}
+		}
+	}
+
+	// One strict pass, no relaxation: a hold is a rule standing in the way
+	// right now, and whether the decision will bend that rule -- it does, at a
+	// position that asks for something owed and finds everything owed held --
+	// is the decision's to settle when it is made. Reporting a relaxed answer
+	// would call an episode free because its neighbours were held too.
+	cenv := fitSeparationToLibrary(e.constraintEnv(ctx, now, intent, tail, library), library)
+	_, rejections := constrainOnce(standardConstraints(), owed, cenv)
+	for _, rejection := range rejections {
+		judgement := out[rejection.Ref]
+		judgement.Held = &Hold{Rule: rejection.Rule, Reason: rejection.Reason}
+		out[rejection.Ref] = judgement
+	}
+	return out
+}
+
 // refreshObligations notices anything newly published and returns what the
 // station currently owes, most urgent first.
 func (e *Engine) refreshObligations(ctx context.Context, now time.Time, env enumerationContext) ObligationQueue {
@@ -555,6 +665,8 @@ func (e *Engine) refreshObligations(ctx context.Context, now time.Time, env enum
 	// episodes by raw id, which is unreadable and was the reason a Stavvy's
 	// World episode could not be recognised as one.
 	names := map[string]string{}
+	// The episodes behind the fresh refs, for asking who has heard them.
+	episodes := map[string]Candidate{}
 	for _, src := range e.Sources {
 		if !src.Enabled || !TraitsFor(src).SupportsFreshness {
 			continue
@@ -571,6 +683,9 @@ func (e *Engine) refreshObligations(ctx context.Context, now time.Time, env enum
 			expires := candidate.Published.Add(window)
 			if !expires.After(now) {
 				continue
+			}
+			if candidate.episode != nil {
+				episodes[candidate.Ref] = candidate
 			}
 			fresh = append(fresh, Obligation{
 				ChannelID:   e.Channel.ID,
@@ -596,6 +711,7 @@ func (e *Engine) refreshObligations(ctx context.Context, now time.Time, env enum
 		e.logf("channel %s: could not read obligations: %v", e.Channel.ID, err)
 		return ObligationQueue{}
 	}
+	stored = e.settleReached(ctx, now, stored, episodes)
 	// Labels live on the source, not in the row, for anything written before the
 	// label changed — but only when the source HAS one. Overwriting a good name
 	// with an empty string is how the owed list ended up showing source ids.
@@ -609,6 +725,52 @@ func (e *Engine) refreshObligations(ctx context.Context, now time.Time, env enum
 		}
 	}
 	return NewObligationQueue(stored, now, e.Plan.Freshness)
+}
+
+// settleReached retires whatever is still owed that somebody here has already
+// heard by another route, and returns the list with those rows settled.
+//
+// An obligation is owed until it reaches the listener, and a client is one way
+// for it to. Left pending, an episode heard on a phone sits at the top of the
+// owed list for the rest of its freshness window while the already-heard rule
+// refuses it at every decision — which the station reports, accurately, as
+// "what is owed cannot air" — and a block that ends when obligations.pending
+// reaches zero never does. Only a PERSON settles it this way: the station's own
+// airings are the credit the row already carries.
+func (e *Engine) settleReached(ctx context.Context, now time.Time, stored []Obligation, episodes map[string]Candidate) []Obligation {
+	if e.Listened == nil {
+		return stored
+	}
+	pending := make([]Candidate, 0, len(stored))
+	for _, obligation := range stored {
+		if !obligation.Pending() {
+			continue
+		}
+		if candidate, ok := episodes[obligation.ItemRef]; ok {
+			pending = append(pending, candidate)
+		}
+	}
+	if len(pending) == 0 {
+		return stored
+	}
+	heard, _ := e.listenedRefs(ctx, pending)
+	if len(heard) == 0 {
+		return stored
+	}
+	for index := range stored {
+		if !stored[index].Pending() || !heard[stored[index].ItemRef] {
+			continue
+		}
+		if err := e.Obligations.Reached(ctx, stored[index].ItemRef, now); err != nil {
+			e.logf("channel %s: could not settle %s as heard: %v", e.Channel.ID, stored[index].ItemRef, err)
+			continue
+		}
+		if stored[index].Credit < stored[index].Target() {
+			stored[index].Credit = stored[index].Target()
+		}
+		stored[index].State = ObligationSatisfied
+	}
+	return stored
 }
 
 // playQueued takes the next already-decided item, re-validating it against the
@@ -881,7 +1043,7 @@ func (e *Engine) selectIn(
 		out.decision.Error = "every candidate was ruled out"
 		out.onlyFitFailures = len(rejections) > 0
 		for _, rejection := range rejections {
-			if rejection.Rule != "fitsBeforeAnchor" {
+			if rejection.Rule != ruleFitsBeforeAnchor {
 				out.onlyFitFailures = false
 				break
 			}
@@ -1202,6 +1364,7 @@ func (e *Engine) constraintEnv(
 	// has gone by since, and a three-hour episode that started three hours ago
 	// finished a moment ago.
 	mergedBySource := withEndTimes(lastBySource, tail, func(e PlayTailEntry) string { return e.SourceID })
+	listened, stationAired := e.listenedRefs(ctx, candidates)
 
 	return constraintEnv{
 		now:               now,
@@ -1214,7 +1377,8 @@ func (e *Engine) constraintEnv(
 		lastByFamily:      e.lastByFamily(tail),
 		airings:           airings,
 		lastAirings:       lastAirings,
-		listened:          e.listenedRefs(ctx, candidates),
+		listened:          listened,
+		stationAired:      stationAired,
 		separationItem:    e.Plan.separationItem(),
 		separationSource:  e.Plan.separationSource(),
 		separationCreator: e.Plan.separationCreator(),
@@ -1619,15 +1783,23 @@ func withExposure(byTime map[string]time.Time, tail []PlayTailEntry, key func(Pl
 }
 
 // listenedRefs asks, once, which of these episodes somebody here has already
-// sat through.
+// sat through — and, separately, which ones the station itself has already
+// aired in full.
 //
 // Across every listener rather than per user, because a channel has no user: it
 // is a station the house tunes into, and "somebody here already heard this" is
 // the right answer to "should it go on air".
-func (e *Engine) listenedRefs(ctx context.Context, candidates []Candidate) map[string]bool {
-	out := map[string]bool{}
+//
+// The station's own listening comes back as its own set rather than merged into
+// the first. Merged, an airing to whoever happened to be in the room read as a
+// person having heard the episode, and the alreadyHeard rule retired it on the
+// spot — including every episode the station still owed a second surfacing,
+// which therefore only ever got one, however the plan was written. See
+// alreadyHeard for what each set is allowed to decide.
+func (e *Engine) listenedRefs(ctx context.Context, candidates []Candidate) (listened, stationAired map[string]bool) {
+	listened, stationAired = map[string]bool{}, map[string]bool{}
 	if e.Listened == nil {
-		return out
+		return listened, stationAired
 	}
 	ids := make([]string, 0, len(candidates))
 	refByID := map[string]string{}
@@ -1641,18 +1813,21 @@ func (e *Engine) listenedRefs(ctx context.Context, candidates []Candidate) map[s
 		durationByID[candidate.episode.ID] = candidate.episode.DurationSeconds
 	}
 	if len(ids) == 0 {
-		return out
+		return listened, stationAired
 	}
 	progress, err := e.Listened.EpisodeProgress(ctx, ids)
 	if err != nil {
-		return out
+		return listened, stationAired
 	}
 	for id, state := range progress {
-		if state.listened(durationByID[id]) {
-			out[refByID[id]] = true
+		if state.Listener.listened(durationByID[id]) {
+			listened[refByID[id]] = true
+		}
+		if state.Station.listened(durationByID[id]) {
+			stationAired[refByID[id]] = true
 		}
 	}
-	return out
+	return listened, stationAired
 }
 
 // applyDuration bounds how long the station will stay on this item.
@@ -2023,6 +2198,38 @@ func categoriesOutOfRoom(candidates, survivors []Candidate, env constraintEnv) m
 	present := map[CategoryID]bool{}
 	for _, candidate := range survivors {
 		present[candidate.Category] = true
+		// An episode the station OWES you is not the clock picking. It is the
+		// reason the station exists.
+		//
+		// Read the rule above and it is about the library: "the two four-minute
+		// oddities IN THE LIBRARY can win, so they win it. Every day, at the
+		// same time, in front of the same show." That is back catalogue. A new
+		// episode cannot win every day at the same time — it is owed once, it
+		// airs, and it is gone. Nothing about it was chosen by the gap.
+		//
+		// Jacob's words, on what the rule was ever for: "I do not give a
+		// single fuck about how long a podcast is if it is new. I just simply
+		// do not want to hear the same old podcast episodes all the time ... I
+		// just wanted music instead of some old podcast episode announcing that
+		// the podcast has ended or like an NPR podcast episode just announcing
+		// a new podcast they're starting, over and over and over."
+		//
+		// Which is a rule about the back catalogue and says nothing about new
+		// releases. Measuring a new episode against what its category usually
+		// runs asks a question nobody has: a listener does not want the median
+		// length of their shows, they want their shows as they come out. On
+		// 2026-09-04 that arithmetic made a 25m27s Planet Money episode — new,
+		// owed, unaired, and fitting the gap four times over — a curio, because
+		// the same library also holds three-hour interviews. The station played
+		// music instead, for just under three hours, out of a block named "New
+		// episodes" whose exit condition is obligations.pending == 0.
+		//
+		// So: if it is owed and it fits, it plays. Length has no opinion here.
+		// The floor below still stands, and still only ever judges the library.
+		if candidate.Owed {
+			delete(out, candidate.Category)
+			continue
+		}
 		floor, ok := floors[candidate.Category]
 		if !ok {
 			continue

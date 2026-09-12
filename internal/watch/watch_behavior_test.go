@@ -314,3 +314,58 @@ func TestHiddenFoldersDoNotScan(t *testing.T) {
 		t.Errorf("hidden folders should not trigger scans, got %v", got)
 	}
 }
+
+// A scan that refuses to start (ErrScanInProgress is the common one: a scan was
+// already running when the debounce fired) must not consume the change. Losing
+// it here is what leaves a dropped album invisible until someone hits refresh.
+func TestFailedScanIsRetried(t *testing.T) {
+	base := t.TempDir()
+	root := filepath.Join(base, "library")
+	staging := filepath.Join(base, "downloads", "Late Album")
+	mkdirs(t, root, staging)
+	write(t, filepath.Join(staging, "01 track.flac"))
+
+	var mu sync.Mutex
+	attempts := 0
+	var succeeded []string
+
+	w := New(Options{
+		DB: new(sql.DB),
+		ScanSubpaths: func(_ context.Context, _ string, subpaths []string) (libraries.ScanResult, error) {
+			mu.Lock()
+			defer mu.Unlock()
+			attempts++
+			if attempts == 1 {
+				return libraries.ScanResult{}, libraries.ErrScanInProgress
+			}
+			for _, p := range subpaths {
+				succeeded = append(succeeded, filepath.Base(p))
+			}
+			return libraries.ScanResult{}, nil
+		},
+		ListLibraries: fixed(root),
+		Debounce:      200 * time.Millisecond,
+		Resync:        300 * time.Millisecond,
+		Logger:        log.New(io.Discard, "", 0),
+	})
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() { defer close(done); _ = w.Run(ctx) }()
+	defer func() { cancel(); <-done }()
+	time.Sleep(400 * time.Millisecond)
+
+	if err := os.Rename(staging, filepath.Join(root, "Late Album")); err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(2 * time.Second)
+
+	mu.Lock()
+	defer mu.Unlock()
+	if attempts < 2 {
+		t.Fatalf("scan attempted %d time(s); the refused change was dropped instead of retried", attempts)
+	}
+	if len(succeeded) == 0 {
+		t.Fatal("retry never delivered the pending folder")
+	}
+	t.Logf("attempts=%d delivered=%v", attempts, succeeded)
+}

@@ -362,6 +362,26 @@ func (p *pendingChanges) drain() []pendingScan {
 	return out
 }
 
+// restore puts drained work back after a scan failed to start. Dropping it
+// instead is how "I dropped an album in and nothing happened until I hit
+// refresh" happens: the commonest failure by far is ErrScanInProgress — a scan
+// was already running when the debounce fired — and that is precisely the
+// moment a big drop is still landing.
+func (p *pendingChanges) restore(scans []pendingScan) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	for _, scan := range scans {
+		entry := p.entry(scan.libraryID)
+		if scan.full {
+			entry.full = true
+			continue
+		}
+		for _, path := range scan.subpaths {
+			entry.subpaths[path] = struct{}{}
+		}
+	}
+}
+
 func (w *Watcher) scanLoop(ctx context.Context, trigger <-chan struct{}, done chan<- struct{}, pending *pendingChanges) {
 	defer close(done)
 
@@ -395,17 +415,28 @@ func (w *Watcher) scanLoop(ctx context.Context, trigger <-chan struct{}, done ch
 				timerC = timer.C
 				continue
 			}
-			w.rescan(ctx, pending.drain())
+			// scanInProgress is a check-then-act: a scan can start between it
+			// and the call below, and then the request is refused. Requeue
+			// whatever did not start and come back for it.
+			if failed := w.rescan(ctx, pending.drain()); len(failed) > 0 && ctx.Err() == nil {
+				pending.restore(failed)
+				timer = time.NewTimer(w.debounce)
+				timerC = timer.C
+			}
 		}
 	}
 }
 
-func (w *Watcher) rescan(ctx context.Context, scans []pendingScan) {
+// rescan starts the scans owed and returns the ones that could not be started,
+// so the caller can put them back on the queue rather than lose the change.
+func (w *Watcher) rescan(ctx context.Context, scans []pendingScan) []pendingScan {
+	var failed []pendingScan
 	for _, scan := range scans {
 		if scan.full && w.scanLibrary != nil {
 			w.logger.Printf("files removed from library %s; reconciling the whole library", scan.libraryID)
 			if _, err := w.scanLibrary(ctx, scan.libraryID); err != nil {
-				w.logger.Printf("watch-triggered library scan failed for %s: %v", scan.libraryID, err)
+				w.logger.Printf("watch-triggered library scan failed for %s: %v (will retry)", scan.libraryID, err)
+				failed = append(failed, scan)
 			}
 			continue
 		}
@@ -414,9 +445,11 @@ func (w *Watcher) rescan(ctx context.Context, scans []pendingScan) {
 		}
 		w.logger.Printf("library change detected; incremental scan of %d folder(s) in library %s", len(scan.subpaths), scan.libraryID)
 		if _, err := w.scanSubpaths(ctx, scan.libraryID, scan.subpaths); err != nil {
-			w.logger.Printf("watch-triggered scan failed for library %s: %v", scan.libraryID, err)
+			w.logger.Printf("watch-triggered scan failed for library %s: %v (will retry)", scan.libraryID, err)
+			failed = append(failed, scan)
 		}
 	}
+	return failed
 }
 
 // addLibraryWatches attaches watches to every library root and returns the

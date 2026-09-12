@@ -126,6 +126,17 @@ that says nothing falls back to the **listening day** — which is the same rule
 the engine used to have hard-coded, now a default that can be overridden per
 block.
 
+The owed list is an **order**, not a running order. Every decision filters
+candidates through the hard rules before it scores them, so the most urgent
+thing owed is not the next thing played while a rule holds it back — an A-tier
+episode that aired at lunch and is owed a second hearing sits at the front of
+the queue with eight hours of item separation still to run. `GET
+/channels/{id}/obligations` says which: a pending item the rules would not offer
+at this moment carries `held: { rule, reason }`, worded as the decision record
+words a rejection, from the same rules asked without deciding anything
+(`Engine.JudgeOwed`). Anything that shows the queue as "coming up" — the wall
+does — puts the held items after the free ones.
+
 ### Tiers order what is owed
 
 Each source carries a tier, `S` down to `F` (`C` by default). The queue is
@@ -147,6 +158,18 @@ new episode promptly, but don't fill the afternoon with its back catalogue.
 Surfacing something owed is worth a lot, but not worth breaking a rule for: if
 what is owed cannot air cleanly right now, ordinary programming goes out and the
 obligation comes round again shortly.
+
+**Two witnesses, and they are not interchangeable.** The station writes its own
+airings into the playback table under the reserved server account, so an
+episode it has already been through does not come back as a rerun. That row is
+the radio's memory, not a person's: it says the episode went out, to whoever
+was in the room, and *whether anybody was* is what credit measures. So the
+station's own record only ever keeps **back catalogue** off the air — something
+still owed a surfacing is, by the station's own reckoning, not yet heard, and
+the station cannot retire it on its own say-so. A **person's** playback row is
+the other witness, and it is absolute: an episode somebody here has listened to
+is never offered again, and the obligation for it is settled at the next
+decision, because it reached them — by another route, but it reached them.
 
 ### Breaks are a unit, not an item on a clock
 
@@ -324,6 +347,18 @@ Read it in the browser (the WHY THIS PLAYED panel on the channel screen), at
 has never been on air answers with what it *would* decide right now, which is the
 only way to debug a silent station.
 
+The record is kept for a week per channel (with a ceiling of a few thousand rows
+as a backstop against a runaway writer). The same choice made again within five
+minutes — same block, same selection, or the same failure to select — is folded
+into the row it repeats rather than written as a new one: the row moves to the
+front, carries the latest account, and gains `retries: {count, since}`. That is
+what a source producing no audio looks like: the streamer discards the play-log
+row, backs off and asks again, and the scheduler answers the same. Recorded row
+by row, an unreachable booked station once wrote three hundred and fifty
+identical decisions in three hours and pruned five days of history to make room
+for them; now it is one row that counts the retries and says when they started,
+which is both smaller and more informative. The panel shows the run in red.
+
 ### Simulating before broadcasting
 
 ```
@@ -354,10 +389,20 @@ repeat, with a cap that scales by length so a long one cannot eat the day:
 | ~1 hr | 2 |
 | 3 hr | 1 |
 
-`clamp(1, floor(2h / length), 3)`, with at least **4 hours** between airings so
-a repeat lands at a genuinely different time of day. For a new release the count
-is of airings **inside the listening day**, so an overnight play does not use up
-one of the two chances you had to actually catch it.
+`clamp(1, floor(2h / length), 3)`. How *soon* a repeat may land is item
+separation's job — `separation.item` in the plan, **8 hours** unless the plan
+says otherwise, so a repeat lands at a genuinely different time of day. For
+something still owed, that window is scaled by the credit it has earned: an
+airing nobody heard is not a time you heard it, and holds it back for nothing.
+For a new release the count is of airings **inside the listening day**, so an
+overnight play does not use up one of the two chances you had to actually catch
+it.
+
+Only a **clean end** counts as the whole item having gone out. A skip, a booked
+show cutting in, the play window closing, the last listener leaving — each cuts
+the item, and a cut item earns credit for the part that played and nothing
+more. Reading a cut as a finish is what once settled a three-hour episode on
+nineteen minutes of it.
 
 ### What you hear
 
@@ -380,10 +425,15 @@ one of the two chances you had to actually catch it.
 
 ### The two memories
 
-`user_playback` is what **you** heard, written by your phone; channels only
-read it. `channel_play_log` is what the **station** aired. Keeping them apart
-is what lets a channel air something without marking it listened, and what lets
-reruns advance instead of looping on one episode.
+`user_playback` is what **you** heard, written by your phone. `channel_play_log`
+is what the **station** aired. Keeping them apart is what lets a channel air
+something without marking it listened, and what lets reruns advance instead of
+looping on one episode.
+
+The station does keep one row of its own in `user_playback`, under the reserved
+`user-server` account, for every episode it has aired in full. It is read back
+*apart* from everybody else's rows — it retires back catalogue, and it never
+stands in for a person having heard something the station still owes.
 
 ## Source kinds
 
@@ -656,7 +706,7 @@ Read (any authenticated user):
 |---|---|---|
 | `GET` | `/api/v1/channels/{id}/plan` | The stored plan, or the derived one, with `custom` |
 | `GET` | `/api/v1/channels/{id}/why?limit=N` | Decision records, newest first |
-| `GET` | `/api/v1/channels/{id}/obligations` | What the station owes you, most urgent first |
+| `GET` | `/api/v1/channels/{id}/obligations` | What the station owes you, most urgent first; a pending item the rules would not offer right now carries `held: {rule, reason}` |
 | `GET` | `/api/v1/channels/{id}/schedule/status` | Clock, booked slots, and current programming |
 
 Stream (any authenticated user; `?stream_token=` supported for

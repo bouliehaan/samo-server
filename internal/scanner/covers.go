@@ -16,14 +16,20 @@ type CoverResolver interface {
 	LookupCached(ctx context.Context, audioPath, sourceChecksum string) (*catalog.Image, error)
 }
 
+// root is the library root. It bounds the one place resolveCover is allowed to
+// look outside the audio file's own folder — see findDiscParentCoverImage.
 func (s *Scanner) resolveCover(
 	ctx context.Context,
+	root string,
 	dir string,
 	audioPaths []string,
 	checksums []string,
 	embeddedKnown *bool,
 ) *catalog.Image {
 	if cover := findCoverImage(dir); cover != nil {
+		return cover
+	}
+	if cover := findDiscParentCoverImage(root, dir); cover != nil {
 		return cover
 	}
 	if s.covers == nil {
@@ -56,6 +62,6 @@ func (s *Scanner) resolveCover(
 	return nil
 }
 
-func (s *Scanner) firstAudioCover(ctx context.Context, path string, file catalog.AudioFile, embeddedKnown *bool) *catalog.Image {
-	return s.resolveCover(ctx, filepath.Dir(path), []string{path}, []string{file.Checksum}, embeddedKnown)
+func (s *Scanner) firstAudioCover(ctx context.Context, root, path string, file catalog.AudioFile, embeddedKnown *bool) *catalog.Image {
+	return s.resolveCover(ctx, root, filepath.Dir(path), []string{path}, []string{file.Checksum}, embeddedKnown)
 }

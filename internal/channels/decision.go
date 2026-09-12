@@ -53,6 +53,44 @@ type Decision struct {
 	Selected   *SelectedSummary   `json:"selected,omitempty"`
 	Note       string             `json:"note,omitempty"`
 	Error      string             `json:"error,omitempty"`
+
+	// Retries is set when this decision is the latest of a run of identical
+	// ones: the station coming back for the same choice, in the same block,
+	// within minutes of making it, which is what a source that produces no
+	// audio looks like from here. The run is kept as one record — see
+	// SaveDecision — and At is when it was last made.
+	Retries *RetrySummary `json:"retries,omitempty"`
+}
+
+// RetrySummary is how many times a decision was made again, and since when.
+type RetrySummary struct {
+	// Count is how many times the choice was repeated, not counting the first
+	// time it was made.
+	Count int `json:"count"`
+	// Since is when the choice was first made.
+	Since time.Time `json:"since"`
+}
+
+// selectedRef is what the decision chose, or "" when it chose nothing.
+func (d Decision) selectedRef() string {
+	if d.Selected == nil {
+		return ""
+	}
+	return d.Selected.Ref
+}
+
+// repeats reports whether d is the same decision as previous, made again: the
+// same block, the same selection, or the same way of selecting nothing.
+//
+// Deliberately no more than that. The rest of the account — the candidates,
+// what was rejected and what had to be relaxed — legitimately differs between
+// a choice and its retry, because the streamer passes over an item that
+// produced no audio and the next decision has to relax that rule to reach the
+// same answer. That the answer is the same is the whole point.
+func (d Decision) repeats(previous Decision) bool {
+	return d.BlockID == previous.BlockID &&
+		d.selectedRef() == previous.selectedRef() &&
+		d.Error == previous.Error
 }
 
 // OwedSummary is one outstanding obligation, as the decision saw it.

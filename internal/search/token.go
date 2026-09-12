@@ -77,38 +77,6 @@ func MatchText(haystack, query string) bool {
 	return matched >= required
 }
 
-func ScoreText(haystack, query string) int {
-	tokens := significantTokens(query)
-	if len(tokens) == 0 {
-		return 0
-	}
-	haystack = strings.ToLower(strings.TrimSpace(haystack))
-	score := 0
-	matched := 0
-	for index, token := range tokens {
-		position := strings.Index(haystack, token)
-		if position < 0 {
-			continue
-		}
-		matched++
-		score += 100 - index*5 - position
-		if position == 0 && index == 0 {
-			score += 50
-		}
-	}
-	if matched == 0 {
-		return -1
-	}
-	required := len(tokens)
-	if len(tokens) > 3 {
-		required = int(math.Ceil(float64(len(tokens)) * 0.65))
-	}
-	if matched < required {
-		return -1
-	}
-	return score
-}
-
 func joinFields(values ...string) string {
 	return strings.ToLower(strings.TrimSpace(strings.Join(values, " ")))
 }

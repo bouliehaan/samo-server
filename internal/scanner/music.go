@@ -110,7 +110,7 @@ func (s *Scanner) scanMusicFile(ctx context.Context, library Library, root strin
 	}
 
 	embeddedKnown := probe.HasEmbeddedCover
-	albumCover := s.resolveCover(ctx, filepath.Dir(path), []string{path}, []string{probe.AudioFile.Checksum}, &embeddedKnown)
+	albumCover := s.resolveCover(ctx, root, filepath.Dir(path), []string{path}, []string{probe.AudioFile.Checksum}, &embeddedKnown)
 	album := catalog.MusicAlbum{
 		ID:                  albumID,
 		Title:               albumTitle,

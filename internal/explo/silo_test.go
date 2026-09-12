@@ -190,12 +190,14 @@ func TestReconcileExploTracksUnflagsKeptTrack(t *testing.T) {
 		}
 	}
 
-	// Both start siloed, the state Keep is pressed from.
+	// Both start siloed, the state Keep is pressed from, and both were
+	// scanned in some earlier week.
 	if _, _, err := svc.reconcileExploTracks(ctx, []string{exploDir}); err != nil {
 		t.Fatal(err)
 	}
 	assertIsExplo("track-matched", 1)
 	assertIsExplo("track-unmatched", 1)
+	mustExec(t, db, `UPDATE music_tracks SET added_at = '2020-01-01 00:00:00'`)
 
 	// Keep copies the drop original into the library and the rescan catalogues
 	// it against the same track — which is what the scanner does when no
@@ -215,6 +217,16 @@ func TestReconcileExploTracksUnflagsKeptTrack(t *testing.T) {
 	// The kept one is a library track now; its untouched neighbour is not.
 	assertIsExplo("track-matched", 0)
 	assertIsExplo("track-unmatched", 1)
+	// And the kept one was added to the library just now, not the week the
+	// drop was scanned — newest-first surfaces sort on this.
+	var keptAddedAt string
+	if err := db.QueryRowContext(ctx, `SELECT added_at FROM music_tracks WHERE id = 'track-matched'`).Scan(&keptAddedAt); err != nil {
+		t.Fatal(err)
+	}
+	if keptAddedAt == "2020-01-01 00:00:00" {
+		t.Fatal("kept track still dated by the drop's scan; it must be re-dated to the keep")
+	}
+	assertAddedAt(t, db, "music_tracks", "track-unmatched", "2020-01-01 00:00:00")
 
 	// Idempotent: the kept track does not flip back on the next pass.
 	flagged, unflagged, err = svc.reconcileExploTracks(ctx, []string{exploDir})
@@ -222,6 +234,14 @@ func TestReconcileExploTracksUnflagsKeptTrack(t *testing.T) {
 		t.Fatalf("repeat run flagged=%d unflagged=%d err=%v, want 0/0/nil", flagged, unflagged, err)
 	}
 	assertIsExplo("track-matched", 0)
+
+	// Clearing the folder releases the neighbour too, but that is recovery,
+	// not arrival: it keeps its date.
+	if _, unflagged, err := svc.reconcileExploTracks(ctx, nil); err != nil || unflagged != 1 {
+		t.Fatalf("clear unflagged=%d err=%v, want 1/nil", unflagged, err)
+	}
+	assertIsExplo("track-unmatched", 0)
+	assertAddedAt(t, db, "music_tracks", "track-unmatched", "2020-01-01 00:00:00")
 }
 
 // TestPruneVanishedFilesKeepsLibraryCopy covers the other half of the same

@@ -84,14 +84,17 @@ func filterAudiobookSeries(items []catalog.Series, query AudiobookQuery) []catal
 	return matches
 }
 
-func audiobookSearchText(item catalog.AudiobookItem) string {
+// Each record's search text is split into the title the ranker scores and
+// the secondary text that is only its floor; the filter sees the two joined.
+
+func audiobookSearchFields(item catalog.AudiobookItem) (title, secondary string) {
 	values := []string{
 		item.ID, item.Path,
 		strings.Join(item.Tags, " "), strings.Join(item.Genres, " "),
 	}
 	if item.Book != nil {
 		values = append(values,
-			item.Book.Title, item.Book.Subtitle, item.Book.SortTitle, item.Book.Description, item.Book.Publisher,
+			item.Book.Subtitle, item.Book.SortTitle, item.Book.Description, item.Book.Publisher,
 			item.Book.PublishedYear, strings.Join(item.Book.Genres, " "), strings.Join(item.Book.Tags, " "),
 		)
 		for _, author := range item.Book.Authors {
@@ -104,42 +107,75 @@ func audiobookSearchText(item catalog.AudiobookItem) string {
 			values = append(values, series.Name)
 		}
 	}
-	return joinFields(values...)
+	return audiobookTitle(item), joinFields(values...)
 }
 
-func contributorSearchText(item catalog.Contributor) string {
-	return joinFields(item.Name, item.SortName, item.Description)
+func contributorSearchFields(item catalog.Contributor) (title, secondary string) {
+	return item.Name, joinFields(item.SortName, item.Description)
 }
 
-func audiobookSeriesSearchText(item catalog.Series) string {
+func audiobookSeriesSearchFields(item catalog.Series) (title, secondary string) {
 	authors := make([]string, 0, len(item.Authors))
 	for _, author := range item.Authors {
 		authors = append(authors, author.Name, author.SortName)
 	}
-	return joinFields(item.Name, item.Description, strings.Join(authors, " "))
+	return item.Name, joinFields(item.Description, strings.Join(authors, " "))
+}
+
+func audiobookSearchText(item catalog.AudiobookItem) string {
+	return joinFields(audiobookSearchFields(item))
+}
+
+func contributorSearchText(item catalog.Contributor) string {
+	return joinFields(contributorSearchFields(item))
+}
+
+func audiobookSeriesSearchText(item catalog.Series) string {
+	return joinFields(audiobookSeriesSearchFields(item))
 }
 
 func sortAudiobooks(items []catalog.AudiobookItem, query AudiobookQuery) {
+	if isRelevanceSort(query.Sort) {
+		sortByRelevance(items, query.Text, func(item catalog.AudiobookItem) rankFields {
+			title, secondary := audiobookSearchFields(item)
+			return rankFields{Title: title, Secondary: secondary, Plays: item.Progress.PlayCount}
+		})
+		return
+	}
 	sort.SliceStable(items, func(i, j int) bool {
-		return longformLess(query.Sort, query.Text,
-			audiobookTitle(items[i]), items[i].AddedAt, items[i].Progress, audiobookSearchText(items[i]),
-			audiobookTitle(items[j]), items[j].AddedAt, items[j].Progress, audiobookSearchText(items[j]))
+		return longformLess(query.Sort,
+			audiobookTitle(items[i]), items[i].AddedAt, items[i].Progress,
+			audiobookTitle(items[j]), items[j].AddedAt, items[j].Progress)
 	})
 }
 
 func sortContributors(items []catalog.Contributor, query AudiobookQuery) {
+	if isRelevanceSort(query.Sort) {
+		sortByRelevance(items, query.Text, func(item catalog.Contributor) rankFields {
+			title, secondary := contributorSearchFields(item)
+			return rankFields{Title: title, Secondary: secondary}
+		})
+		return
+	}
 	sort.SliceStable(items, func(i, j int) bool {
-		return longformLess(query.Sort, query.Text,
-			items[i].Name, nil, catalog.PlaybackState{}, contributorSearchText(items[i]),
-			items[j].Name, nil, catalog.PlaybackState{}, contributorSearchText(items[j]))
+		return longformLess(query.Sort,
+			items[i].Name, nil, catalog.PlaybackState{},
+			items[j].Name, nil, catalog.PlaybackState{})
 	})
 }
 
 func sortAudiobookSeries(items []catalog.Series, query AudiobookQuery) {
+	if isRelevanceSort(query.Sort) {
+		sortByRelevance(items, query.Text, func(item catalog.Series) rankFields {
+			title, secondary := audiobookSeriesSearchFields(item)
+			return rankFields{Title: title, Secondary: secondary}
+		})
+		return
+	}
 	sort.SliceStable(items, func(i, j int) bool {
-		return longformLess(query.Sort, query.Text,
-			items[i].Name, nil, catalog.PlaybackState{}, audiobookSeriesSearchText(items[i]),
-			items[j].Name, nil, catalog.PlaybackState{}, audiobookSeriesSearchText(items[j]))
+		return longformLess(query.Sort,
+			items[i].Name, nil, catalog.PlaybackState{},
+			items[j].Name, nil, catalog.PlaybackState{})
 	})
 }
 
@@ -179,18 +215,17 @@ func longformItemMatchesQuery(query commonLongformFilter, genres []string, added
 	return MatchText(searchText, query.Text)
 }
 
-func longformLess(sortMode, text string,
-	titleI string, addedI *time.Time, playbackI catalog.PlaybackState, textI string,
-	titleJ string, addedJ *time.Time, playbackJ catalog.PlaybackState, textJ string) bool {
+// longformLess orders the explicit sort modes; relevance has its own path.
+func longformLess(sortMode string,
+	titleI string, addedI *time.Time, playbackI catalog.PlaybackState,
+	titleJ string, addedJ *time.Time, playbackJ catalog.PlaybackState) bool {
 	switch sortMode {
-	case SortTitle:
-		return strings.ToLower(titleI) < strings.ToLower(titleJ)
 	case SortAdded:
 		return timeAfter(addedI, addedJ)
 	case SortPlayed:
 		return timeAfter(playbackI.LastPlayedAt, playbackJ.LastPlayedAt)
 	default:
-		return ScoreText(textI, text) > ScoreText(textJ, text)
+		return strings.ToLower(titleI) < strings.ToLower(titleJ)
 	}
 }
 

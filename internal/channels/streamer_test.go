@@ -2,8 +2,11 @@ package channels
 
 import (
 	"context"
+	"errors"
 	"io"
 	"log"
+	"os"
+	"path/filepath"
 	"sync"
 	"testing"
 	"time"
@@ -451,4 +454,131 @@ func TestSkippingAnEpisodeDoesNotForgetThatItPlayed(t *testing.T) {
 	if forgot := recorder.forgot(); len(forgot) > 0 {
 		t.Fatalf("skipping an episode forgot its airing (%v) — it returns looking never-played", forgot)
 	}
+}
+
+// ---- what "completed" means ---------------------------------------------
+
+// fakeTranscoder stands in for ffmpeg: a script that ignores its arguments and
+// runs the given shell body, writing to stdout as ffmpeg would.
+func fakeTranscoder(t *testing.T, body string) string {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "ffmpeg")
+	if err := os.WriteFile(path, []byte("#!/bin/sh\n"+body+"\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	return path
+}
+
+func transcodingStreamer(t *testing.T, ffmpeg string) *channelStreamer {
+	t.Helper()
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	// A real store with no channel in it: playItem asks the scheduler about
+	// the next cut-in, and a channel it cannot load simply has none booked.
+	deps := Dependencies{DB: newTestDB(t), Now: time.Now}
+	streamer := newChannelStreamer(
+		Channel{ID: "chan-test", Name: "Test", Codec: "mp3"},
+		deps, NewScheduler(deps),
+		StreamerOptions{FFmpegPath: ffmpeg, Logger: log.New(io.Discard, "", 0), BaseContext: ctx},
+		nil,
+	)
+	t.Cleanup(func() { streamer.stopAndWait(context.Background()) })
+	return streamer
+}
+
+// An item that runs to its own end is complete. That is the only way to be.
+func TestAnItemThatReachesItsOwnEndIsComplete(t *testing.T) {
+	streamer := transcodingStreamer(t, fakeTranscoder(t, `head -c 4096 /dev/zero`))
+
+	written, err := streamer.playItem(context.Background(), PlaybackItem{
+		Title: "Ep 12", ItemRef: "episode:e12", URL: "/audio/e12.mp3",
+	})
+	if err != nil {
+		t.Fatalf("a clean end-of-input came back as an error: %v", err)
+	}
+	if written == 0 {
+		t.Fatal("nothing was read from the transcoder")
+	}
+}
+
+// An item the station cut off is not one that finished.
+//
+// Jacob's station, 2026-09-10: JRE #2552 was skipped nineteen minutes into
+// three hours and settled its obligation with credit 2.0 — one surfacing from
+// the skip, which is right, and a second from the loop believing the whole item
+// had gone out. Killing ffmpeg closes its pipe exactly the way a finished
+// transcode does, and reading that EOF as a clean end is what did it. The same
+// misreading wrote up every torn-down and preempted airing as heard in full.
+func TestAnItemTheStationCutOffIsNotComplete(t *testing.T) {
+	streamer := transcodingStreamer(t, fakeTranscoder(t, `exec cat /dev/zero`))
+	onAir := attachedEar(streamer)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	type result struct {
+		written int64
+		err     error
+	}
+	done := make(chan result, 1)
+	go func() {
+		written, err := streamer.playItem(ctx, PlaybackItem{
+			Title: "#2552", ItemRef: "episode:e2552", URL: "/audio/e2552.mp3",
+		})
+		done <- result{written, err}
+	}()
+
+	// What a skip does, once the item is on air.
+	select {
+	case <-onAir:
+	case <-time.After(10 * time.Second):
+		t.Fatal("the transcoder never produced a byte")
+	}
+	if !streamer.skipCurrent() {
+		t.Fatal("nothing was playing to skip")
+	}
+
+	select {
+	case got := <-done:
+		if got.written == 0 {
+			t.Fatalf("the transcoder produced nothing, so this proves nothing (err=%v)", got.err)
+		}
+		if !errors.Is(got.err, context.Canceled) {
+			t.Fatalf("a skipped item came back as err=%v; the loop reads nil as a complete airing", got.err)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("playItem did not return after the skip")
+	}
+}
+
+// The play window closing is a cut too, not a finish. It is how an episode of
+// unknown length is stopped before a booked show, and playedFraction is written
+// on the understanding that such an episode stays owed.
+func TestAnItemStoppedByItsPlayWindowIsNotComplete(t *testing.T) {
+	streamer := transcodingStreamer(t, fakeTranscoder(t, `exec cat /dev/zero`))
+
+	written, err := streamer.playItem(context.Background(), PlaybackItem{
+		Title: "Ep 12", ItemRef: "episode:e12", URL: "/audio/e12.mp3",
+		MaxDuration: 2 * time.Second,
+	})
+	if written == 0 {
+		t.Fatal("the transcoder produced nothing, so this proves nothing")
+	}
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("an item cut at its window came back as err=%v, want the deadline", err)
+	}
+}
+
+// attachedEar wires a listener straight into the broadcast and reports the
+// first chunk that reaches it, without starting the loop the way Attach would.
+func attachedEar(streamer *channelStreamer) <-chan struct{} {
+	ear := &listener{ch: make(chan []byte, listenerBuffer), jitter: listenerJitterFloor}
+	streamer.mu.Lock()
+	streamer.listeners[ear] = struct{}{}
+	streamer.mu.Unlock()
+	heard := make(chan struct{})
+	go func() {
+		<-ear.ch
+		close(heard)
+	}()
+	return heard
 }

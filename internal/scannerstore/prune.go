@@ -2,7 +2,9 @@ package scannerstore
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
+	"strings"
 )
 
 // CountMediaFilesForLibrary reports how many files the library has indexed.
@@ -15,11 +17,42 @@ func (s *Store) CountMediaFilesForLibrary(ctx context.Context, libraryID string)
 	return count, err
 }
 
-// PresentMediaFilePaths lists the library's paths that are not already marked
-// missing — the set a scan is expected to have seen again.
-func (s *Store) PresentMediaFilePaths(ctx context.Context, libraryID string) ([]string, error) {
-	return s.stringColumn(ctx, "list media files for prune",
-		`SELECT path FROM media_files WHERE library_id = ? AND missing = 0`, libraryID)
+// PrunablePath is one indexed path and whether an earlier scan already flagged
+// it missing.
+type PrunablePath struct {
+	Path    string
+	Missing bool
+}
+
+// MediaFilePathsForPrune lists every path the library has indexed, the ones
+// already flagged missing included.
+//
+// The missing rows are the point. Phase 2 flags every path the walk did not
+// see so moved files can be paired with their new location by persistent id,
+// which means that by the time prune runs, a genuinely deleted file is already
+// missing = 1. A prune that only considered missing = 0 rows therefore never
+// saw a deletion at all: the first scan after the delete flagged the row, and
+// no later scan — quick or full — would look at it again. Deleted albums sat
+// in the catalog forever.
+func (s *Store) MediaFilePathsForPrune(ctx context.Context, libraryID string) ([]PrunablePath, error) {
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT path, missing FROM media_files WHERE library_id = ?`, libraryID)
+	if err != nil {
+		return nil, fmt.Errorf("list media files for prune: %w", err)
+	}
+	defer rows.Close()
+
+	var out []PrunablePath
+	for rows.Next() {
+		var item PrunablePath
+		var missing int
+		if err := rows.Scan(&item.Path, &missing); err != nil {
+			return nil, fmt.Errorf("list media files for prune: %w", err)
+		}
+		item.Missing = missing != 0
+		out = append(out, item)
+	}
+	return out, rows.Err()
 }
 
 // AudiobookIDsForLibrary lists every audiobook in the library.
@@ -93,22 +126,18 @@ func (s *Store) TouchLibraryScanned(ctx context.Context, libraryID string) error
 // dependency order: tracks first, then the albums and artists those tracks
 // were the last reference to.
 //
-// A track is kept when a playlist still names it, even with no media file
-// behind it — a playlist entry pointing at a track that vanished mid-scan
-// would otherwise be silently dropped from the playlist.
-//
-// track_ids_json is NOT NULL DEFAULT '[]', so NULLIF only guards against a bad
-// write leaving an empty string there. Without it that one row would raise
-// "invalid input syntax for type json" and fail the whole prune, not just skip
-// the playlist — the same reasoning migration 0006 applied to json_extract.
+// A track used to be kept when a playlist named it, even with no media file
+// behind it, so a track that vanished mid-scan would not be dropped from the
+// playlist. Flagging missing files covers that now — a file that disappears
+// keeps its media_files row until somebody reviews it, so the track never
+// looks orphaned in the first place. What the exception actually produced was
+// permanent blank entries: one playlist reference kept a fileless track alive,
+// and the track kept its album and artist alive with it, unplayable and
+// unremovable from the library. Playlists give up their dead entries instead
+// (see stripTracksFromPlaylists).
 var orphanMusicStatements = []string{
 	`DELETE FROM music_tracks
-		 WHERE id NOT IN (SELECT track_id FROM media_files WHERE track_id IS NOT NULL)
-		   AND id NOT IN (
-		     SELECT DISTINCT j.value
-		     FROM music_playlists p, json_array_elements_text(NULLIF(p.track_ids_json, '')::json) AS j(value)
-		     WHERE j.value IS NOT NULL AND TRIM(j.value) != ''
-		   )`,
+		 WHERE id NOT IN (SELECT track_id FROM media_files WHERE track_id IS NOT NULL)`,
 	`DELETE FROM music_albums
 		 WHERE id NOT IN (SELECT album_id FROM music_tracks WHERE album_id IS NOT NULL)`,
 	`DELETE FROM music_artists
@@ -116,9 +145,22 @@ var orphanMusicStatements = []string{
 		   AND id NOT IN (SELECT artist_id FROM music_album_artists)`,
 }
 
-// PruneOrphanMusic deletes music rows no longer referenced by any media file
-// or playlist, and reports how many rows went.
+// PruneOrphanMusic deletes music rows no media file points at any more, drops
+// those tracks from any playlist that named them, and reports how many rows
+// went.
 func (s *Store) PruneOrphanMusic(ctx context.Context) (int, error) {
+	dead, err := s.stringColumn(ctx, "list fileless tracks",
+		`SELECT id FROM music_tracks
+		 WHERE id NOT IN (SELECT track_id FROM media_files WHERE track_id IS NOT NULL)`)
+	if err != nil {
+		return 0, err
+	}
+	// Strip first: the delete below would otherwise leave playlists naming ids
+	// that no longer resolve to anything.
+	if err := s.stripTracksFromPlaylists(ctx, dead); err != nil {
+		return 0, err
+	}
+
 	pruned := 0
 	for _, statement := range orphanMusicStatements {
 		res, err := s.exec(ctx, statement)
@@ -130,6 +172,60 @@ func (s *Store) PruneOrphanMusic(ctx context.Context) (int, error) {
 		}
 	}
 	return pruned, nil
+}
+
+// stripTracksFromPlaylists removes the given track ids from every playlist that
+// names them. Rewriting in Go rather than SQL keeps the json handling in one
+// place and leaves the surviving order untouched.
+func (s *Store) stripTracksFromPlaylists(ctx context.Context, trackIDs []string) error {
+	if len(trackIDs) == 0 {
+		return nil
+	}
+	drop := make(map[string]struct{}, len(trackIDs))
+	for _, id := range trackIDs {
+		drop[id] = struct{}{}
+	}
+
+	playlists, err := s.PlaylistTrackReferences(ctx)
+	if err != nil {
+		return err
+	}
+	for _, playlist := range playlists {
+		ids := decodePlaylistTrackIDs(playlist.TrackIDsJSON)
+		if len(ids) == 0 {
+			continue
+		}
+		kept := make([]string, 0, len(ids))
+		for _, id := range ids {
+			if _, gone := drop[id]; gone {
+				continue
+			}
+			kept = append(kept, id)
+		}
+		if len(kept) == len(ids) {
+			continue
+		}
+		if err := s.SetPlaylistTrackIDs(ctx, playlist.ID, kept); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// decodePlaylistTrackIDs reads a playlist's track_ids_json. A row that will not
+// parse is treated as empty rather than fatal: the column is NOT NULL DEFAULT
+// '[]', so anything else took a bad write to produce, and one bad playlist must
+// not fail the prune for every library.
+func decodePlaylistTrackIDs(raw string) []string {
+	raw = strings.TrimSpace(raw)
+	if raw == "" || raw == "[]" || raw == "null" {
+		return nil
+	}
+	var ids []string
+	if err := json.Unmarshal([]byte(raw), &ids); err != nil {
+		return nil
+	}
+	return ids
 }
 
 // stringColumn runs a single-column query and collects it. op names the

@@ -6,6 +6,7 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"time"
 
@@ -308,16 +309,58 @@ func findArtistImage(dir string) *catalog.Image {
 	return nil
 }
 
+// coverImageStems are the filenames taggers write album art under, in the
+// order we trust them.
+var coverImageStems = []string{"cover", "folder", "front", "artwork", "album"}
+
+// discFolderPattern matches the subfolder a multi-disc release puts its audio
+// in. Picard and friends leave the artwork at the album root and split only the
+// audio, so a file under one of these has to look one level up to find its
+// cover.
+var discFolderPattern = regexp.MustCompile(`(?i)^(cd|disc|disk|side|vol|volume)[\s._-]*[0-9a-z]{0,3}$`)
+
+// findDiscParentCoverImage finds the album-level artwork for audio sitting in a
+// disc subfolder, and nothing else.
+//
+// The walk is deliberately one level and only out of a disc folder. Walking up
+// unconditionally would give every album that lacks its own art the image from
+// the artist folder above it, and walking as far as the library root would give
+// them all whatever single image happens to sit there.
+func findDiscParentCoverImage(root, dir string) *catalog.Image {
+	root = filepath.Clean(strings.TrimSpace(root))
+	dir = filepath.Clean(strings.TrimSpace(dir))
+	if root == "" || root == "." || dir == "" {
+		return nil
+	}
+	if !discFolderPattern.MatchString(filepath.Base(dir)) {
+		return nil
+	}
+	parent := filepath.Dir(dir)
+	if parent == dir {
+		return nil
+	}
+	// Strictly under the library root: the root itself is shared by every
+	// album, so an image there is not this album's cover.
+	if !strings.HasPrefix(parent, root+string(os.PathSeparator)) {
+		return nil
+	}
+	// Same lookup the album folder itself would get. Using only the stat-based
+	// stem probe here meant a multi-disc release found its art only when it was
+	// named cover/folder/front/artwork/album — any other filename came out with
+	// no cover at all, while the identical file one directory shallower was
+	// picked up by findCoverImage's readdir fallback.
+	return findCoverImage(parent)
+}
+
 func findCoverImage(dir string) *catalog.Image {
-	if image := findSidecarImageByStat(dir, []string{"cover", "folder", "front", "artwork", "album"}); image != nil {
+	if image := findSidecarImageByStat(dir, coverImageStems); image != nil {
 		return image
 	}
 	entries, err := readDirWithTimeout(dir, sidecarReadDirTimeout)
 	if err != nil {
 		return nil
 	}
-	preferred := []string{"cover", "folder", "front", "artwork", "album"}
-	for _, stem := range preferred {
+	for _, stem := range coverImageStems {
 		for _, entry := range entries {
 			if entry.IsDir() {
 				continue

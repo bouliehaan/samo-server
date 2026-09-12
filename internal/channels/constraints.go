@@ -40,7 +40,11 @@ type constraintEnv struct {
 
 	airings     map[string]int
 	lastAirings map[string]time.Time
-	listened    map[string]bool
+	// listened is what a PERSON here has already heard; stationAired is what
+	// the radio itself has already put out in full, under its own identity.
+	// alreadyHeard treats the two differently — see there.
+	listened     map[string]bool
+	stationAired map[string]bool
 
 	separationItem    time.Duration
 	separationSource  time.Duration
@@ -85,6 +89,13 @@ type constraint struct {
 	RelaxOrder int
 	Check      func(Candidate, constraintEnv) (bool, string)
 }
+
+// ruleFitsBeforeAnchor is the one rejection that means "the room did this".
+//
+// Named because two rules elsewhere ask that exact question of a rejection and
+// a typo in either reads as "the room took nothing away", which is the quiet
+// direction to be wrong in.
+const ruleFitsBeforeAnchor = "fitsBeforeAnchor"
 
 // constraints is the rule set, most-relaxable first.
 //
@@ -432,6 +443,29 @@ func standardConstraints() []constraint {
 				if env.listened[c.Ref] {
 					return false, "somebody here has already listened to this"
 				}
+				// The station's own listening is a different witness, and it
+				// only gets a say about the back catalogue.
+				//
+				// The radio records what it aired in full under its own account
+				// so that an episode it has already been through does not come
+				// round again as a rerun — that is what it is for, and that
+				// stands. It is NOT evidence that a person heard it. The station
+				// airs to whoever is in the room, and whether anybody was is the
+				// obligation's question, answered in credit; an episode still
+				// owed a surfacing is by the station's own reckoning not yet
+				// heard, and the station cannot retire it on its own say-so.
+				//
+				// Read together, the two rows did exactly that. Every S-tier
+				// episode on a two-surfacing plan aired once — at 08:08, to an
+				// empty house — and was then "already heard" for the rest of
+				// its life, so the second surfacing existed only as a number in
+				// the plan. 2026-09-10: Matt and Shane's Ep 635, aired 08:08 and
+				// never again, while four A-tier first airings went out through
+				// the afternoon. Held is exempt for the same reason — it is
+				// owed, only not yet.
+				if env.stationAired[c.Ref] && !c.Owed && !c.Held {
+					return false, "the station has already aired this in full"
+				}
 				return true, ""
 			},
 		},
@@ -452,7 +486,7 @@ func standardConstraints() []constraint {
 			// Never relaxed. Relaxing it means starting something that cannot
 			// finish before a booked show, and the only ways out of that are
 			// cutting it off mid-sentence or running the appointment late.
-			Name:       "fitsBeforeAnchor",
+			Name:       ruleFitsBeforeAnchor,
 			RelaxOrder: -1,
 			Check: func(c Candidate, env constraintEnv) (bool, string) {
 				// Unless being cut off is the job. A gap-filler is chosen in

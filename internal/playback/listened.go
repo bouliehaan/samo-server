@@ -24,9 +24,34 @@ func (s *Service) AnyListenerByIDs(
 	kind TargetKind,
 	ids []string,
 ) (map[string]State, error) {
+	others, _, err := s.AnyListenerByIDsApart(ctx, kind, ids, "")
+	return others, err
+}
+
+// AnyListenerByIDsApart is AnyListenerByIDs with one account read separately.
+//
+// `others` merges every listener except apartUserID exactly as AnyListenerByIDs
+// does; `apart` is that one account's own rows, unmerged. One query, because the
+// two are asked together every time.
+//
+// The account set apart is the station's. The channel scheduler records its own
+// airings under the reserved server user, so "has the radio already played this"
+// and "has a person here already heard this" are both answerable from the same
+// table — but they are different questions with different consequences, and
+// merging the two into one row is what made the first look like the second: an
+// episode the station had aired once, to whoever happened to be in the room,
+// read as listened-to by a person and was never offered again, however many
+// surfacings it was still owed. An empty apartUserID sets nobody apart.
+func (s *Service) AnyListenerByIDsApart(
+	ctx context.Context,
+	kind TargetKind,
+	ids []string,
+	apartUserID string,
+) (others, apart map[string]State, err error) {
 	if s == nil || s.db == nil {
-		return nil, ErrDisabled
+		return nil, nil, ErrDisabled
 	}
+	apartUserID = strings.TrimSpace(apartUserID)
 
 	unique := make([]string, 0, len(ids))
 	seen := make(map[string]struct{}, len(ids))
@@ -41,28 +66,30 @@ func (s *Service) AnyListenerByIDs(
 		seen[id] = struct{}{}
 		unique = append(unique, id)
 	}
+	others, apart = map[string]State{}, map[string]State{}
 	if len(unique) == 0 {
-		return map[string]State{}, nil
+		return others, apart, nil
 	}
 
-	out := make(map[string]State, len(unique))
 	for start := 0; start < len(unique); start += listForUserByIDsChunkSize {
 		end := start + listForUserByIDsChunkSize
 		if end > len(unique) {
 			end = len(unique)
 		}
-		if err := s.anyListenerChunk(ctx, kind, unique[start:end], out); err != nil {
-			return nil, err
+		if err := s.anyListenerChunk(ctx, kind, unique[start:end], apartUserID, others, apart); err != nil {
+			return nil, nil, err
 		}
 	}
-	return out, nil
+	return others, apart, nil
 }
 
 func (s *Service) anyListenerChunk(
 	ctx context.Context,
 	kind TargetKind,
 	ids []string,
+	apartUserID string,
 	out map[string]State,
+	apart map[string]State,
 ) error {
 	placeholders := make([]string, len(ids))
 	args := make([]any, 0, len(ids)+1)
@@ -73,7 +100,7 @@ func (s *Service) anyListenerChunk(
 	}
 
 	query := fmt.Sprintf(`
-		SELECT target_id, state_json
+		SELECT user_id, target_id, state_json
 		FROM user_playback
 		WHERE target_kind = ? AND target_id IN (%s)`,
 		strings.Join(placeholders, ","),
@@ -86,8 +113,8 @@ func (s *Service) anyListenerChunk(
 	defer rows.Close()
 
 	for rows.Next() {
-		var targetID, raw string
-		if err := rows.Scan(&targetID, &raw); err != nil {
+		var userID, targetID, raw string
+		if err := rows.Scan(&userID, &targetID, &raw); err != nil {
 			return err
 		}
 		state := State{}
@@ -96,6 +123,10 @@ func (s *Service) anyListenerChunk(
 		}
 		state = normalizeState(state)
 
+		if apartUserID != "" && userID == apartUserID {
+			apart[targetID] = state
+			continue
+		}
 		merged, exists := out[targetID]
 		if !exists {
 			out[targetID] = state

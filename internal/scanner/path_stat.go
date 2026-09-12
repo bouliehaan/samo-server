@@ -33,19 +33,36 @@ func statWithTimeout(path string, timeout time.Duration) (os.FileInfo, error) {
 	}
 }
 
-// fileReachable reports whether path can be stat'd. Network mounts may block
-// forever; treat timeouts as reachable so scans keep moving.
-func fileReachable(ctx context.Context, path string) bool {
+// pathState is what a single stat could prove about a path. Prune deletes
+// rows, so the difference between "proven gone" and "could not tell" decides
+// whether a library survives an unplugged drive.
+type pathState int
+
+const (
+	// pathPresent: the stat succeeded, the file is still on disk.
+	pathPresent pathState = iota
+	// pathGone: the stat said the path does not exist. On a reachable volume
+	// that is proof the file was deleted.
+	pathGone
+	// pathUnknown: the stat timed out or failed some other way — a slow NFS
+	// mount, an I/O error, a permission change. Nothing can be concluded, so
+	// callers must not delete anything.
+	pathUnknown
+)
+
+// classifyPath stats path and reports what that proved.
+func classifyPath(ctx context.Context, path string) pathState {
+	// A cancelled scan gets no say in what is gone.
 	if err := ctx.Err(); err != nil {
-		return true
+		return pathUnknown
 	}
 	_, err := statWithTimeout(path, pathStatTimeout)
-	if err == nil {
-		return true
+	switch {
+	case err == nil:
+		return pathPresent
+	case os.IsNotExist(err):
+		return pathGone
+	default:
+		return pathUnknown
 	}
-	if os.IsNotExist(err) {
-		return false
-	}
-	// Timeout or I/O error: assume reachable so we do not delete/mark on a slow mount.
-	return true
 }

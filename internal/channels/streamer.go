@@ -635,9 +635,11 @@ func (s *channelStreamer) loop(ctx context.Context) {
 		played := time.Since(startedAt)
 		// A clean end-of-input is the only thing that counts as the whole item
 		// having gone out. Everything else — a skip, a booked show cutting in,
-		// the play window closing — left some of it unheard.
+		// the play window closing — left some of it unheard. Those come back as
+		// context errors, which is a statement about how the item ended and
+		// not a fault to report.
 		completed := err == nil
-		if err != nil && !errors.Is(err, context.Canceled) {
+		if err != nil && !errors.Is(err, context.Canceled) && !errors.Is(err, context.DeadlineExceeded) {
 			s.logger.Printf("channel %s: play error (%s): %v", s.channel.ID, item.Title, err)
 			s.setLastError(item, err)
 		} else if written > 0 {
@@ -894,7 +896,20 @@ func (s *channelStreamer) playItem(ctx context.Context, item PlaybackItem) (int6
 			if readErr != nil {
 				return written, readErr
 			}
-			if waitErr != nil && !errors.Is(itemCtx.Err(), context.DeadlineExceeded) && !errors.Is(itemCtx.Err(), context.Canceled) {
+			// An item WE ended is not an item that ended. A skip, a booked show
+			// cutting in, the stall watchdog, the play window closing, the last
+			// listener leaving — each kills ffmpeg, and a killed ffmpeg closes
+			// its pipe exactly as a finished one does: EOF, then an exit status
+			// that says "signal: killed". The exit status is not a fault of the
+			// source and is rightly not reported as one; but reading the EOF as
+			// a clean end told the loop the whole item had gone out. Every skip
+			// therefore paid a full surfacing on top of the one the skip itself
+			// spends, and a torn-down airing wrote the episode up as heard.
+			// Context errors carry the distinction, so hand them back.
+			if ctxErr := itemCtx.Err(); ctxErr != nil {
+				return written, ctxErr
+			}
+			if waitErr != nil {
 				return written, waitErr
 			}
 			return written, nil

@@ -5,10 +5,12 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"path/filepath"
 	"sort"
 	"strings"
 
 	"github.com/bouliehaan/samo-server/internal/catalogstore"
+	"github.com/bouliehaan/samo-server/internal/scannerstore"
 )
 
 type ScanStats struct {
@@ -274,6 +276,17 @@ func (s *Scanner) pruneLibrary(ctx context.Context, library Library, accumulator
 	if strings.HasPrefix(library.Path, "samo://") {
 		return ScanStats{}, nil
 	}
+	root, err := filepath.Abs(strings.TrimSpace(library.Path))
+	if err != nil {
+		return ScanStats{}, err
+	}
+	// Every deletion below is justified by a path that would not stat. If the
+	// library root itself will not stat, then what went missing is the volume,
+	// not the music: prune nothing at all.
+	if classifyPath(ctx, root) != pathPresent {
+		log.Printf("scanner: skip prune for library %q — root %q is unreachable", library.Name, root)
+		return ScanStats{}, nil
+	}
 	if len(accumulator.filePaths) == 0 {
 		existing, err := s.countIndexedPaths(ctx, library.ID)
 		if err != nil {
@@ -355,22 +368,32 @@ func pruneStale(ids []string, seen map[string]struct{}, delete func(string) erro
 	return pruned, nil
 }
 
-// pruneMediaFiles removes files the scan did not see — but only the ones it can
-// prove are gone.
+// pruneMediaFiles reconciles the rows the scan did not see.
 //
-// A path that is still reachable on disk and yet was not walked means the file
-// really was deleted or moved, so the row goes. A path that is unreachable
-// means the storage is, so the row is marked missing instead: an unplugged
-// drive or a dropped NFS mount must not wipe the library.
+// A file that vanished is flagged, not deleted. Deleting a folder is not
+// always something you meant to keep: the row lands in the missing-files list
+// in settings, where it is reviewed and removed on purpose. Only the review
+// step (RemoveAllMissingFiles) actually drops catalog rows.
+//
+// Three outcomes, one per thing a stat can prove:
+//
+//   - The path does not exist. The file is gone, so the row is flagged missing
+//     and waits there for review.
+//   - The stat timed out or failed some other way — a slow NFS mount, an I/O
+//     error. Nothing is proven, so the row is flagged missing too. It must not
+//     be deleted: an unplugged drive cannot be allowed to wipe the library.
+//   - The path still exists and the walk skipped it (a new ignore rule, an
+//     extension we no longer index). It is not missing, it is excluded, and
+//     there is nothing for a human to review — the row goes.
 func (s *Scanner) pruneMediaFiles(ctx context.Context, libraryID string, seenPaths map[string]struct{}) (int, int, error) {
-	paths, err := s.store.PresentMediaFilePaths(ctx, libraryID)
+	paths, err := s.store.MediaFilePathsForPrune(ctx, libraryID)
 	if err != nil {
 		return 0, 0, err
 	}
 
-	var stale []string
+	var stale []scannerstore.PrunablePath
 	for _, path := range paths {
-		if _, ok := seenPaths[path]; !ok {
+		if _, ok := seenPaths[path.Path]; !ok {
 			stale = append(stale, path)
 		}
 	}
@@ -383,14 +406,20 @@ func (s *Scanner) pruneMediaFiles(ctx context.Context, libraryID string, seenPat
 				s.onActivity(fmt.Sprintf("pruning stale files… (%d/%d)", index, len(stale)))
 			}
 		}
-		if fileReachable(ctx, path) {
-			if err := s.store.DeleteMediaFileByPath(ctx, libraryID, path); err != nil {
+		if classifyPath(ctx, path.Path) == pathPresent {
+			if err := s.store.DeleteMediaFileByPath(ctx, libraryID, path.Path); err != nil {
 				return pruned, marked, err
 			}
 			pruned++
 			continue
 		}
-		if err := s.store.MarkMediaFileMissing(ctx, libraryID, path); err != nil {
+		// Gone or unprovable: flag it and leave it for review. Phase 2 or an
+		// earlier scan may have flagged it already; re-marking would change
+		// nothing and cost a write per file per scan.
+		if path.Missing {
+			continue
+		}
+		if err := s.store.MarkMediaFileMissing(ctx, libraryID, path.Path); err != nil {
 			return pruned, marked, err
 		}
 		marked++

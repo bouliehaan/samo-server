@@ -153,6 +153,17 @@ esac`)
 	if status != "unmatched" {
 		t.Fatalf("track-unmatched status = %q", status)
 	}
+	// The album name is kept in the ledger with the rest of the match. Keep
+	// files the copy under it from here, so a name only written into the
+	// album override — one edit, or one sibling drop, from gone — is not
+	// enough.
+	var matchedAlbum string
+	if err := db.QueryRowContext(ctx, `SELECT matched_album FROM explo_tracks WHERE track_id = ?`, "track-matched").Scan(&matchedAlbum); err != nil {
+		t.Fatal(err)
+	}
+	if matchedAlbum != "Real Album" {
+		t.Fatalf("track-matched matched_album = %q, want %q", matchedAlbum, "Real Album")
+	}
 
 	// The matched track's title/artist were applied as a metadata override
 	// and are visible through the normal catalog projection - no file touched.

@@ -95,6 +95,24 @@ type Obligation struct {
 	// afterwards should not silently un-satisfy episodes already heard.
 	SettleAt float64 `json:"settleAt,omitempty"`
 	Airings  int     `json:"airings"`
+	// Held is why the station is not offering this right now, when it is not:
+	// the rule and its reason, exactly as the decision's constraints put it.
+	// Derived on read from a peek at those rules (Engine.JudgeOwed) and never
+	// stored; absent when the episode could air at this moment.
+	//
+	// The queue is an order, but a decision filters before it scores, so the
+	// most urgent thing owed is not the next thing played when a rule holds it
+	// back -- an episode aired two hours ago and owed a second hearing, with
+	// eight hours' separation still to run, sits at the front of the queue
+	// and nowhere near the front of the running order. Anything that reads
+	// the queue as "what plays next" needs to know which.
+	Held *Hold `json:"held,omitempty"`
+}
+
+// Hold is a rule standing between something owed and the air.
+type Hold struct {
+	Rule   string `json:"rule"`
+	Reason string `json:"reason"`
 }
 
 // Pending reports whether this is still owed.
@@ -237,6 +255,10 @@ type ObligationStore interface {
 	Notice(ctx context.Context, obligations []Obligation, now time.Time) error
 	// Credit adds exposure to one obligation and settles its state.
 	Credit(ctx context.Context, itemRef string, credit float64, now time.Time) error
+	// Reached settles an obligation the listener got to by another route — the
+	// episode was heard in a client — so the station stops owing something it
+	// will never be allowed to air. A no-op for anything not pending.
+	Reached(ctx context.Context, itemRef string, now time.Time) error
 }
 
 // ---- in-memory ---------------------------------------------------------
@@ -300,6 +322,18 @@ func (m *MemoryObligations) Credit(_ context.Context, itemRef string, credit flo
 	}
 	entry.Credit += credit
 	entry.Airings++
+	settle(entry, now)
+	return nil
+}
+
+func (m *MemoryObligations) Reached(_ context.Context, itemRef string, now time.Time) error {
+	entry, ok := m.byRef[itemRef]
+	if !ok || !entry.Pending() {
+		return nil
+	}
+	if entry.Credit < entry.Target() {
+		entry.Credit = entry.Target()
+	}
 	settle(entry, now)
 	return nil
 }

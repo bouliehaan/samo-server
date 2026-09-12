@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -113,7 +114,7 @@ func containsRune(s, sub string) bool {
 // identification — so a copy that only writes text tags lands in the library
 // with no artwork at all.
 func TestRemuxArgsEmbedsTheCover(t *testing.T) {
-	args := remuxArgs("/drop/x.flac", "/lib/x.flac", "/covers/c.jpg", "Outlandos d\u2019Amour", catalog.MusicTrack{Title: "Roxanne"})
+	args := remuxArgs("/drop/x.flac", "/lib/x.flac.samo-keep-tmp", "flac", "/covers/c.jpg", "Outlandos d\u2019Amour", catalog.MusicTrack{Title: "Roxanne"})
 	joined := strings.Join(args, " ")
 
 	if !strings.Contains(joined, "-i /drop/x.flac -i /covers/c.jpg") {
@@ -128,15 +129,30 @@ func TestRemuxArgsEmbedsTheCover(t *testing.T) {
 	if !strings.Contains(joined, "-disposition:v:0 attached_pic") {
 		t.Fatalf("cover is not marked as attached art: %s", joined)
 	}
-	if args[len(args)-1] != "/lib/x.flac" {
-		t.Fatalf("destination must come last, got %q", args[len(args)-1])
+	if args[len(args)-1] != "/lib/x.flac.samo-keep-tmp" {
+		t.Fatalf("output must come last, got %q", args[len(args)-1])
+	}
+}
+
+// The output is the temp name, which carries no extension for ffmpeg to pick
+// the container from, so the format has to be spelled out — as an OUTPUT
+// option, after every input: a -f ahead of an -i would force the input's
+// demuxer instead.
+func TestRemuxArgsNamesTheContainerAfterTheInputs(t *testing.T) {
+	args := remuxArgs("/drop/x.m4a", "/lib/x.m4a.samo-keep-tmp", "ipod", "/covers/c.jpg", "Album", catalog.MusicTrack{Title: "Song"})
+	joined := strings.Join(args, " ")
+	if !strings.HasSuffix(joined, " -f ipod /lib/x.m4a.samo-keep-tmp") {
+		t.Fatalf("container is not named right before the output: %s", joined)
+	}
+	if lastInput := strings.LastIndex(joined, " -i "); lastInput > strings.Index(joined, " -f ") {
+		t.Fatalf("-f must follow every -i: %s", joined)
 	}
 }
 
 // With no cover to add, the source's own streams must still come across whole
 // — a file that DID carry embedded art must not lose it.
 func TestRemuxArgsWithoutCoverKeepsSourceStreams(t *testing.T) {
-	joined := strings.Join(remuxArgs("/drop/x.flac", "/lib/x.flac", "", "Outlandos d\u2019Amour", catalog.MusicTrack{Title: "Roxanne"}), " ")
+	joined := strings.Join(remuxArgs("/drop/x.flac", "/lib/x.flac.samo-keep-tmp", "flac", "", "Outlandos d\u2019Amour", catalog.MusicTrack{Title: "Roxanne"}), " ")
 	if !strings.Contains(joined, "-map 0 -c copy") {
 		t.Fatalf("source streams are not mapped whole: %s", joined)
 	}
@@ -148,7 +164,7 @@ func TestRemuxArgsWithoutCoverKeepsSourceStreams(t *testing.T) {
 // The tags samo holds as overrides are the point of remuxing rather than
 // copying, so they have to reach the file alongside the cover.
 func TestRemuxArgsWritesEffectiveTags(t *testing.T) {
-	joined := strings.Join(remuxArgs("/a.flac", "/b.flac", "/c.jpg", "Outlandos D'Amour", catalog.MusicTrack{
+	joined := strings.Join(remuxArgs("/a.flac", "/b.flac.samo-keep-tmp", "flac", "/c.jpg", "Outlandos D'Amour", catalog.MusicTrack{
 		Title:            "Roxanne",
 		DisplayArtist:    "The Police",
 		AlbumTitle:       "Outlandos D'Amour",
@@ -166,6 +182,142 @@ func TestRemuxArgsWritesEffectiveTags(t *testing.T) {
 	} {
 		if !strings.Contains(joined, want) {
 			t.Fatalf("missing %q in: %s", want, joined)
+		}
+	}
+}
+
+// A container that cannot hold a picture must never be handed one. ffmpeg's
+// ogg, opus, adts and wav muxers refuse the stream (the keep failed), and asf
+// writes it as a real video stream (the kept .wma played as a one-frame
+// film). Audio only, then — and the source's own art goes too, because the
+// same muxer would refuse that just the same.
+func TestRemuxArgsKeepsThePictureOutOfContainersThatCannotHoldIt(t *testing.T) {
+	for _, format := range []string{"ogg", "opus", "adts", "wav", "asf"} {
+		joined := strings.Join(remuxArgs("/drop/x", "/lib/x.samo-keep-tmp", format, "/covers/c.jpg", "Album", catalog.MusicTrack{Title: "Song"}), " ")
+		if strings.Contains(joined, "/covers/c.jpg") || strings.Contains(joined, "attached_pic") {
+			t.Errorf("%s: cover handed to a muxer that cannot hold it: %s", format, joined)
+		}
+		if !strings.Contains(joined, "-map 0:a -c copy") {
+			t.Errorf("%s: not audio-only: %s", format, joined)
+		}
+	}
+}
+
+// AIFF can hold the picture, but its muxer only writes it as part of ID3v2
+// tags, and those are off by default: without the option the remux succeeds
+// and the cover is silently gone.
+func TestRemuxArgsMakesAIFFWriteItsPicture(t *testing.T) {
+	joined := strings.Join(remuxArgs("/drop/x.aiff", "/lib/x.aiff.samo-keep-tmp", "aiff", "/covers/c.jpg", "Album", catalog.MusicTrack{Title: "Song"}), " ")
+	if !strings.Contains(joined, "-disposition:v:0 attached_pic") || !strings.Contains(joined, "-write_id3v2 1") {
+		t.Fatalf("AIFF copy would drop its cover: %s", joined)
+	}
+	if without := strings.Join(remuxArgs("/drop/x.aiff", "/lib/x.aiff.samo-keep-tmp", "aiff", "", "Album", catalog.MusicTrack{}), " "); strings.Contains(without, "write_id3v2") {
+		t.Fatalf("no cover, so nothing to make AIFF write: %s", without)
+	}
+}
+
+// The sidecar is named by what the bytes are, not by what the source file was
+// called: the cover cache names everything .jpg, and the scanner only reads
+// cover.jpg/.jpeg/.png/.webp.
+func TestPlaceCoverSidecarNamesTheFileByItsContent(t *testing.T) {
+	dir := t.TempDir()
+	png := filepath.Join(t.TempDir(), "abc123.jpg")
+	if err := os.WriteFile(png, []byte("\x89PNG\r\n\x1a\n"+strings.Repeat("\x00", 64)), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := placeCoverSidecar(dir, png); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "cover.png")); err != nil {
+		t.Fatalf("PNG bytes should land as cover.png: %v", err)
+	}
+	if entries, _ := filepath.Glob(filepath.Join(dir, "*samo-keep-tmp*")); len(entries) != 0 {
+		t.Fatalf("temp file left behind: %v", entries)
+	}
+
+	text := filepath.Join(t.TempDir(), "cover.jpg")
+	if err := os.WriteFile(text, []byte("<html>not found</html>"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := placeCoverSidecar(t.TempDir(), text); err == nil {
+		t.Fatalf("a file that is not an image must not become the album's cover")
+	}
+}
+
+// An album folder that already has art keeps it. The scanner ranks cover.*
+// above folder.*, so writing cover.png next to a rip's folder.jpg would
+// silently change what an existing album shows.
+func TestPlaceCoverSidecarLeavesExistingAlbumArtAlone(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "Folder.JPG"), []byte("\xff\xd8\xff"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	png := filepath.Join(t.TempDir(), "c.png")
+	if err := os.WriteFile(png, []byte("\x89PNG\r\n\x1a\n"+strings.Repeat("\x00", 64)), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := placeCoverSidecar(dir, png); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "cover.png")); err == nil {
+		t.Fatalf("the album already had art; cover.png must not be added beside it")
+	}
+}
+
+// The temp name has to stay beside the destination (the rename into place is
+// only atomic on one filesystem) and must NOT end in the audio extension: the
+// watcher and the scanner both go by extension, and a temp file that looks
+// like audio is an audio file that appears and then vanishes — which is what
+// made every keep reconcile the whole library.
+func TestKeepTempPathIsBesideTheDestinationWithoutItsExtension(t *testing.T) {
+	dest := "/lib/The Police/Outlandos d\u2019Amour/03 - Roxanne.flac"
+	tmp := keepTempPath(dest)
+	if filepath.Dir(tmp) != filepath.Dir(dest) {
+		t.Fatalf("temp file is not in the destination folder: %s", tmp)
+	}
+	if tmp == dest {
+		t.Fatalf("temp name must differ from the destination")
+	}
+	if got := filepath.Ext(tmp); got == ".flac" {
+		t.Fatalf("temp name still ends in the audio extension: %s", tmp)
+	}
+}
+
+// One muxer per extension the scanner catalogues, each the one ffmpeg would
+// have picked from that extension on its own — the copy must be the same
+// container it was before the temp name lost its extension.
+func TestRemuxFormatNamesTheMuxerFFmpegWouldPick(t *testing.T) {
+	for dest, want := range map[string]string{
+		"/lib/a.flac": "flac",
+		"/lib/a.mp3":  "mp3",
+		"/lib/a.m4a":  "ipod",
+		"/lib/a.m4b":  "ipod",
+		"/lib/a.ogg":  "ogg",
+		"/lib/a.opus": "opus",
+		"/lib/a.aac":  "adts",
+		"/lib/a.wav":  "wav",
+		"/lib/a.aif":  "aiff",
+		"/lib/a.aiff": "aiff",
+		"/lib/a.wma":  "asf",
+		"/lib/a.FLAC": "flac",
+	} {
+		got, err := remuxFormat(dest)
+		if err != nil {
+			t.Errorf("%s: %v", dest, err)
+			continue
+		}
+		if got != want {
+			t.Errorf("%s: format %q, want %q", dest, got, want)
+		}
+	}
+}
+
+// ffmpeg has no muxer for these, so refuse up front with a sentence instead
+// of leaving an empty album folder and a truncated ffmpeg complaint.
+func TestRemuxFormatRefusesWhatFFmpegCannotWrite(t *testing.T) {
+	for _, dest := range []string{"/lib/a.alac", "/lib/a.xyz", "/lib/noext"} {
+		if got, err := remuxFormat(dest); err == nil {
+			t.Errorf("%s: got format %q, want an error", dest, got)
 		}
 	}
 }

@@ -157,6 +157,29 @@ func (s *sqlObligations) Credit(ctx context.Context, itemRef string, credit floa
 	return nil
 }
 
+func (s *sqlObligations) Reached(ctx context.Context, itemRef string, now time.Time) error {
+	itemRef = strings.TrimSpace(itemRef)
+	if itemRef == "" {
+		return nil
+	}
+	stamp := now.UTC().Format(time.RFC3339)
+	// Credit is raised to the target rather than the state simply flipped, so
+	// the row reads the same way a settled one always has: an obligation with
+	// nothing left to earn. Airings are not touched — the station did not air
+	// it, somebody listened to it.
+	if _, err := s.db.ExecContext(ctx, `
+		UPDATE channel_obligations
+		SET credit = GREATEST(credit, target),
+		    state = ?,
+		    updated_at = ?
+		WHERE channel_id = ? AND item_ref = ? AND state = ?`,
+		string(ObligationSatisfied), stamp, s.channelID, itemRef, string(ObligationPending),
+	); err != nil {
+		return fmt.Errorf("settle a heard obligation: %w", err)
+	}
+	return nil
+}
+
 func formatStoredTime(at time.Time) string {
 	if at.IsZero() {
 		return ""

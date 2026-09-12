@@ -1160,10 +1160,17 @@ func TestTheGapBeforeABookedSlotGoesToMusic(t *testing.T) {
 	// The curios come with a deep back catalogue, because that is what a daily
 	// short-form show actually looks like: sixty rows against the long show's
 	// twelve. A fixture with two of them passes whether the rule works or not.
+	// Aged past the 72h new-release window on purpose. This rule is about the
+	// LIBRARY — "the two four-minute oddities in the library ... every day, at
+	// the same time" — and a brand-new episode of a show you subscribe to is
+	// not the clock picking, it is the station doing its job. Leave the newest
+	// brief inside the window and this fixture stops testing back catalogue and
+	// starts asserting that a new episode loses to music, which is a different
+	// claim and not one this test was written to make.
 	briefs := make([]catalog.PodcastEpisode, 0, 60)
 	for i := 0; i < 60; i++ {
 		briefs = append(briefs, episode("brief"+strconv.Itoa(i), "Brief "+strconv.Itoa(i),
-			now.AddDate(0, 0, -i-1), 3+i%3))
+			now.AddDate(0, 0, -i-4), 3+i%3))
 	}
 	cat := &stubCatalog{
 		episodes:  map[string][]catalog.PodcastEpisode{"plong": long, "pshort": briefs},
@@ -1461,10 +1468,11 @@ func TestTheLastSliverBeforeASlotIsFilledNotScraped(t *testing.T) {
 		long = append(long, episode("long"+strconv.Itoa(i), "Long ep "+strconv.Itoa(i),
 			now.AddDate(0, 0, -3*i-1), 45+i))
 	}
+	// Back catalogue, for the reason given in the gap test above.
 	briefs := make([]catalog.PodcastEpisode, 0, 40)
 	for i := 0; i < 40; i++ {
 		briefs = append(briefs, episode("brief"+strconv.Itoa(i), "Brief "+strconv.Itoa(i),
-			now.AddDate(0, 0, -i-1), 3))
+			now.AddDate(0, 0, -i-4), 3))
 	}
 	// Three minutes to the slot, and every song on the station is longer than
 	// that. Only the three-minute briefs fit — so standing talk down would
@@ -1512,5 +1520,80 @@ func TestTheLastSliverBeforeASlotIsFilledNotScraped(t *testing.T) {
 	// Held to the boundary and faded, not run over it.
 	if item.MaxDuration <= 0 || item.MaxDuration > 3*time.Minute {
 		t.Fatalf("the fill was not capped at the gap: MaxDuration=%v", item.MaxDuration)
+	}
+}
+
+// A new episode plays because it is new, not because it is long enough.
+//
+// Jacob's station, 2026-09-04. A Planet Money episode dropped at 18:00: 25m27s,
+// owed, never aired. From 19:04 until the 22:00 slot the station played
+// forty-six songs in a row out of a block named "New episodes" whose exit
+// condition is obligations.pending == 0, and told him "only odds and ends of
+// talk fit the 2h51m0s left".
+//
+// The gap rule had measured that episode against what its CATEGORY usually
+// runs. On a library that also holds three-hour interviews the bar came out at
+// 26m17s, so the most ordinary episode of a perfectly ordinary show missed it
+// by fifty seconds and was filed as an odd and end. Nobody subscribes to a
+// median. They subscribe to a show, and they want it when it comes out.
+func TestANewEpisodeIsNotACurioHoweverLongTheOtherShowsAre(t *testing.T) {
+	now := time.Date(2026, 9, 4, 21, 28, 0, 0, time.UTC)
+	sources := []Source{
+		podcastSource("pm", "Planet Money", "ppm"),
+		podcastSource("rogan", "The Joe Rogan Experience", "progan"),
+		musicSource("mus1", "House Playlist", "pl1"),
+		{ID: "ted", ChannelID: "ch1", Kind: SourceLiveStream, Label: "TED Radio Hour", Enabled: true,
+			Role: RoleShow, Config: map[string]any{"url": "http://example.test/ted"}},
+	}
+	// The whole reason the old bar sat where it did: a library of giants.
+	rogan := make([]catalog.PodcastEpisode, 0, 12)
+	for i := 0; i < 12; i++ {
+		rogan = append(rogan, episode("rogan"+strconv.Itoa(i), "#"+strconv.Itoa(2540+i),
+			now.AddDate(0, 0, -3*i-4), 160+i))
+	}
+	// Planet Money: a back catalogue of ordinary half-hours, and one that
+	// dropped three and a half hours ago.
+	pm := []catalog.PodcastEpisode{
+		episode("pm-new", "Trump drinks Venezuela's milkshake", now.Add(-3*time.Hour-28*time.Minute), 25),
+	}
+	for i := 0; i < 10; i++ {
+		pm = append(pm, episode("pm"+strconv.Itoa(i), "Planet Money "+strconv.Itoa(i),
+			now.AddDate(0, 0, -i-8), 28))
+	}
+	tracks := make([]catalog.MusicTrack, 0, 24)
+	for i := 0; i < 24; i++ {
+		tracks = append(tracks, track("t"+strconv.Itoa(i), "Song "+strconv.Itoa(i),
+			"Artist "+strconv.Itoa(i), 150+(i*37)%180))
+	}
+	cat := &stubCatalog{
+		episodes:  map[string][]catalog.PodcastEpisode{"ppm": pm, "progan": rogan},
+		playlists: map[string][]catalog.MusicTrack{"pl1": tracks},
+	}
+	plan := Plan{
+		Version:      PlanVersion,
+		Seed:         3,
+		Selection:    SelectionPolicy{Epsilon: -1},
+		Categories:   []CategoryDef{{ID: "talk", Target: 1}, {ID: "music", Target: 0}},
+		UnderrunPool: "music",
+		Pools: []Pool{
+			{ID: "talk", Match: &PoolMatch{Category: "talk"}},
+			{ID: "music", Match: &PoolMatch{Category: "music"}},
+			{ID: "booked", SourceIDs: []string{"ted"}},
+		},
+		Blocks: []Block{
+			{ID: "general", Label: "General rotation", Default: true,
+				Pools: []PoolRef{{Pool: "talk"}, {Pool: "music"}}},
+			{ID: "ted", Label: "TED Radio Hour",
+				Enter: BlockEntry{At: "22:00", Days: "*", Hard: true, Start: StartImmediately},
+				Exit:  BlockExit{At: "23:00"},
+				Pools: []PoolRef{{Pool: "booked"}}, Next: "general"},
+		},
+	}
+
+	s := newStation(t, plan, sources, cat, now)
+	item, decision := s.decide()
+	if item.ItemRef != "episode:pm-new" {
+		t.Fatalf("with 32m0s before the booked slot and a 25m episode owed and unaired,"+
+			" the station played %q from %s\n%s", item.Title, item.SourceID, decision.Explain())
 	}
 }

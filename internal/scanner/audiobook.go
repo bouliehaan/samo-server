@@ -132,7 +132,7 @@ func (s *Scanner) persistAudiobookGroup(ctx context.Context, library Library, ro
 			break
 		}
 	}
-	cover := s.resolveCover(ctx, group.Root, audioPaths, checksums, embeddedKnown)
+	cover := s.resolveCover(ctx, root, group.Root, audioPaths, checksums, embeddedKnown)
 	item := catalog.AudiobookItem{
 		ID:              audiobookID,
 		LibraryID:       library.ID,

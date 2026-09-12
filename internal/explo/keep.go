@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -171,6 +172,12 @@ func (s *Service) keepOne(ctx context.Context, id, root string, dirs []string, r
 		res.Path = dest
 		return "", nil
 	}
+	// Before the folder is made, so an unkeepable format leaves no empty
+	// album behind.
+	format, err := remuxFormat(dest)
+	if err != nil {
+		return "", err
+	}
 	if err := os.MkdirAll(filepath.Dir(dest), 0o755); err != nil {
 		return "", fmt.Errorf("could not create %s: %w", filepath.Dir(dest), err)
 	}
@@ -178,10 +185,11 @@ func (s *Service) keepOne(ctx context.Context, id, root string, dirs []string, r
 	// Write to a temp name in the destination directory so a failure or a
 	// crash never leaves a half-copied file where the scanner will find it,
 	// and so the final step is an atomic rename on the same filesystem.
-	tmp := dest + ".samo-keep-tmp" + filepath.Ext(dest)
+	tmp := keepTempPath(dest)
 	defer func() { _ = os.Remove(tmp) }()
 
-	if err := s.remuxWithTags(ctx, source, tmp, track, albumTitle, s.keepCoverPath(ctx, id, track)); err != nil {
+	cover := s.keepCoverPath(ctx, id, track)
+	if err := s.remuxWithTags(ctx, source, tmp, format, track, albumTitle, cover); err != nil {
 		return "", err
 	}
 	info, err := os.Stat(tmp)
@@ -191,13 +199,173 @@ func (s *Service) keepOne(ctx context.Context, id, root string, dirs []string, r
 	if err := os.Rename(tmp, dest); err != nil {
 		return "", fmt.Errorf("could not place %s: %w", filepath.Base(dest), err)
 	}
+
+	// Best effort, after the copy is in place: a keep that copied the audio
+	// and then reported failure would be answered "already in your library"
+	// on the retry, which is worse than an album the cover pass can still
+	// fix by hand.
+	if _, embeddable := embedCoverArgs(format); cover != "" && !embeddable {
+		if err := placeCoverSidecar(filepath.Dir(dest), cover); err != nil {
+			s.logger("explo: keep: %s: cover could not be placed beside the copy: %v", filepath.Base(dest), err)
+		}
+	}
 	return dest, nil
 }
 
+// embedCoverArgs reports whether ffmpeg's muxer for format can carry an
+// attached picture, and the options it needs to actually write one.
+//
+// Checked against ffmpeg 8.1 with the exact command remuxArgs builds:
+//   - flac, mp3 and ipod write the picture as given.
+//   - aiff accepts the stream but, unless told to write ID3v2 tags, drops
+//     it without a word.
+//   - asf accepts the stream and writes it as a VIDEO stream: the kept .wma
+//     plays as a one-frame film in anything that honours it.
+//   - ogg, opus, adts and wav refuse the stream, and the keep fails with it.
+//
+// For the containers that cannot, keepOne puts the image beside the copy
+// instead (placeCoverSidecar). The library never fetches art on its own, so
+// a copy that lands without it stays without it.
+func embedCoverArgs(format string) ([]string, bool) {
+	switch format {
+	case "flac", "mp3", "ipod":
+		return nil, true
+	case "aiff":
+		return []string{"-write_id3v2", "1"}, true
+	}
+	return nil, false
+}
+
+// placeCoverSidecar writes samo's cover into an album folder as cover.<ext>,
+// the name the scanner looks for before it looks inside any file. Only when
+// the folder has no art of its own: the point is to give the copy a cover,
+// not to change the cover of an album that was already there.
+//
+// The extension comes from the bytes, not the source's name — the cover
+// cache names everything .jpg whatever it holds — and the write goes through
+// the same temp-then-rename as the audio, so a half-written image is never
+// there to be read.
+func placeCoverSidecar(dir, coverPath string) error {
+	if hasCoverSidecar(dir) {
+		return nil
+	}
+	data, err := os.ReadFile(coverPath)
+	if err != nil {
+		return err
+	}
+	var ext string
+	switch mime := http.DetectContentType(data); mime {
+	case "image/jpeg":
+		ext = ".jpg"
+	case "image/png":
+		ext = ".png"
+	case "image/webp":
+		ext = ".webp"
+	default:
+		return fmt.Errorf("%s is %s, not an image the scanner reads", coverPath, mime)
+	}
+	dest := filepath.Join(dir, "cover"+ext)
+	tmp := keepTempPath(dest)
+	if err := os.WriteFile(tmp, data, 0o644); err != nil {
+		return err
+	}
+	if err := os.Rename(tmp, dest); err != nil {
+		_ = os.Remove(tmp)
+		return err
+	}
+	return nil
+}
+
+// hasCoverSidecar mirrors the scanner's own lookup (coverImageStems in
+// scanner/sidecar.go): any of these names with an image extension is what it
+// will show for the album.
+func hasCoverSidecar(dir string) bool {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return false
+	}
+	for _, entry := range entries {
+		if entry.IsDir() {
+			continue
+		}
+		name := strings.ToLower(entry.Name())
+		ext := filepath.Ext(name)
+		switch ext {
+		case ".jpg", ".jpeg", ".png", ".webp":
+		default:
+			continue
+		}
+		switch strings.TrimSuffix(name, ext) {
+		case "cover", "folder", "front", "artwork", "album":
+			return true
+		}
+	}
+	return false
+}
+
+// keepTempPath is where a copy is written before the rename that makes it
+// real. Its extension is the marker itself, never the audio extension: the
+// library watcher and the scanner both decide what a file is by its
+// extension, and this file has to count as nothing to them.
+//
+// It used to be "<dest>.samo-keep-tmp<ext>", and to the watcher that was an
+// audio file: it appeared, was written to, and then — a rename is a Remove to
+// fsnotify — LEFT the library, which is the one event the watcher answers
+// with a whole-library reconcile, because only a library-wide scan can mark
+// files missing. Every keep therefore cost a full quick scan of the entire
+// music library (18.7k files on the live server, 2026-09-10) for a copy that
+// Keep's own subpath scan had already catalogued. Fixed here rather than in
+// the watcher because the watcher is right: an audio file that vanishes IS a
+// reason to reconcile. The temp file must simply never look like one.
+//
+// No extension means ffmpeg cannot infer the container from the name, hence
+// remuxFormat.
+func keepTempPath(dest string) string {
+	return dest + ".samo-keep-tmp"
+}
+
+// remuxFormat names the ffmpeg muxer for a kept copy. ffmpeg picks the
+// container from the output path's extension, and the copy is written to a
+// name that has none (keepTempPath), so it has to be told. Each entry is the
+// muxer ffmpeg chooses on its own for that extension — checked against the
+// "Output #0, <muxer>" line of ffmpeg 8.1 — so the copy is the same container
+// the old audio-suffixed temp name produced. The extensions are the scanner's
+// (isAudioPath); there is no point writing a file it would not catalogue.
+//
+// .alac is on the scanner's list but not here: it is a codec, not a
+// container, and ffmpeg has no muxer for the extension. Keep never worked for
+// one — ffmpeg refused the old temp name just the same — it only failed later
+// and less clearly.
+func remuxFormat(dest string) (string, error) {
+	ext := strings.ToLower(filepath.Ext(dest))
+	switch ext {
+	case ".flac":
+		return "flac", nil
+	case ".mp3":
+		return "mp3", nil
+	case ".m4a", ".m4b":
+		return "ipod", nil
+	case ".ogg":
+		return "ogg", nil
+	case ".opus":
+		return "opus", nil
+	case ".aac":
+		return "adts", nil
+	case ".wav":
+		return "wav", nil
+	case ".aif", ".aiff":
+		return "aiff", nil
+	case ".wma":
+		return "asf", nil
+	}
+	return "", fmt.Errorf("cannot keep a %q file: no container format to write it as", ext)
+}
+
 // remuxWithTags copies the audio stream untouched and rewrites the tags around
-// it. `-c copy` means no re-encode, so this is lossless and fast.
-func (s *Service) remuxWithTags(ctx context.Context, source, dest string, track catalog.MusicTrack, albumTitle, coverPath string) error {
-	cmd := exec.CommandContext(ctx, s.ffmpegPath, remuxArgs(source, dest, coverPath, albumTitle, track)...)
+// it. `-c copy` means no re-encode, so this is lossless and fast. output is
+// the temp name and format the container it is written as; see keepTempPath.
+func (s *Service) remuxWithTags(ctx context.Context, source, output, format string, track catalog.MusicTrack, albumTitle, coverPath string) error {
+	cmd := exec.CommandContext(ctx, s.ffmpegPath, remuxArgs(source, output, format, coverPath, albumTitle, track)...)
 	if out, err := cmd.CombinedOutput(); err != nil {
 		detail := strings.TrimSpace(string(out))
 		if len(detail) > 200 {
@@ -220,29 +388,38 @@ func (s *Service) remuxWithTags(ctx context.Context, source, dest string, track 
 // point of remuxing is that the copy carries samo's effective metadata, and
 // the cover is metadata.
 //
-//   - With a cover in hand, take the audio from input 0 and the picture from
-//     input 1. samo's cover REPLACES any the source carried, because samo's is
-//     what the app displays — and when the source's own art is where samo got
-//     it, they are the same image anyway.
+//   - With a cover in hand and a container that can hold one, take the audio
+//     from input 0 and the picture from input 1. samo's cover REPLACES any the
+//     source carried, because samo's is what the app displays — and when the
+//     source's own art is where samo got it, they are the same image anyway.
 //   - Without one, `-map 0` keeps whatever the source had, embedded art
 //     included.
-func remuxArgs(source, dest, coverPath, albumTitle string, track catalog.MusicTrack) []string {
+//   - In a container that cannot hold a picture (embedCoverArgs), audio only.
+//     The muxer would refuse samo's cover and the source's own alike, and a
+//     source that carries one — ID3 art in a WAV, a picture block in an Ogg —
+//     otherwise fails to copy at all.
+//
+// format is passed as an explicit -f because output carries no extension for
+// ffmpeg to infer the container from (keepTempPath).
+func remuxArgs(source, output, format, coverPath, albumTitle string, track catalog.MusicTrack) []string {
 	args := []string{"-nostdin", "-y", "-loglevel", "error", "-i", source}
-	if coverPath != "" {
-		args = append(args, "-i", coverPath, "-map", "0:a", "-map", "1:v")
-	} else {
-		args = append(args, "-map", "0")
-	}
-	args = append(args, "-c", "copy")
-	if coverPath != "" {
+	embed, embeddable := embedCoverArgs(format)
+	switch {
+	case !embeddable:
+		args = append(args, "-map", "0:a", "-c", "copy")
+	case coverPath == "":
+		args = append(args, "-map", "0", "-c", "copy")
+	default:
 		// Without the disposition the picture is a plain video stream: FLAC
 		// refuses it, and players that accept it show a one-frame video rather
 		// than cover art.
 		args = append(args,
+			"-i", coverPath, "-map", "0:a", "-map", "1:v", "-c", "copy",
 			"-disposition:v:0", "attached_pic",
 			"-metadata:s:v:0", "title=Album cover",
 			"-metadata:s:v:0", "comment=Cover (front)",
 		)
+		args = append(args, embed...)
 	}
 
 	add := func(key, value string) {
@@ -269,7 +446,7 @@ func remuxArgs(source, dest, coverPath, albumTitle string, track catalog.MusicTr
 	if track.ExternalIDs.MusicBrainzRecordingID != "" {
 		add("musicbrainz_trackid", track.ExternalIDs.MusicBrainzRecordingID)
 	}
-	return append(args, dest)
+	return append(args, "-f", format, output)
 }
 
 // keepCoverPath picks the local image to embed in the kept copy: samo's
@@ -412,6 +589,11 @@ func checkWritable(root string) error {
 // its track id. Polls rather than hooking the scan job because the row
 // appearing is the thing callers actually need; a finished job that somehow
 // skipped the file would still leave them with nothing usable.
+//
+// The wait is part of the endpoint's contract: the clients size their own
+// request deadline for a keep from it (exploKeepTimeoutMs in the app's
+// packages/core server-samo.ts). A longer wait here needs a longer budget
+// there, or a keep that did everything right is reported as a failure.
 func (s *Service) resolveKeptTrackIDs(ctx context.Context, results []KeepResult) {
 	const (
 		timeout  = 30 * time.Second
@@ -621,53 +803,37 @@ func normalizeKeepIdentity(value string) string {
 
 // keepAlbumTitle resolves the album a kept copy is filed under.
 //
-// track.AlbumTitle is NOT usable here. For a drop it is whatever the sharer
-// tagged the file with — Soulseek rips come off hits compilations, so it reads
-// "Het Beste Uit 20 Jaar Top 2000" — and for an untagged drop the scanner
-// falls back to the containing folder, which is the rotating drop folder
-// itself. Both were being written into the library as real album names, and a
-// folder name is how "Weekly-Exploration" became an album.
+// track.AlbumTitle is NOT the first choice. For a drop it is whatever the
+// sharer tagged the file with — Soulseek rips come off hits compilations, so
+// it reads "Het Beste Uit 20 Jaar Top 2000" — and for an untagged drop the
+// scanner falls back to the containing folder, which is the rotating drop
+// folder itself. Both were being written into the library as real album
+// names, and a folder name is how "Weekly-Exploration" became an album.
 //
-// The identified release group is the answer, and the ledger already stores it
-// from identification time, so this is one cheap lookup for the name. Falling
-// back to the catalog title is allowed only when it is not a drop folder's
-// name: a MusicBrainz outage should not block keeping a reasonably tagged
-// track, but nothing justifies writing the drop folder to disk.
+// The identified release group is the answer, and the ledger holds its title
+// from identification time (matched_album), so this is one local read. It
+// used to ask MusicBrainz for the title here instead, inside the request —
+// which put a rate-limited API behind a VPN on the path of a tap: the phone
+// gave up at thirty seconds, the copy landed anyway, and the second tap said
+// "already in your library". Keep now reads what the pipeline wrote and never
+// waits on the network; a blank title is the pipeline's to fill in
+// (backfillAlbumTitles), not this request's.
+//
+// Falling back to the catalog title is allowed only when it is not a drop
+// folder's name: that is samo's effective title, which for an identified drop
+// is the same release group applied as an override, so a track whose ledger
+// row predates matched_album still files correctly. Nothing justifies writing
+// the drop folder to disk.
 func (s *Service) keepAlbumTitle(ctx context.Context, trackID string, track catalog.MusicTrack) (string, error) {
-	groupID := strings.TrimSpace(track.ExternalIDs.MusicBrainzReleaseGroupID)
-	recordingID := strings.TrimSpace(track.ExternalIDs.MusicBrainzRecordingID)
 	if s.db != nil {
-		var ledgerGroup, ledgerRecording string
+		var ledgerAlbum string
 		err := s.db.QueryRowContext(ctx, `
-			SELECT COALESCE(musicbrainz_release_group_id, ''), COALESCE(musicbrainz_recording_id, '')
-			FROM explo_tracks WHERE track_id = ?`, trackID).Scan(&ledgerGroup, &ledgerRecording)
+			SELECT COALESCE(matched_album, '') FROM explo_tracks WHERE track_id = ?`, trackID).Scan(&ledgerAlbum)
 		if err != nil && err != sql.ErrNoRows {
 			s.logger("explo: keep: ledger lookup failed for %s: %v", trackID, err)
 		}
-		if groupID == "" {
-			groupID = strings.TrimSpace(ledgerGroup)
-		}
-		if recordingID == "" {
-			recordingID = strings.TrimSpace(ledgerRecording)
-		}
-	}
-
-	if groupID != "" {
-		s.throttleMusicBrainz(ctx)
-		title, err := fetchReleaseGroupTitle(ctx, s.httpClient, groupID)
-		if err != nil {
-			s.logger("explo: keep: release group title lookup failed for %s: %v", groupID, err)
-		} else if title != "" {
+		if title := strings.TrimSpace(ledgerAlbum); title != "" {
 			return title, nil
-		}
-	}
-	if recordingID != "" {
-		s.throttleMusicBrainz(ctx)
-		refs, err := fetchRecordingReleaseRefs(ctx, s.httpClient, recordingID)
-		if err != nil {
-			s.logger("explo: keep: recording release lookup failed for %s: %v", recordingID, err)
-		} else if refs.ReleaseGroupTitle != "" {
-			return refs.ReleaseGroupTitle, nil
 		}
 	}
 

@@ -984,6 +984,12 @@ func loudnessPlanner(service *loudness.Service) channels.LoudnessPlanner {
 
 // channelListenedAdapter lets the channel scheduler ask "has anyone here
 // already heard this episode" without importing the playback package's shape.
+//
+// The station's own rows — written by channelAiringAdapter under the reserved
+// server account — come back apart from everybody else's. The scheduler needs
+// to tell "a person heard this" from "the radio aired this", and one merged
+// row cannot: it was how every episode the station aired once became one
+// nobody would be offered again.
 type channelListenedAdapter struct {
 	service *playback.Service
 }
@@ -991,20 +997,31 @@ type channelListenedAdapter struct {
 func (a channelListenedAdapter) EpisodeProgress(
 	ctx context.Context,
 	episodeIDs []string,
-) (map[string]channels.EpisodeProgress, error) {
+) (map[string]channels.EpisodeListening, error) {
 	if a.service == nil {
 		return nil, nil
 	}
-	states, err := a.service.AnyListenerByIDs(ctx, playback.TargetPodcastEpisode, episodeIDs)
+	people, station, err := a.service.AnyListenerByIDsApart(
+		ctx, playback.TargetPodcastEpisode, episodeIDs, users.BootstrapUserID)
 	if err != nil {
 		return nil, err
 	}
-	out := make(map[string]channels.EpisodeProgress, len(states))
-	for id, state := range states {
-		out[id] = channels.EpisodeProgress{
+	out := make(map[string]channels.EpisodeListening, len(people)+len(station))
+	for id, state := range people {
+		entry := out[id]
+		entry.Listener = channels.EpisodeProgress{
 			Completed:       state.Completed,
 			ProgressSeconds: state.ProgressSeconds,
 		}
+		out[id] = entry
+	}
+	for id, state := range station {
+		entry := out[id]
+		entry.Station = channels.EpisodeProgress{
+			Completed:       state.Completed,
+			ProgressSeconds: state.ProgressSeconds,
+		}
+		out[id] = entry
 	}
 	return out, nil
 }
@@ -1013,9 +1030,9 @@ func (a channelListenedAdapter) EpisodeProgress(
 //
 // The radio is a listener in its own right rather than a stand-in for any
 // person, so it writes under the reserved server account. That is what lets the
-// already-heard gate see what the station has been through — the same gate that
-// reads across every listener — without marking episodes played in anybody's
-// client, on a channel the whole house shares.
+// already-heard gate see what the station has been through — read back apart
+// from what people have heard, by channelListenedAdapter — without marking
+// episodes played in anybody's client, on a channel the whole house shares.
 type channelAiringAdapter struct {
 	service *playback.Service
 }

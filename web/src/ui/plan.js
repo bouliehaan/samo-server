@@ -664,18 +664,40 @@ export function whyPanel(decisions) {
   '</div>';
 }
 
+// timeStamp is a clock time, with the date in front when the moment falls on
+// a different day from `until` — the decision it is being read against.
+function timeStamp(value, until) {
+  const when = value ? new Date(value) : null;
+  if (!when || isNaN(when.getTime())) return "";
+  const time = when.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+  if (until && !isNaN(until.getTime()) && when.toDateString() !== until.toDateString()) {
+    return when.toLocaleDateString([], { month: "short", day: "numeric" }) + " " + time;
+  }
+  return time;
+}
+
 function decisionBody(decision) {
   const selected = decision.selected;
   const when = decision.at ? new Date(decision.at) : null;
-  const stamp = when && !isNaN(when.getTime())
-    ? when.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })
-    : "";
+  const stamp = timeStamp(decision.at);
 
   let html = '<div class="why-decision">';
   html += '<div class="why-head">' +
     '<span class="why-time">' + escapeHTML(stamp) + '</span>' +
     '<span class="why-title">' + escapeHTML(selected ? selected.title : (decision.error || "nothing could be played")) + '</span>' +
   '</div>';
+
+  // One row standing for a run of identical decisions — the server folds a
+  // choice made again within minutes into the row it repeats, so a dead
+  // source retried every thirty seconds for hours is one record that says
+  // so instead of hundreds that say nothing. The stamp above is the latest
+  // retry; this is the span.
+  if (decision.retries && decision.retries.count > 0) {
+    html += '<div class="why-line bad"><span class="why-key">retried</span>' +
+      decision.retries.count + '× since ' + escapeHTML(timeStamp(decision.retries.since, when)) +
+      ' — the same choice, made again each time the station came back for its next item, ' +
+      'which is what a source that produces no audio looks like from here</div>';
+  }
 
   html += '<div class="why-line"><span class="why-key">programming</span>' +
     escapeHTML(decision.blockLabel || decision.blockId || "—") +
