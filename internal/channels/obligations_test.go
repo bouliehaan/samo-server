@@ -403,7 +403,8 @@ func TestJudgeOwedReportsWhatTheRulesHoldBack(t *testing.T) {
 	}
 
 	// The A-tier show airs (the more urgent of the two), which spends one of
-	// its two surfacings: still owed, and at the front of the queue.
+	// its two surfacings: still owed, but now behind the episode nobody has
+	// heard — a second surfacing is a lower class of claim than any first.
 	first := s.play()
 	if first.ItemRef != "episode:dillon-1" {
 		t.Fatalf("the A-tier episode should air first, got %s", first.ItemRef)
@@ -411,12 +412,13 @@ func TestJudgeOwedReportsWhatTheRulesHoldBack(t *testing.T) {
 	s.now = s.now.Add(70 * time.Minute)
 
 	queue := s.engine.pendingObligations(context.Background(), s.now)
-	if queue.Len() != 2 || queue.Pending[0].ItemRef != "episode:dillon-1" {
-		t.Fatalf("after one airing the A-tier episode should still head the queue: %+v", queue.Pending)
+	if queue.Len() != 2 || queue.Pending[0].ItemRef != "episode:huberman-1" || queue.Pending[1].ItemRef != "episode:dillon-1" {
+		t.Fatalf("after one airing the never-heard B-tier episode should head the queue and the heard-once A-tier one follow: %+v", queue.Pending)
 	}
 
-	// But it is not next: item separation holds it for eight hours after an
-	// airing that counted in full, and the queue's order does not say so.
+	// And the heard one is not next for another reason too: item separation
+	// holds it for eight hours after an airing that counted in full, and the
+	// queue's order does not say so.
 	judged = s.engine.JudgeOwed(context.Background(), s.now, s.state)
 	held := judged["episode:dillon-1"].Held
 	if held == nil {

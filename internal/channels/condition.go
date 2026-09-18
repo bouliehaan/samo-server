@@ -41,6 +41,9 @@ type ConditionContext struct {
 	PoolAvailable func(poolID string) bool
 	// ObligationsPending is how many things the station currently owes.
 	ObligationsPending int
+	// ObligationsReady is how many of them could air right now without a rule
+	// being bent — see obligations.ready in parseConditionTerm.
+	ObligationsReady int
 	// EnteredToday is how many times each block has already been entered in
 	// this listening day, for the `maxPerDay` caps.
 	EnteredToday map[string]int
@@ -95,20 +98,36 @@ func parseConditionTerm(raw string) (conditionTerm, error) {
 		}
 		return term, fmt.Errorf("in %q: window needs a comparison, e.g. window >= 45m", raw)
 	}
-	if strings.HasPrefix(lower, "obligations.pending") {
-		rest := strings.TrimSpace(text[len("obligations.pending"):])
+	// obligations.pending is everything the station owes; obligations.ready is
+	// the part of it that could go out right now without bending a rule.
+	//
+	// They differ by exactly the things a block gated on "while episodes are
+	// owed" should not be waiting on: a second surfacing with hours of
+	// separation still to run, an episode too long for the room before the
+	// next booked show, one held for the listening day. Gated on `pending`, a
+	// new-episodes block never hands over while any of those exist — which on
+	// a two-surfacing plan is the whole afternoon — and every position it plays
+	// in the meantime is an obligation position with nothing owed to give it.
+	for _, name := range []string{"obligations.pending", "obligations.ready"} {
+		if !strings.HasPrefix(lower, name) {
+			continue
+		}
+		kind := "obligations"
+		if name == "obligations.ready" {
+			kind = "obligationsReady"
+		}
+		rest := strings.TrimSpace(text[len(name):])
 		for _, op := range []string{">=", "<=", "==", ">", "<"} {
 			if strings.HasPrefix(rest, op) {
 				value, err := strconv.Atoi(strings.TrimSpace(rest[len(op):]))
 				if err != nil {
 					return term, fmt.Errorf("in %q: %v is not a count", raw, rest)
 				}
-				term.kind, term.op, term.count = "obligations", op, value
+				term.kind, term.op, term.count = kind, op, value
 				return term, nil
 			}
 		}
-		return term, fmt.Errorf("in %q: obligations.pending needs a comparison, "+
-			"e.g. obligations.pending > 0", raw)
+		return term, fmt.Errorf("in %q: %s needs a comparison, e.g. %s > 0", raw, name, name)
 	}
 	if strings.HasPrefix(lower, "pool.") {
 		rest := text[len("pool."):]
@@ -124,7 +143,7 @@ func parseConditionTerm(raw string) (conditionTerm, error) {
 	}
 	return term, fmt.Errorf("%q is not something a block can ask about "+
 		"(try: always, window >= 45m, window unbounded, pool.<id>.available, "+
-		"obligations.pending > 0)", raw)
+		"obligations.pending > 0, obligations.ready > 0)", raw)
 }
 
 // Empty reports whether this condition constrains anything.
@@ -167,18 +186,22 @@ func (t conditionTerm) eval(ctx ConditionContext) bool {
 			return ctx.Window < t.value
 		}
 		return false
-	case "obligations":
+	case "obligations", "obligationsReady":
+		count := ctx.ObligationsPending
+		if t.kind == "obligationsReady" {
+			count = ctx.ObligationsReady
+		}
 		switch t.op {
 		case ">=":
-			return ctx.ObligationsPending >= t.count
+			return count >= t.count
 		case ">":
-			return ctx.ObligationsPending > t.count
+			return count > t.count
 		case "<=":
-			return ctx.ObligationsPending <= t.count
+			return count <= t.count
 		case "<":
-			return ctx.ObligationsPending < t.count
+			return count < t.count
 		case "==":
-			return ctx.ObligationsPending == t.count
+			return count == t.count
 		}
 		return false
 	case "poolAvailable":

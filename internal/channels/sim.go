@@ -164,11 +164,53 @@ type SimAnchor struct {
 // pool turn out to be.
 const unknownItemLength = 4 * time.Minute
 
+// simLedger is the playback table as the simulated station sees it: whatever
+// the real one says, when the run is against a live station, plus what the
+// simulated station itself has aired in full — kept apart from a person's
+// listening exactly as the streamer's recorder keeps them.
+//
+// Without this the simulator never exercised the already-heard rule at all:
+// an episode the simulated station had been through came round again as a
+// rerun, and a station whose second surfacing was being retired by its own
+// first airing looked perfectly healthy for three simulated weeks.
+type simLedger struct {
+	base    EpisodeProgressLookup
+	station map[string]EpisodeProgress
+}
+
+func (l *simLedger) EpisodeProgress(ctx context.Context, ids []string) (map[string]EpisodeListening, error) {
+	out := map[string]EpisodeListening{}
+	if l.base != nil {
+		real, err := l.base.EpisodeProgress(ctx, ids)
+		if err != nil {
+			return nil, err
+		}
+		for id, entry := range real {
+			out[id] = entry
+		}
+	}
+	for _, id := range ids {
+		if state, ok := l.station[id]; ok {
+			entry := out[id]
+			entry.Station = state
+			out[id] = entry
+		}
+	}
+	return out, nil
+}
+
+// aired is what recordAiring writes once an episode has gone out in full.
+func (l *simLedger) aired(episodeID string, seconds int) {
+	l.station[episodeID] = EpisodeProgress{Completed: true, ProgressSeconds: seconds}
+}
+
 // Simulate runs a station forward without broadcasting.
 //
 // The engine's History must be a *MemoryHistory: the whole point is that the
 // run leaves no trace on the real station's play log, and passing the SQL
-// history here would write a night of imaginary programming into it.
+// history here would write a night of imaginary programming into it. The
+// station's own playback ledger is layered the same way: read from whatever
+// the engine was given, written only in memory.
 func Simulate(ctx context.Context, engine *Engine, opts SimOptions) (SimResult, error) {
 	history, ok := engine.History.(*MemoryHistory)
 	if !ok {
@@ -177,6 +219,9 @@ func Simulate(ctx context.Context, engine *Engine, opts SimOptions) (SimResult, 
 	for _, warmup := range opts.Warmup {
 		history.Record(warmup)
 	}
+	ledger := &simLedger{base: engine.Listened, station: map[string]EpisodeProgress{}}
+	engine.Listened = ledger
+	defer func() { engine.Listened = ledger.base }()
 
 	loc := engine.location()
 	start := opts.Start.In(loc)
@@ -222,14 +267,21 @@ func Simulate(ctx context.Context, engine *Engine, opts SimOptions) (SimResult, 
 
 		length := simItemLength(item)
 		ends := now.Add(length)
+		completed := item.DurationSeconds <= 0 ||
+			length >= time.Duration(item.DurationSeconds)*time.Second
 		// Credit obligations the same way the streamer does, or a simulated day
 		// would surface the same new episode forever.
 		if engine.Obligations != nil && item.ItemRef != "" && item.Exposure > 0 {
-			completed := item.DurationSeconds <= 0 ||
-				length >= time.Duration(item.DurationSeconds)*time.Second
 			credit := item.Exposure * playedFraction(item, length, completed)
 			if credit > 0 {
 				_ = engine.Obligations.Credit(ctx, item.ItemRef, credit, ends)
+			}
+		}
+		// And the station's own row, as recordAiring writes it: an episode that
+		// went out in full is one the station has been through.
+		if completed {
+			if episodeID := episodeIDOf(item); episodeID != "" {
+				ledger.aired(episodeID, int(length/time.Second))
 			}
 		}
 		// The simulator's whole value is that it runs the real rules against a

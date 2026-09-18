@@ -2,6 +2,7 @@ package channels
 
 import (
 	"fmt"
+	"math"
 	"sort"
 	"time"
 )
@@ -31,6 +32,13 @@ type constraintEnv struct {
 	// appointment and its pick will be faded out on the boundary, so the fit
 	// rule has nothing to protect.
 	cutAtBoundary bool
+	// allowFalseStart lets a cut pass start a programme it will cut off. Only
+	// the station's floor sets it; see falseStartIfCut.
+	allowFalseStart bool
+	// typicalByShow and typicalByCategory are what the shelf's programmes
+	// usually run, for fitting an item that does not say how long it is.
+	typicalByShow     map[string]time.Duration
+	typicalByCategory map[CategoryID]time.Duration
 
 	lastByRef     map[string]time.Time
 	lastBySource  map[string]lastAiring
@@ -79,6 +87,8 @@ type constraintEnv struct {
 	categoriesPresent map[CategoryID]int
 
 	skips *SkipRegistry
+	// channelID scopes the skip registry's item refs to this station.
+	channelID string
 }
 
 // constraint is one hard rule.
@@ -127,7 +137,7 @@ func standardConstraints() []constraint {
 			// going out early is plainly the lesser fault — much more plainly
 			// than, say, running two shows by the same host back to back.
 			Name:       "heldForTheListeningDay",
-			RelaxOrder: 9,
+			RelaxOrder: 12,
 			Check: func(c Candidate, _ constraintEnv) (bool, string) {
 				if !c.Held {
 					return true, ""
@@ -135,9 +145,70 @@ func standardConstraints() []constraint {
 				return false, "new, and being saved for the listening day rather than spent now"
 			},
 		},
+		// Checked before the station's own witness so that an episode both
+		// aired and heard is recorded as heard — the stronger fact. Rank, not
+		// position, decides what the ladder gives up.
+		{
+			// A PERSON's listening, which is absolute: an episode somebody here
+			// has listened to is never offered again while anything else will
+			// do. Relaxed only below the rationing of giants — a rerun of
+			// something you heard is still better than a six-hour epic two
+			// days running — and above a skip, which is the listener's own
+			// most recent word on the subject.
+			//
+			// The station's own listening is a different witness and lives in
+			// its own rule (stationAired, above). The radio records what it
+			// aired in full under its own account so that an episode it has
+			// been through does not come round again as a rerun — that is what
+			// it is for. It is NOT evidence that a person heard it: the station
+			// airs to whoever is in the room, and whether anybody was is the
+			// obligation's question, answered in credit; an episode still owed
+			// a surfacing is by the station's own reckoning not yet heard, and
+			// the station cannot retire it on its own say-so.
+			//
+			// Read together as one witness, the two rows did exactly that.
+			// Every S-tier episode on a two-surfacing plan aired once — at
+			// 08:08, to an empty house — and was then "already heard" for the
+			// rest of its life, so the second surfacing existed only as a
+			// number in the plan. 2026-09-10: Matt and Shane's Ep 635, aired
+			// 08:08 and never again, while four A-tier first airings went out
+			// through the afternoon.
+			Name:       "alreadyHeard",
+			RelaxOrder: 3,
+			Check: func(c Candidate, env constraintEnv) (bool, string) {
+				if env.listened[c.Ref] {
+					return false, "somebody here has already listened to this"
+				}
+				return true, ""
+			},
+		},
+		{
+			// The station's own listening: what it has already aired in full,
+			// under its own account. It only ever keeps BACK CATALOGUE off
+			// the air — see alreadyHeard, below, for the person's witness and
+			// why the two are not one rule.
+			//
+			// Relaxed first of everything but the listening-day hold, because
+			// what relaxing it produces is a RERUN, and a rerun is ordinary
+			// radio. Every rule below it produces something a listener would
+			// call a fault — the same host twice in an hour, a six-hour giant
+			// two days running — and the ladder used to reach for those before
+			// it would repeat a fifty-minute episode from last week: the
+			// simulator, once it modelled this ledger, showed a thin station
+			// exhausting its catalogue and then airing its one giant sixty
+			// times in three weeks rather than rerun anything.
+			Name:       "stationAired",
+			RelaxOrder: 11,
+			Check: func(c Candidate, env constraintEnv) (bool, string) {
+				if env.stationAired[c.Ref] && !c.Owed && !c.Held {
+					return false, "the station has already aired this in full"
+				}
+				return true, ""
+			},
+		},
 		{
 			Name:       "familySeparation",
-			RelaxOrder: 8,
+			RelaxOrder: 10,
 			Check: func(c Candidate, env constraintEnv) (bool, string) {
 				if c.Family == "" || env.separationFamily <= 0 {
 					return true, ""
@@ -148,7 +219,7 @@ func standardConstraints() []constraint {
 		},
 		{
 			Name:       "creatorSeparation",
-			RelaxOrder: 7,
+			RelaxOrder: 9,
 			Check: func(c Candidate, env constraintEnv) (bool, string) {
 				if c.Creator == "" || !c.Traits.HasCreator || env.separationCreator <= 0 {
 					return true, ""
@@ -163,7 +234,7 @@ func standardConstraints() []constraint {
 		},
 		{
 			Name:       "sourceSeparation",
-			RelaxOrder: 6,
+			RelaxOrder: 8,
 			Check: func(c Candidate, env constraintEnv) (bool, string) {
 				// Only for sources that are one show. A playlist is a container
 				// of many artists, and separating IT would make two songs in a
@@ -187,7 +258,7 @@ func standardConstraints() []constraint {
 		},
 		{
 			Name:       "itemSeparation",
-			RelaxOrder: 5,
+			RelaxOrder: 7,
 			Check: func(c Candidate, env constraintEnv) (bool, string) {
 				if c.Ref == "" || env.separationItem <= 0 {
 					return true, ""
@@ -245,7 +316,7 @@ func standardConstraints() []constraint {
 			// The run itself: this category has had enough for now. Relaxable,
 			// because more of the same beats silence.
 			Name:       "categoryRunLimit",
-			RelaxOrder: 4,
+			RelaxOrder: 6,
 			Check: func(c Candidate, env constraintEnv) (bool, string) {
 				for _, limit := range env.limits {
 					if limit.Category != c.Category {
@@ -276,7 +347,7 @@ func standardConstraints() []constraint {
 			// Relaxed late but not last: playing a six-hour episode two days
 			// running is bad radio, playing nothing at all is worse.
 			Name:       "longFormRationing",
-			RelaxOrder: 2,
+			RelaxOrder: 4,
 			Check: func(c Candidate, env constraintEnv) (bool, string) {
 				if env.longFormThreshold <= 0 {
 					return true, ""
@@ -354,7 +425,7 @@ func standardConstraints() []constraint {
 		},
 		{
 			Name:       "airingCap",
-			RelaxOrder: 3,
+			RelaxOrder: 5,
 			Check: func(c Candidate, env constraintEnv) (bool, string) {
 				if c.Ref == "" {
 					return true, ""
@@ -387,7 +458,19 @@ func standardConstraints() []constraint {
 					count = chargeableAirings(count, c.Credit)
 				}
 				seconds := int(c.Duration / time.Second)
-				if mayAirAgain(seconds, count) {
+				limit := maxAiringsPerDay(seconds)
+				// The surfacing policy outranks the length-derived budget for
+				// anything still owed. The budget exists so back-catalogue
+				// repeats cannot eat the day; "surface this show's new episodes
+				// twice" is a decision the owner made about exactly these
+				// items, and a two-hour budget silently capped every episode
+				// over an hour at one — so the second surfacing was only ever
+				// reachable by giving the cap up, three hours after the first,
+				// which is the opposite of what a second surfacing is for.
+				if c.Owed && c.Target > float64(limit) {
+					limit = int(math.Ceil(c.Target))
+				}
+				if count < limit {
 					return true, ""
 				}
 				return false, fmt.Sprintf("already reached you %d times today", count)
@@ -400,7 +483,7 @@ func standardConstraints() []constraint {
 			// the engine will give up — below even "somebody skipped this" —
 			// and when it does, the record says so.
 			Name:       "itemFitsRun",
-			RelaxOrder: 0,
+			RelaxOrder: 1,
 			Check: func(c Candidate, env constraintEnv) (bool, string) {
 				if c.Duration <= 0 {
 					return true, ""
@@ -437,43 +520,10 @@ func standardConstraints() []constraint {
 			},
 		},
 		{
-			Name:       "alreadyHeard",
+			Name:       "skipped",
 			RelaxOrder: 2,
 			Check: func(c Candidate, env constraintEnv) (bool, string) {
-				if env.listened[c.Ref] {
-					return false, "somebody here has already listened to this"
-				}
-				// The station's own listening is a different witness, and it
-				// only gets a say about the back catalogue.
-				//
-				// The radio records what it aired in full under its own account
-				// so that an episode it has already been through does not come
-				// round again as a rerun — that is what it is for, and that
-				// stands. It is NOT evidence that a person heard it. The station
-				// airs to whoever is in the room, and whether anybody was is the
-				// obligation's question, answered in credit; an episode still
-				// owed a surfacing is by the station's own reckoning not yet
-				// heard, and the station cannot retire it on its own say-so.
-				//
-				// Read together, the two rows did exactly that. Every S-tier
-				// episode on a two-surfacing plan aired once — at 08:08, to an
-				// empty house — and was then "already heard" for the rest of
-				// its life, so the second surfacing existed only as a number in
-				// the plan. 2026-09-10: Matt and Shane's Ep 635, aired 08:08 and
-				// never again, while four A-tier first airings went out through
-				// the afternoon. Held is exempt for the same reason — it is
-				// owed, only not yet.
-				if env.stationAired[c.Ref] && !c.Owed && !c.Held {
-					return false, "the station has already aired this in full"
-				}
-				return true, ""
-			},
-		},
-		{
-			Name:       "skipped",
-			RelaxOrder: 1,
-			Check: func(c Candidate, env constraintEnv) (bool, string) {
-				if env.skips.RefSuppressed(c.Ref) {
+				if env.skips.RefSuppressed(env.channelID, c.Ref) {
 					return false, "skipped recently"
 				}
 				if env.skips.Suppressed(c.SourceID) {
@@ -494,15 +544,39 @@ func standardConstraints() []constraint {
 				// keeps the boundary where the schedule put it — so measuring it
 				// against a gap nothing can fit would refuse the whole pool and
 				// hand the time back to the appointment, early.
+				//
+				// A gap-filler is a song, a spot, a stream: something that can
+				// be faded. A programme is not one, however the pass is
+				// labelled — an episode started to be cut off is a false
+				// start, and only the station's floor may make one.
 				if env.cutAtBoundary {
+					if !env.allowFalseStart && falseStartIfCut(c, env.window) {
+						return false, "a programme, not a gap-filler: it would be cut off on the boundary"
+					}
 					return true, ""
 				}
-				if env.window <= 0 || c.Duration <= 0 {
+				if env.window <= 0 || c.Traits.Continuous {
 					// A continuous source has no length of its own; it is
 					// bounded by the play window imposed on it instead.
 					return true, ""
 				}
-				if c.Duration <= env.window {
+				length := c.Duration
+				if length <= 0 {
+					// A programme whose length nobody knows is fitted as
+					// long as its show, or its kind of programming, usually
+					// runs. It used to be waved through — "nothing to
+					// compare" — and then capped to the window, which is how
+					// a Lex Fridman episode came to be started five seconds
+					// before All Things Considered, aired for four, and was
+					// logged. Unmeasured is not the same as short.
+					length = assumedLength(c, env)
+					if length <= env.window {
+						return true, ""
+					}
+					return false, fmt.Sprintf("length unknown, but its show runs about %s and only %s is left until the next booked slot",
+						round(length), round(env.window))
+				}
+				if length <= env.window {
 					return true, ""
 				}
 				return false, fmt.Sprintf("%s long, but only %s until the next booked slot",
@@ -510,6 +584,82 @@ func standardConstraints() []constraint {
 			},
 		},
 	}
+}
+
+// falseStartIfCut reports whether starting this candidate into a gap it will be
+// cut off in would be a false start: a programme begun and then taken away.
+//
+// Judged on what the thing IS, never on a category name. A bag of songs, a
+// stream and a spot can all be faded at any point without anybody having lost
+// anything; the whole point of a shuffled playlist is that no song was the
+// one you were waiting for. A programme — an episode, a chapter, anything with
+// a beginning that promises an end — cannot be. It fits the gap whole or it
+// does not start.
+func falseStartIfCut(c Candidate, room time.Duration) bool {
+	if c.Traits.Continuous || c.Traits.Shuffled || c.Traits.Interstitial {
+		return false
+	}
+	if c.Duration > 0 && room > 0 && c.Duration <= room {
+		return false
+	}
+	return true
+}
+
+// assumedLength is how long an item with no stated length is taken to run when
+// it has to be measured against a boundary: what its show usually runs, else
+// what its kind of programming usually runs, else long enough to have counted
+// as an airing at all. Never zero, because zero read as "fits anywhere".
+func assumedLength(c Candidate, env constraintEnv) time.Duration {
+	if c.Duration > 0 {
+		return c.Duration
+	}
+	if typical, ok := env.typicalByShow[showKeyOf(c)]; ok && typical > 0 {
+		return typical
+	}
+	if typical, ok := env.typicalByCategory[c.Category]; ok && typical > 0 {
+		return typical
+	}
+	return countsAsAired
+}
+
+// showKeyOf is the shelf a candidate belongs to for length statistics: the
+// programme where there is one, the source row otherwise. A playlist is a
+// single shelf however many tracks are on it.
+func showKeyOf(c Candidate) string {
+	return firstNonEmpty(c.Show, c.SourceID)
+}
+
+// typicalLengths is what the programmes on a shelf usually run, per show and
+// per category — medians of measured items, so one epic does not drag its
+// show's idea of normal upward, and per show first so a daily short cannot
+// outvote three long-form shows into a category "typical" of five minutes.
+// Categories are the median of their shows' medians, exactly as
+// categoryStubFloors measures them.
+func typicalLengths(candidates []Candidate) (map[string]time.Duration, map[CategoryID]time.Duration) {
+	byShow := map[string][]time.Duration{}
+	showCategory := map[string]CategoryID{}
+	for _, candidate := range candidates {
+		if candidate.Duration <= 0 || candidate.Traits.Continuous {
+			continue
+		}
+		key := showKeyOf(candidate)
+		byShow[key] = append(byShow[key], candidate.Duration)
+		showCategory[key] = candidate.Category
+	}
+	shows := make(map[string]time.Duration, len(byShow))
+	perCategory := map[CategoryID][]time.Duration{}
+	for key, lengths := range byShow {
+		typical := medianDuration(lengths)
+		shows[key] = typical
+		if category := showCategory[key]; category != "" {
+			perCategory[category] = append(perCategory[category], typical)
+		}
+	}
+	categories := make(map[CategoryID]time.Duration, len(perCategory))
+	for category, typicals := range perCategory {
+		categories[category] = medianDuration(typicals)
+	}
+	return shows, categories
 }
 
 // quietPerHourOfAir is how much silence an hour of one show buys that show.
@@ -968,41 +1118,40 @@ func constrainOnce(rules []constraint, candidates []Candidate, env constraintEnv
 	return survivors, rejections
 }
 
-// anyQualify reports whether any of these candidates get through the rules with
-// nothing given up.
+// owedSurvivors is what the station owes that can go out RIGHT NOW, judged on
+// exactly the terms the rest of the shelf is judged on.
 //
-// Used where breaking a rule is a worse answer than doing something else
-// entirely — surfacing a new episode is worth a lot, but not worth playing the
-// same host twice in a row to achieve.
-// It asks the question the same way the selection path does — WITH the
-// relaxation ladder — because otherwise the test applied to what the station
-// owes is stricter than the test applied to what replaces it.
+// The whole shelf goes through the ladder once, and an owed episode is airable
+// iff it is among whatever that pass lets through. Two failures live on either
+// side of this line, and both were real:
 //
-// That asymmetry was a real bug and a nasty one. A single strict pass rejected
-// every owed episode the moment its show had been on earlier in the day, so the
-// position fell through to ordinary programming; the back catalogue then went
-// through applyConstraints, which cheerfully relaxed that very same separation
-// rule to let a five-year-old rerun through. New episode: refused for touching
-// a rule. Old episode: allowed to bend it. That is precisely backwards, and it
-// is exactly what "playing old podcasts over new ones should never happen when
-// there are podcasts owed to me" forbids.
+//   - Asked with a single strict pass, the owed gate refused every new episode
+//     whose show had been on earlier in the day, the position fell through to
+//     ordinary programming, and the back catalogue then went through the
+//     RELAXING path — which cheerfully gave up that same separation rule to let
+//     a five-year-old rerun through. New episode: refused for touching a rule.
+//     Old episode: allowed to bend it. 2026-08-10, five owed, a Planet Money
+//     rerun from 2021.
+//
+//   - Asked with the ladder run over the owed set ALONE, the gate relaxed
+//     whatever it took to say yes. Once every owed episode had aired that
+//     morning, "whatever it took" was item separation and the daily airing cap
+//     — the two rules that exist to put a second surfacing somewhere else in
+//     the day — and every S-tier and A-tier episode was surfaced twice before
+//     lunch, three hours apart, while the record listed seven rules given up.
+//     The listener who tunes in at eight in the evening heard neither.
+//
+// Same shelf, same ladder, same rung: a rule is relaxed for an owed episode
+// only when the station would have had to relax it for the rerun that would
+// otherwise replace it. When the shelf has something that plays cleanly, an
+// owed episode held by a spacing rule stays held, and it comes round when the
+// rule lets it — which is what "a second surfacing" was always meant to be.
 //
 // fitsBeforeAnchor never relaxes (RelaxOrder below zero), so this still refuses
 // to start a four-hour episode ninety minutes before a booked show.
-func anyQualify(candidates []Candidate, env constraintEnv) bool {
-	survivors, _, _ := applyConstraints(candidates, env)
-	return len(survivors) > 0
-}
-
-// owedRejections explains why nothing owed could air, for the decision record.
-//
-// Without this the record said "what is owed could not air cleanly here" and
-// stopped, which is the one question a person actually has at that moment. The
-// rejections it reports are for the set that DID air, so the interesting ones
-// were being thrown away.
-func owedRejections(candidates []Candidate, env constraintEnv) []Rejection {
-	_, rejections, _ := applyConstraints(candidates, env)
-	return rejections
+func owedSurvivors(shelf []Candidate, env constraintEnv) ([]Candidate, []Rejection, []string) {
+	survivors, rejections, relaxed := applyConstraints(shelf, env)
+	return filterOwed(survivors), rejections, relaxed
 }
 
 // dropMostRelaxable removes the highest relax-order rule still in play.

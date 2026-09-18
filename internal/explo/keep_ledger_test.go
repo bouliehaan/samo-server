@@ -41,12 +41,17 @@ func TestKeepAlbumTitleReadsTheLedgerNotTheNetwork(t *testing.T) {
 		Dirs:       []string{exploDir},
 		HTTPClient: srv.Client(),
 	})
-	got, err := service.keepAlbumTitle(ctx, "track-matched", catalog.MusicTrack{
+	got, err := service.keepAlbum(ctx, "track-matched", catalog.MusicTrack{
 		Title:      "Bad Habit",
 		AlbumTitle: "explo", // the drop folder, which is what the scanner read
 	})
-	if err != nil || got != "Gemini Rights" {
-		t.Fatalf("got (%q, %v), want (Gemini Rights, nil)", got, err)
+	if err != nil || got.Title != "Gemini Rights" {
+		t.Fatalf("got (%q, %v), want (Gemini Rights, nil)", got.Title, err)
+	}
+	// The identified release group travels with the title: it is what the
+	// copy is keyed on once scanned, in place of the sharer's release id.
+	if !got.Identified || got.ReleaseGroupID != "rg-1" {
+		t.Fatalf("album = %+v, want identified with release group rg-1", got)
 	}
 	if asked != 0 {
 		t.Fatalf("keep asked MusicBrainz %d time(s); it must read the ledger only", asked)
@@ -82,15 +87,15 @@ func TestKeepAlbumTitleWithoutLedgerTitleFallsBackWithoutTheNetwork(t *testing.T
 	// The effective catalog title is fine when it is a real album name: for a
 	// drop identified before the ledger kept titles, that is the identified
 	// release group applied as an override.
-	got, err := service.keepAlbumTitle(ctx, "track-matched", catalog.MusicTrack{
+	got, err := service.keepAlbum(ctx, "track-matched", catalog.MusicTrack{
 		Title:      "Kids",
 		AlbumTitle: "Oracular Spectacular",
 	})
-	if err != nil || got != "Oracular Spectacular" {
-		t.Fatalf("got (%q, %v), want (Oracular Spectacular, nil)", got, err)
+	if err != nil || got.Title != "Oracular Spectacular" {
+		t.Fatalf("got (%q, %v), want (Oracular Spectacular, nil)", got.Title, err)
 	}
 	// ...and refused when it is the drop folder.
-	if _, err := service.keepAlbumTitle(ctx, "track-matched", catalog.MusicTrack{
+	if _, err := service.keepAlbum(ctx, "track-matched", catalog.MusicTrack{
 		Title:      "Kids",
 		AlbumTitle: "explo",
 	}); err == nil || !strings.Contains(err.Error(), "explo") {
@@ -175,8 +180,8 @@ func TestBackfillAlbumTitlesFillsBlankRows(t *testing.T) {
 	}
 
 	// Keep now files under it, from the ledger.
-	got, err := service.keepAlbumTitle(ctx, "track-matched", catalog.MusicTrack{Title: "Kids", AlbumTitle: "explo"})
-	if err != nil || got != "Oracular Spectacular" {
-		t.Fatalf("keepAlbumTitle = (%q, %v)", got, err)
+	got, err := service.keepAlbum(ctx, "track-matched", catalog.MusicTrack{Title: "Kids", AlbumTitle: "explo"})
+	if err != nil || got.Title != "Oracular Spectacular" {
+		t.Fatalf("keepAlbum = (%q, %v)", got.Title, err)
 	}
 }

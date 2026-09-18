@@ -118,6 +118,34 @@ func (s *Service) Close(ctx context.Context) {
 	}
 }
 
+// Housekeep is the startup pass over every channel's tables: it closes every
+// play-log row left open (nothing can legitimately be on air yet — see
+// CloseOrphanedPlays for what an open row does to the scheduler) and prunes
+// the obligation rows nothing will read again. Reports how many of each.
+func (s *Service) Housekeep(ctx context.Context) (closed, pruned int, err error) {
+	if s == nil || s.db == nil {
+		return 0, 0, nil
+	}
+	items, err := ListChannels(ctx, s.db)
+	if err != nil {
+		return 0, 0, err
+	}
+	now := time.Now().UTC()
+	for _, channel := range items {
+		n, err := CloseOrphanedPlays(ctx, s.db, channel.ID, now)
+		if err != nil {
+			return closed, pruned, err
+		}
+		closed += n
+		n, err = PruneObligations(ctx, s.db, channel.ID, now)
+		if err != nil {
+			return closed, pruned, err
+		}
+		pruned += n
+	}
+	return closed, pruned, nil
+}
+
 // schedDeps builds the dependency bundle once so PreviewNext and
 // streamerFor stay in sync (and any future caller only needs a single
 // constructor to wire up).
@@ -399,6 +427,9 @@ func (s *Service) SetPlan(ctx context.Context, channelID string, raw []byte) (Pl
 	if err != nil {
 		return PlanView{}, err
 	}
+	if err := plan.Lint(); err != nil {
+		return PlanView{}, err
+	}
 	// A plan that cannot reach some of the channel's own content is refused.
 	// Silently unreachable content is how a tier-S podcast sat in the library
 	// for days, showed as enabled on one screen and as owed on another, and
@@ -510,6 +541,22 @@ func (s *Service) Owed(ctx context.Context, channelID string) ([]Obligation, err
 			}
 		}
 	}
+	// An obligation outlives its source. One whose source is disabled or gone
+	// cannot be judged by the rules — nothing enumerates it — and read as free
+	// for the rest of its window; the decision does not count it at all, and
+	// the list should say why.
+	for index := range queue.Pending {
+		if queue.Pending[index].Held != nil {
+			continue
+		}
+		src, ok := byID[queue.Pending[index].SourceID]
+		switch {
+		case !ok:
+			queue.Pending[index].Held = &Hold{Rule: "source", Reason: "its source has been removed from the channel"}
+		case !src.Enabled:
+			queue.Pending[index].Held = &Hold{Rule: "source", Reason: "its source is disabled"}
+		}
+	}
 	return append(queue.Pending, queue.Satisfied...), nil
 }
 
@@ -619,12 +666,23 @@ type serviceRecorder struct {
 
 const playLogWriteTimeout = 5 * time.Second
 
+// writeCtx is the deadline a play-log write gets, and it is rooted at
+// Background on purpose.
+//
+// It used to derive from the streamer's base context, which is the process's
+// signal context — and by the time the loop unwinds on SIGTERM that context is
+// already cancelled, so every write made while shutting down failed on the
+// spot: the row for whatever was on air kept an empty ended_at, the credit it
+// had earned was never written, and after the restart the play log read that
+// row as STILL PLAYING for the next twenty-four hours. Its show was "on air 0s
+// ago" to every separation rule until the row fell out of the tail, which on a
+// box restarted for every deploy meant a show could lose a day each time it
+// happened to be on when the deploy landed.
+//
+// The timeout is what keeps this from outliving the process; shutdown waits
+// for the loop, and the loop waits for this.
 func (r *serviceRecorder) writeCtx() (context.Context, context.CancelFunc) {
-	base := r.baseCtx
-	if base == nil {
-		base = context.Background()
-	}
-	return context.WithTimeout(base, playLogWriteTimeout)
+	return context.WithTimeout(context.Background(), playLogWriteTimeout)
 }
 
 func (r *serviceRecorder) OnPlayStart(channelID string, item PlaybackItem) (string, error) {
@@ -836,7 +894,7 @@ func (s *Service) Skip(ctx context.Context, channelID string, scope SkipScope) (
 		// invented at the skip button is exactly the kind of specific patch
 		// that accumulates until nobody can say why the station does anything.
 		if item.ItemRef != "" {
-			s.skips.SuppressRef(item.ItemRef)
+			s.skips.SuppressRef(channelID, item.ItemRef)
 			s.creditSkip(ctx, channelID, item)
 			s.markSkipHeard(ctx, item)
 		}
@@ -933,7 +991,7 @@ func (s *Service) Previous(ctx context.Context, channelID string) (bool, error) 
 		// episode used to fall out of the log entirely, which is what kept
 		// "previous" off it; the row survives now, so the skip registry has to
 		// say so instead.
-		if entry.ItemRef != "" && s.skips.RefSuppressed(entry.ItemRef) {
+		if entry.ItemRef != "" && s.skips.RefSuppressed(channelID, entry.ItemRef) {
 			continue
 		}
 		if entry.SourceID == "" {
@@ -945,7 +1003,7 @@ func (s *Service) Previous(ctx context.Context, channelID string) (bool, error) 
 		// when the item itself is no longer on offer.
 		s.skips.Clear([]string{entry.SourceID})
 		if entry.ItemRef != "" {
-			s.skips.Clear([]string{refKey(entry.ItemRef)})
+			s.skips.Clear([]string{refKey(channelID, entry.ItemRef)})
 			s.skips.PreferRef(channelID, entry.ItemRef)
 		}
 		s.skips.PreferSource(channelID, entry.SourceID)

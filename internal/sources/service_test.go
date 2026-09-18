@@ -144,3 +144,68 @@ func stringSliceContains(values []string, want string) bool {
 	}
 	return false
 }
+
+// A URL copied off a web page can arrive with an invisible format character
+// glued to it (zero-width space, BOM, bidi mark). It looks exactly right in
+// the field, so rejecting it as "not absolute" is baffling; scrub it instead.
+func TestNormalizeHTTPURLScrubsPastedInvisibleCharacters(t *testing.T) {
+	const (
+		zwsp = string(rune(0x200B))
+		bom  = string(rune(0xFEFF))
+		lrm  = string(rune(0x200E))
+		wj   = string(rune(0x2060))
+		nbsp = string(rune(0x00A0))
+	)
+	const want = "https://media.rss.com/whatsupeverybody001/feed.xml"
+	pasted := map[string]string{
+		"zero-width space": zwsp + want,
+		"byte order mark":  bom + want,
+		"left-to-right":    lrm + want + lrm,
+		"word joiner":      wj + want,
+		"inside the host":  "https://media.rss" + zwsp + ".com/whatsupeverybody001/feed.xml",
+		"nbsp and newline": nbsp + want + "\n",
+	}
+	for name, raw := range pasted {
+		got, err := normalizeHTTPURL(raw)
+		if err != nil {
+			t.Errorf("%s: err = %v, want nil", name, err)
+			continue
+		}
+		if got != want {
+			t.Errorf("%s: got %q, want %q", name, got, want)
+		}
+	}
+
+	for name, raw := range map[string]string{
+		"no scheme":       "media.rss.com/whatsupeverybody001/feed.xml",
+		"wrong scheme":    "feed://media.rss.com/whatsupeverybody001/feed.xml",
+		"only invisibles": zwsp + bom,
+	} {
+		if _, err := normalizeHTTPURL(raw); err != ErrInvalidURL {
+			t.Errorf("%s: err = %v, want ErrInvalidURL", name, err)
+		}
+	}
+}
+
+func TestAddPodcastFeedAcceptsPastedURLWithInvisiblePrefix(t *testing.T) {
+	ctx := context.Background()
+	db := storagetest.Open(t)
+
+	feedServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/rss+xml")
+		_, _ = w.Write([]byte(`<?xml version="1.0"?>
+<rss version="2.0"><channel><title>Pasted</title>
+  <item><title>One</title><guid>one</guid><enclosure url="https://cdn.example.com/one.mp3" type="audio/mpeg" length="1" /></item>
+</channel></rss>`))
+	}))
+	defer feedServer.Close()
+
+	pasted := string(rune(0x200B)) + feedServer.URL + "/feed.xml"
+	feed, err := New(db).AddPodcastFeed(ctx, AddPodcastFeedInput{URL: pasted})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if feed.FeedURL != feedServer.URL+"/feed.xml" {
+		t.Fatalf("stored feed url = %q, want the scrubbed %q", feed.FeedURL, feedServer.URL+"/feed.xml")
+	}
+}

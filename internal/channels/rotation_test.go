@@ -187,6 +187,11 @@ func TestEpisodeProgressListened(t *testing.T) {
 		// duration, so a ratio can never fire for them.
 		{"two minutes in, no duration known", EpisodeProgress{ProgressSeconds: 130}, 0, true},
 		{"one minute in, no duration known", EpisodeProgress{ProgressSeconds: 60}, 0, false},
+		// And only for them. Two minutes of a three-hour episode is somebody
+		// having pressed play, not somebody having heard it; read as heard, it
+		// settled the obligation and retired the episode from the station.
+		{"two minutes into three hours", EpisodeProgress{ProgressSeconds: 130}, 3 * 3600, false},
+		{"most of three hours", EpisodeProgress{ProgressSeconds: 9900}, 3 * 3600, true},
 	}
 	for _, tc := range cases {
 		if got := tc.progress.listened(tc.duration); got != tc.want {

@@ -204,7 +204,12 @@ function poolsSection(pools, sources, collapsed, showAuto, sourceNames) {
         pool.match.role ? "role " + pool.match.role : "",
         pool.match.kind ? "kind " + pool.match.kind : "",
       ].filter(Boolean).join(" · ");
+      // Mirrors Pool.Selects on the server: a booked show (role "show") is
+      // never swept into a match pool unless the pool asks for shows, so it
+      // must not be counted here either — or the screen says "3 podcasts"
+      // while the station can reach two.
       const matched = (sources || []).filter((src) =>
+        !(src.role === "show" && pool.match.role !== "show") &&
         (!pool.match.category || (src.config || {}).category === pool.match.category ||
           (!(src.config || {}).category && defaultCategoryForRole(src.role) === pool.match.category)) &&
         (!pool.match.role || src.role === pool.match.role) &&
@@ -591,7 +596,8 @@ export function owedPanel(items, pending) {
     '<div class="panel-head"><span>// OWED TO YOU</span><span>' + (pending || 0) + ' PENDING</span></div>' +
     '<div class="panel-sub">New episodes are an obligation, not just a good score. One works its way off this list ' +
       'by actually reaching you — airing it somewhere that counts for nothing, or being cut off after five minutes, ' +
-      'does not settle it. Tier decides the order; within a tier, newest first.</div>' +
+      'does not settle it. Anything you have not heard goes first, whatever its tier; then tier decides, and ' +
+      'within a tier, newest first. An episode you have had once — owed a second hearing — waits behind all of that.</div>' +
     rows +
   '</div>';
 }
@@ -746,6 +752,7 @@ function decisionBody(decision) {
       escapeHTML(obligation.tier) + '  ' + escapeHTML(obligation.title) +
       ' · ' + Math.round(obligation.ageMinutes / 60) + 'h old' +
       ' · credit ' + Math.round((obligation.credit || 0) * 100) + '%' +
+      (obligation.heard ? ' · heard once, second hearing owed' : ' · never heard') +
       (obligation.expiresIn ? ' · expires in ' + escapeHTML(obligation.expiresIn) : '') +
     '</div>';
   });

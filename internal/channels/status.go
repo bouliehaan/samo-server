@@ -142,6 +142,12 @@ func (s *Service) programmingStatus(ctx context.Context, channelID string, sched
 	for _, orphan := range engine.Plan.UnreachableSources(engine.Sources) {
 		status.Unreachable = append(status.Unreachable, firstNonEmpty(orphan.Label, orphan.Kind))
 	}
+	// The engine's plan is the reconciled one, so a show it cannot reach is a
+	// show the schedule has no slot for.
+	for _, orphan := range engine.Plan.UnreachableShows(engine.Sources) {
+		status.Unreachable = append(status.Unreachable,
+			firstNonEmpty(orphan.Label, orphan.Kind)+" (a booked show with no slot on the schedule)")
+	}
 
 	loc := engine.location()
 	now := s.schedDeps().now().In(loc)
@@ -165,8 +171,12 @@ func (s *Service) programmingStatus(ctx context.Context, channelID string, sched
 		//
 		// READ, not refresh: a peek must never notice new obligations, because
 		// noticing is a write and this endpoint is asked on every page load.
-		ObligationsPending: engine.pendingObligations(ctx, now).Len(),
 	}
+	// The ready count needs the owed set marked on the candidates, which the
+	// enumeration context carries; the same read-only queue serves both.
+	env.owed = engine.pendingObligations(ctx, now)
+	cond.ObligationsPending = env.owed.Len()
+	cond.ObligationsReady = engine.readyObligations(ctx, now, timeline, tail, env)
 	block := ResolveBlock(engine.Plan, timeline, state, cond, now)
 	intent := engine.buildIntent(block, timeline, tail, env)
 

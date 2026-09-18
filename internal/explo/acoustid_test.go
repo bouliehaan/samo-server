@@ -29,7 +29,7 @@ func TestLookupAcoustIDReturnsBestMatch(t *testing.T) {
 	acoustidLookupURL = server.URL
 	t.Cleanup(func() { acoustidLookupURL = orig })
 
-	match, ok, err := lookupAcoustID(context.Background(), server.Client(), "test-key", Fingerprint{DurationSeconds: 320, Value: "AQAA"})
+	match, ok, err := lookupAcoustID(context.Background(), server.Client(), "test-key", Fingerprint{DurationSeconds: 320, Value: "AQAA"}, identityEvidence{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -66,14 +66,17 @@ func TestLookupAcoustIDSendsSplittableMeta(t *testing.T) {
 	acoustidLookupURL = server.URL
 	t.Cleanup(func() { acoustidLookupURL = orig })
 
-	if _, _, err := lookupAcoustID(context.Background(), server.Client(), "test-key", Fingerprint{DurationSeconds: 320, Value: "AQAA"}); err != nil {
+	if _, _, err := lookupAcoustID(context.Background(), server.Client(), "test-key", Fingerprint{DurationSeconds: 320, Value: "AQAA"}, identityEvidence{}); err != nil {
 		t.Fatal(err)
 	}
 	// The httptest server decodes the query: a correct "recordings+releasegroups"
 	// (form-encoded space) arrives as two space-separated values; the buggy
 	// literal-plus encoding would arrive as the single token "recordings+releasegroups".
-	if gotMeta != "recordings releasegroups" {
-		t.Fatalf("meta arrived as %q; want \"recordings releasegroups\" — a literal + encodes to %%2B and makes AcoustID drop every recording", gotMeta)
+	// "sources" rides along for the same reason: without it every recording
+	// arrives with no submission count and the chooser has nothing but the
+	// file's own tags to separate a hit from the mis-tags sharing its audio.
+	if gotMeta != "recordings releasegroups sources" {
+		t.Fatalf("meta arrived as %q; want \"recordings releasegroups sources\" — a literal + encodes to %%2B and makes AcoustID drop every recording", gotMeta)
 	}
 }
 
@@ -87,7 +90,7 @@ func TestLookupAcoustIDNoResultsIsUnmatchedNotError(t *testing.T) {
 	acoustidLookupURL = server.URL
 	t.Cleanup(func() { acoustidLookupURL = orig })
 
-	_, ok, err := lookupAcoustID(context.Background(), server.Client(), "test-key", Fingerprint{DurationSeconds: 320, Value: "AQAA"})
+	_, ok, err := lookupAcoustID(context.Background(), server.Client(), "test-key", Fingerprint{DurationSeconds: 320, Value: "AQAA"}, identityEvidence{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -106,7 +109,7 @@ func TestLookupAcoustIDErrorStatus(t *testing.T) {
 	acoustidLookupURL = server.URL
 	t.Cleanup(func() { acoustidLookupURL = orig })
 
-	if _, _, err := lookupAcoustID(context.Background(), server.Client(), "bad-key", Fingerprint{DurationSeconds: 320, Value: "AQAA"}); err == nil {
+	if _, _, err := lookupAcoustID(context.Background(), server.Client(), "bad-key", Fingerprint{DurationSeconds: 320, Value: "AQAA"}, identityEvidence{}); err == nil {
 		t.Fatal("expected error for invalid API key")
 	}
 }

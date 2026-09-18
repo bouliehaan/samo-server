@@ -799,7 +799,7 @@ func TestABoundedBlockPicksSomethingThatLandsOnTheBoundary(t *testing.T) {
 		mk("nine", 9), mk("eight", 8), mk("ten", 10), mk("two", 2),
 	}
 
-	kept := preferNoStub(candidates, ceiling, nil)
+	kept := preferNoStub(candidates, candidates, ceiling, nil)
 	refs := map[string]bool{}
 	for _, c := range kept {
 		refs[c.Ref] = true
@@ -815,12 +815,12 @@ func TestABoundedBlockPicksSomethingThatLandsOnTheBoundary(t *testing.T) {
 
 	// When EVERY choice leaves a stub, the station still plays.
 	onlyStubs := []Candidate{mk("a", 9), mk("b", 9)}
-	if got := preferNoStub(onlyStubs, ceiling, nil); len(got) != 2 {
+	if got := preferNoStub(onlyStubs, onlyStubs, ceiling, nil); len(got) != 2 {
 		t.Fatalf("with no clean option the station must still play, got %d candidates", len(got))
 	}
 
 	// Unbounded blocks are untouched.
-	if got := preferNoStub(candidates, 0, nil); len(got) != len(candidates) {
+	if got := preferNoStub(candidates, candidates, 0, nil); len(got) != len(candidates) {
 		t.Fatal("an unbounded block should not be filtered")
 	}
 }

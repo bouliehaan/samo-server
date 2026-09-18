@@ -98,6 +98,10 @@ type scoreEnv struct {
 	// recent history rather than configured — a talk channel's norm is forty
 	// minutes and a music channel's is three, and neither should have to say so.
 	typicalItem time.Duration
+	// typicalByCategory is the same measurement per category, which is the one
+	// a commitment is judged against: on a station that plays songs between
+	// its podcasts the overall median is a song, and every podcast is a giant.
+	typicalByCategory map[CategoryID]time.Duration
 	// longFormThreshold is what counts as an enormous item, so the commitment
 	// cost applies to those and to nothing else.
 	longFormThreshold time.Duration
@@ -405,10 +409,14 @@ func (s scoreEnv) commitment(candidate Candidate) float64 {
 	if s.longFormThreshold <= 0 || candidate.Duration < s.longFormThreshold {
 		return 0
 	}
-	if s.typicalItem <= 0 {
+	typical := s.typicalByCategory[candidate.Category]
+	if typical <= 0 {
+		typical = s.typicalItem
+	}
+	if typical <= 0 {
 		return 0
 	}
-	ratio := float64(candidate.Duration) / float64(s.typicalItem)
+	ratio := float64(candidate.Duration) / float64(typical)
 	if ratio <= 1 {
 		return 0
 	}
@@ -464,9 +472,6 @@ func chooseCandidate(scored []ScoredCandidate, epsilon float64, rng *rand.Rand) 
 	if len(scored) == 0 {
 		return ScoredCandidate{}, nil
 	}
-	if epsilon <= 0 || rng == nil || len(scored) == 1 {
-		return scored[0], scored[:1]
-	}
 	top := scored[0].Total
 	band := epsilon * absFloat(top)
 	if band <= 0 {
@@ -474,34 +479,48 @@ func chooseCandidate(scored []ScoredCandidate, epsilon float64, rng *rand.Rand) 
 	}
 	threshold := top - band
 
-	contenders := make([]ScoredCandidate, 0, len(scored))
-	for _, candidate := range scored {
-		if candidate.Total >= threshold {
-			contenders = append(contenders, candidate)
-			continue
-		}
-		break // sorted descending
-	}
-
-	// The obligation queue is an ORDER, not a suggestion. Controlled randomness
-	// is for choosing between records that are genuinely interchangeable; if it
-	// also reorders what the station owes, then "this show matters more than
-	// that one" becomes "this show usually goes first", and a tier stops
-	// meaning anything. So when the best candidate is something owed, only
-	// equally urgent things may take its place.
-	if contenders[0].Candidate.Owed {
-		mostUrgent := contenders[0].Candidate.Urgency
-		equal := contenders[:0:0]
-		for _, candidate := range contenders {
-			if candidate.Candidate.Owed && absFloat(candidate.Candidate.Urgency-mostUrgent) < 0.001 {
-				equal = append(equal, candidate)
+	var contenders []ScoredCandidate
+	switch {
+	case scored[0].Candidate.Owed:
+		// The obligation queue is an ORDER, not a suggestion. Controlled
+		// randomness is for choosing between records that are genuinely
+		// interchangeable; if it also reorders what the station owes, then
+		// "this show matters more than that one" becomes "this show usually
+		// goes first", and a tier stops meaning anything. So when the best
+		// candidate is something owed, the most urgent owed thing of its
+		// category is what plays — and only things equally urgent may take
+		// its place.
+		//
+		// The MOST urgent, not the best-scoring, and among everything owed
+		// that survived rather than only what the band reached. The score adds
+		// restedness, the commitment cost and whatever weights the plan set on
+		// top of urgency, and any of those can put a second surfacing above a
+		// never-heard episode or an A-tier episode above an S-tier one; then
+		// the band, keyed on that top scorer, threw the more urgent episode
+		// out for scoring lower than the thing that had just beaten it. The
+		// queue's order does not depend on the score, so neither does this.
+		//
+		// Its CATEGORY, because which category plays is the balance's
+		// decision and the score is how the balance speaks: once spoken word
+		// has won the position, the queue settles which spoken item goes out,
+		// and nothing here reaches across into another category.
+		contenders = mostUrgentOwed(scored)
+	case epsilon <= 0 || len(scored) == 1:
+		return scored[0], scored[:1]
+	default:
+		contenders = make([]ScoredCandidate, 0, len(scored))
+		for _, candidate := range scored {
+			if candidate.Total >= threshold {
+				contenders = append(contenders, candidate)
+				continue
 			}
-		}
-		if len(equal) > 0 {
-			contenders = equal
+			break // sorted descending
 		}
 	}
-	if len(contenders) == 1 {
+	// Without a source of randomness — or with the plan asking for none — the
+	// set still narrows: the urgency rule above is a rule, not a roll, and the
+	// best of what is left plays.
+	if len(contenders) == 1 || rng == nil || epsilon <= 0 {
 		return contenders[0], contenders
 	}
 
@@ -525,6 +544,28 @@ func chooseCandidate(scored []ScoredCandidate, epsilon float64, rng *rand.Rand) 
 		}
 	}
 	return contenders[len(contenders)-1], contenders
+}
+
+// mostUrgentOwed is what the queue puts first among the owed candidates of the
+// top scorer's category: the most urgent, and anything equally urgent with it,
+// in score order so the best-scoring of equals leads.
+func mostUrgentOwed(scored []ScoredCandidate) []ScoredCandidate {
+	category := scored[0].Candidate.Category
+	mostUrgent := scored[0].Candidate.Urgency
+	for _, candidate := range scored {
+		if candidate.Candidate.Owed && candidate.Candidate.Category == category &&
+			candidate.Candidate.Urgency > mostUrgent {
+			mostUrgent = candidate.Candidate.Urgency
+		}
+	}
+	equal := make([]ScoredCandidate, 0, 1)
+	for _, candidate := range scored {
+		if candidate.Candidate.Owed && candidate.Candidate.Category == category &&
+			absFloat(candidate.Candidate.Urgency-mostUrgent) < 0.001 {
+			equal = append(equal, candidate)
+		}
+	}
+	return equal
 }
 
 func absFloat(value float64) float64 {

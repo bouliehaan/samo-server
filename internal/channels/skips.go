@@ -59,23 +59,31 @@ func NewSkipRegistry(now func() time.Time) *SkipRegistry {
 	}
 }
 
-// refKey namespaces item refs away from source ids so the two cannot collide.
-func refKey(itemRef string) string { return "ref\x00" + itemRef }
+// refKey namespaces item refs away from source ids so the two cannot collide,
+// and scopes them to a channel.
+//
+// Source ids are unique per channel and scope themselves; an item ref is the
+// same "episode:<id>" on every channel that carries the show, so an item
+// skipped on one channel was quietly passed over on every other for the
+// duration of the window.
+func refKey(channelID, itemRef string) string { return "ref\x00" + channelID + "\x00" + itemRef }
 
-// SuppressRef passes over one specific item — the episode you just skipped.
-func (r *SkipRegistry) SuppressRef(itemRef string) {
+// SuppressRef passes over one specific item on one channel — the episode you
+// just skipped.
+func (r *SkipRegistry) SuppressRef(channelID, itemRef string) {
 	if r == nil || strings.TrimSpace(itemRef) == "" {
 		return
 	}
-	r.Suppress(refKey(itemRef), skipRefWindow)
+	r.Suppress(refKey(channelID, itemRef), skipRefWindow)
 }
 
-// RefSuppressed reports whether a specific item is being passed over.
-func (r *SkipRegistry) RefSuppressed(itemRef string) bool {
+// RefSuppressed reports whether a specific item is being passed over on a
+// channel.
+func (r *SkipRegistry) RefSuppressed(channelID, itemRef string) bool {
 	if r == nil {
 		return false
 	}
-	return r.Suppressed(refKey(itemRef))
+	return r.Suppressed(refKey(channelID, itemRef))
 }
 
 // PreferRef asks the next pick to be one SPECIFIC item.

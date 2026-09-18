@@ -76,6 +76,9 @@ func LoadSeedFromDB(ctx context.Context, db *sql.DB) (catalog.Seed, error) {
 	}
 
 	catalog.DeriveExploArtists(&seed)
+	// Same source of truth for the album-level counts: a library album that
+	// an explo twin shares an id with advertises only its library tracks.
+	catalog.RecountMixedAlbums(&seed)
 
 	overrides, err := LoadMetadataOverrides(ctx, db)
 	if err != nil {

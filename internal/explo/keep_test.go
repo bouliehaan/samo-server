@@ -114,7 +114,7 @@ func containsRune(s, sub string) bool {
 // identification — so a copy that only writes text tags lands in the library
 // with no artwork at all.
 func TestRemuxArgsEmbedsTheCover(t *testing.T) {
-	args := remuxArgs("/drop/x.flac", "/lib/x.flac.samo-keep-tmp", "flac", "/covers/c.jpg", "Outlandos d\u2019Amour", catalog.MusicTrack{Title: "Roxanne"})
+	args := remuxArgs("/drop/x.flac", "/lib/x.flac.samo-keep-tmp", "flac", "/covers/c.jpg", keptAlbum{Title: "Outlandos d\u2019Amour"}, catalog.MusicTrack{Title: "Roxanne"})
 	joined := strings.Join(args, " ")
 
 	if !strings.Contains(joined, "-i /drop/x.flac -i /covers/c.jpg") {
@@ -139,7 +139,7 @@ func TestRemuxArgsEmbedsTheCover(t *testing.T) {
 // option, after every input: a -f ahead of an -i would force the input's
 // demuxer instead.
 func TestRemuxArgsNamesTheContainerAfterTheInputs(t *testing.T) {
-	args := remuxArgs("/drop/x.m4a", "/lib/x.m4a.samo-keep-tmp", "ipod", "/covers/c.jpg", "Album", catalog.MusicTrack{Title: "Song"})
+	args := remuxArgs("/drop/x.m4a", "/lib/x.m4a.samo-keep-tmp", "ipod", "/covers/c.jpg", keptAlbum{Title: "Album"}, catalog.MusicTrack{Title: "Song"})
 	joined := strings.Join(args, " ")
 	if !strings.HasSuffix(joined, " -f ipod /lib/x.m4a.samo-keep-tmp") {
 		t.Fatalf("container is not named right before the output: %s", joined)
@@ -152,7 +152,7 @@ func TestRemuxArgsNamesTheContainerAfterTheInputs(t *testing.T) {
 // With no cover to add, the source's own streams must still come across whole
 // — a file that DID carry embedded art must not lose it.
 func TestRemuxArgsWithoutCoverKeepsSourceStreams(t *testing.T) {
-	joined := strings.Join(remuxArgs("/drop/x.flac", "/lib/x.flac.samo-keep-tmp", "flac", "", "Outlandos d\u2019Amour", catalog.MusicTrack{Title: "Roxanne"}), " ")
+	joined := strings.Join(remuxArgs("/drop/x.flac", "/lib/x.flac.samo-keep-tmp", "flac", "", keptAlbum{Title: "Outlandos d\u2019Amour"}, catalog.MusicTrack{Title: "Roxanne"}), " ")
 	if !strings.Contains(joined, "-map 0 -c copy") {
 		t.Fatalf("source streams are not mapped whole: %s", joined)
 	}
@@ -164,7 +164,7 @@ func TestRemuxArgsWithoutCoverKeepsSourceStreams(t *testing.T) {
 // The tags samo holds as overrides are the point of remuxing rather than
 // copying, so they have to reach the file alongside the cover.
 func TestRemuxArgsWritesEffectiveTags(t *testing.T) {
-	joined := strings.Join(remuxArgs("/a.flac", "/b.flac.samo-keep-tmp", "flac", "/c.jpg", "Outlandos D'Amour", catalog.MusicTrack{
+	joined := strings.Join(remuxArgs("/a.flac", "/b.flac.samo-keep-tmp", "flac", "/c.jpg", keptAlbum{Title: "Outlandos D'Amour"}, catalog.MusicTrack{
 		Title:            "Roxanne",
 		DisplayArtist:    "The Police",
 		AlbumTitle:       "Outlandos D'Amour",
@@ -193,7 +193,7 @@ func TestRemuxArgsWritesEffectiveTags(t *testing.T) {
 // same muxer would refuse that just the same.
 func TestRemuxArgsKeepsThePictureOutOfContainersThatCannotHoldIt(t *testing.T) {
 	for _, format := range []string{"ogg", "opus", "adts", "wav", "asf"} {
-		joined := strings.Join(remuxArgs("/drop/x", "/lib/x.samo-keep-tmp", format, "/covers/c.jpg", "Album", catalog.MusicTrack{Title: "Song"}), " ")
+		joined := strings.Join(remuxArgs("/drop/x", "/lib/x.samo-keep-tmp", format, "/covers/c.jpg", keptAlbum{Title: "Album"}, catalog.MusicTrack{Title: "Song"}), " ")
 		if strings.Contains(joined, "/covers/c.jpg") || strings.Contains(joined, "attached_pic") {
 			t.Errorf("%s: cover handed to a muxer that cannot hold it: %s", format, joined)
 		}
@@ -207,11 +207,11 @@ func TestRemuxArgsKeepsThePictureOutOfContainersThatCannotHoldIt(t *testing.T) {
 // tags, and those are off by default: without the option the remux succeeds
 // and the cover is silently gone.
 func TestRemuxArgsMakesAIFFWriteItsPicture(t *testing.T) {
-	joined := strings.Join(remuxArgs("/drop/x.aiff", "/lib/x.aiff.samo-keep-tmp", "aiff", "/covers/c.jpg", "Album", catalog.MusicTrack{Title: "Song"}), " ")
+	joined := strings.Join(remuxArgs("/drop/x.aiff", "/lib/x.aiff.samo-keep-tmp", "aiff", "/covers/c.jpg", keptAlbum{Title: "Album"}, catalog.MusicTrack{Title: "Song"}), " ")
 	if !strings.Contains(joined, "-disposition:v:0 attached_pic") || !strings.Contains(joined, "-write_id3v2 1") {
 		t.Fatalf("AIFF copy would drop its cover: %s", joined)
 	}
-	if without := strings.Join(remuxArgs("/drop/x.aiff", "/lib/x.aiff.samo-keep-tmp", "aiff", "", "Album", catalog.MusicTrack{}), " "); strings.Contains(without, "write_id3v2") {
+	if without := strings.Join(remuxArgs("/drop/x.aiff", "/lib/x.aiff.samo-keep-tmp", "aiff", "", keptAlbum{Title: "Album"}, catalog.MusicTrack{}), " "); strings.Contains(without, "write_id3v2") {
 		t.Fatalf("no cover, so nothing to make AIFF write: %s", without)
 	}
 }
@@ -468,7 +468,7 @@ func TestKeepAlbumTitleRefusesTheDropFolderName(t *testing.T) {
 		dirs:   []string{"/mnt/media/Music/explo/Weekly-Exploration"},
 		logger: func(string, ...any) {},
 	}
-	_, err := service.keepAlbumTitle(context.Background(), "track-1", catalog.MusicTrack{
+	_, err := service.keepAlbum(context.Background(), "track-1", catalog.MusicTrack{
 		Title:      "Kids",
 		AlbumTitle: "Weekly-Exploration",
 	})
@@ -479,11 +479,15 @@ func TestKeepAlbumTitleRefusesTheDropFolderName(t *testing.T) {
 		t.Fatalf("error should name what it refused to write, got %v", err)
 	}
 	// A real album tag is still usable when MusicBrainz has nothing to say.
-	got, err := service.keepAlbumTitle(context.Background(), "track-2", catalog.MusicTrack{
+	got, err := service.keepAlbum(context.Background(), "track-2", catalog.MusicTrack{
 		Title:      "Roxanne",
 		AlbumTitle: "Outlandos d'Amour",
 	})
-	if err != nil || got != "Outlandos d'Amour" {
-		t.Fatalf("got (%q, %v), want (Outlandos d'Amour, nil)", got, err)
+	if err != nil || got.Title != "Outlandos d'Amour" {
+		t.Fatalf("got (%q, %v), want (Outlandos d'Amour, nil)", got.Title, err)
+	}
+	// Never identified: the file's own tags are all it has, and they stay.
+	if got.Identified {
+		t.Fatalf("album = %+v; an unidentified drop must keep its own identity tags", got)
 	}
 }

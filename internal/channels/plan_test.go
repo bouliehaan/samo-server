@@ -333,3 +333,33 @@ func TestConditionVocabulary(t *testing.T) {
 		t.Fatalf("a plan that asks something the engine cannot answer must be rejected at save time")
 	}
 }
+
+// A surfacing count on a tier that does not exist, or a weight on a term
+// nobody scores, is refused rather than silently ignored.
+func TestValidateRefusesUnknownTiersAndWeightNames(t *testing.T) {
+	plan := Plan{
+		Version:    PlanVersion,
+		Categories: []CategoryDef{{ID: "talk", Target: 1}},
+		Pools:      []Pool{{ID: "talk", Match: &PoolMatch{Category: "talk"}}},
+		Blocks:     []Block{{ID: "general", Default: true, Pools: []PoolRef{{Pool: "talk"}}}},
+		Freshness:  FreshnessPolicy{Surfacings: map[string]int{"S": 2, "Z": 2}},
+		Selection:  SelectionPolicy{Weights: map[string]float64{"freshness": 4, "freshnes": 9}},
+	}
+	if err := plan.Validate(); err != nil {
+		t.Fatalf("a typo must not make a stored plan unloadable: %v", err)
+	}
+	err := plan.Lint()
+	if err == nil {
+		t.Fatal("a plan with an unknown tier and an unknown weight name passed the lint")
+	}
+	for _, want := range []string{`unknown tier "Z"`, `unknown term "freshnes"`} {
+		if !strings.Contains(err.Error(), want) {
+			t.Fatalf("the error should mention %s, got: %v", want, err)
+		}
+	}
+	plan.Freshness.Surfacings = map[string]int{"s": 2, "A": 2}
+	plan.Selection.Weights = map[string]float64{"freshness": 4}
+	if err := plan.Lint(); err != nil {
+		t.Fatalf("lower-case tiers and known terms are fine: %v", err)
+	}
+}

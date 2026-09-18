@@ -91,10 +91,28 @@ score what you have not enumerated.
 qualifies (silence being worse than an imperfect choice — and every relaxation is
 recorded, so a station quietly breaking its own rules is visible):
 
-`familySeparation` → `creatorSeparation` → `sourceSeparation` → `itemSeparation`
-→ `categoryRunLimit` → `airingCap` → `alreadyHeard` → `skipped` → `itemFitsRun`.
+`heldForTheListeningDay` → `stationAired` → `familySeparation` →
+`creatorSeparation` → `sourceSeparation` → `itemSeparation` →
+`categoryRunLimit` → `airingCap` → `longFormRationing` → `alreadyHeard` →
+`skipped` → `itemFitsRun`.
 **`fitsBeforeAnchor` is never relaxed** — giving it up means starting something
 that cannot finish before a booked show.
+
+`stationAired` — the station's own record of having aired something in full —
+is given up almost first, because what giving it up produces is a **rerun**,
+and a rerun is ordinary radio. Everything below it produces something a
+listener would call a fault, and a station that has run through its unaired
+catalogue should repeat last week's episode before it plays the same host
+twice in an hour or a six-hour epic two days running. `alreadyHeard` — a
+*person* having listened — is a different witness and sits far lower.
+
+The ladder runs over the **whole shelf** the block can reach, once, and every
+rule is fitted to that shelf before it is applied. A position that asks for
+something owed does not get its own, gentler ladder: an owed episode is airable
+when it is among what that one pass lets through, at whatever rung the whole
+shelf needed. When the shelf has something that plays cleanly, an owed episode
+held by a spacing rule stays held and ordinary programming goes out — see
+*Never heard first, then tiers order what is owed* for why that is the point rather than a compromise.
 
 **Soft terms**, summed with configurable weights: `freshness`, `runContinuity`,
 `categoryDeficit`, `windowFit`, `sourceDeficit`, `restedness`, `poolWeight`.
@@ -128,28 +146,61 @@ block.
 
 The owed list is an **order**, not a running order. Every decision filters
 candidates through the hard rules before it scores them, so the most urgent
-thing owed is not the next thing played while a rule holds it back — an A-tier
-episode that aired at lunch and is owed a second hearing sits at the front of
-the queue with eight hours of item separation still to run. `GET
+thing owed is not the next thing played while a rule holds it back — an
+episode that aired at lunch and is owed a second hearing may be free of every
+other rule and still have hours of item separation to run. `GET
 /channels/{id}/obligations` says which: a pending item the rules would not offer
 at this moment carries `held: { rule, reason }`, worded as the decision record
 words a rejection, from the same rules asked without deciding anything
 (`Engine.JudgeOwed`). Anything that shows the queue as "coming up" — the wall
 does — puts the held items after the free ones.
 
-### Tiers order what is owed
+### Never heard first, then tiers order what is owed
 
 Each source carries a tier, `S` down to `F` (`C` by default). The queue is
 ordered by:
 
 ```
-urgency = tierSpread × tier  +  recency  +  expiryUrgency
+urgency = unheardLift (if nobody has heard it)  +  tierSpread × tier  +  recency  +  expiryUrgency
 ```
 
-One tier step is worth more than the entire recency range, so **an S-tier show
-from six hours ago goes before a B-tier one from ten minutes ago** — anything
-else means the loudest publisher wins the morning. Within a tier, newest first.
-Something about to stop being news climbs, because it is the last chance.
+**An episode nobody has heard goes before any episode somebody has, across
+every tier.** A brand-new A-tier episode goes before the second surfacing of an
+S-tier one; everything owed a second hearing waits until nothing unheard can
+air. This is an order and not a weight: `unheardLift` is computed from the
+policy's own weights as more than every tier step, the whole recency range and
+the whole expiry lift put together, plus a tier step of margin, so no
+combination of tier, age and deadline carries a heard episode past an unheard
+one — under the default weights or under a plan that has stretched them. The
+record shows the two classes as `heard: true` on the owed list; compare
+urgencies within a class, not across.
+
+Within a class, one tier step is worth more than the entire recency range, so
+**an S-tier show from six hours ago goes before a B-tier one from ten minutes
+ago** — anything else means the loudest publisher wins the morning. Within a
+tier, newest first. Something about to stop being news climbs, because it is
+the last chance.
+
+**"Heard" is more than half of the episode reaching the listener** —
+`heardThreshold`, 0.5 of credit, compared strictly. It is drawn on credit
+rather than on minutes because credit is already the station's one definition
+of "reached you": the fraction that played times what the block it aired in is
+worth. So the 52 of 87 minutes of Comedy Bang Bang that went out on 2026-08-11
+(about 0.6) counts as heard and the episode comes round again as a second
+surfacing; the seven fifteen-second false starts of a Theo Von episode that
+morning (a few thousandths each) do not, and it stays a first surfacing; a
+full airing at three in the morning into a block worth nothing earns nothing
+and is not heard however long it ran; exactly half is not "most of it".
+
+This replaced a queue that ordered by tier alone. On 2026-09-16 and 17 the
+records showed an S-tier episode the station had aired in full that morning —
+Matt and Shane's Ep 636, credit 1 of 2 — going out at 19:03 over two B-tier
+episodes nobody had heard, Ghost Brothers (A, credit 1 of 2) over the same two
+at 20:21, and 205: Superstar (A, credit 1 of 2) over three of them at 12:15
+the next day, each as "highest scoring candidate". Urgency had no term for
+never having been heard, so on a two-surfacing plan every heard-once S and A
+episode sat above every unheard B, and a listener who had heard the morning's
+episodes was given them again before anything new.
 
 Tier and weight are **different dials**: tier orders what is owed, weight splits
 a category's archive airtime. A show can be S-tier and low-weight — surface every
@@ -158,6 +209,36 @@ new episode promptly, but don't fill the afternoon with its back catalogue.
 Surfacing something owed is worth a lot, but not worth breaking a rule for: if
 what is owed cannot air cleanly right now, ordinary programming goes out and the
 obligation comes round again shortly.
+
+That sentence was true, then quietly stopped being true, and the difference was
+The Church of What's Happening Now — A tier, on a two-surfacing plan, airing
+every new episode and never once heard. The obligation position had been given
+its own relaxation ladder, run over the owed set alone; once every owed episode
+had aired that morning, "whatever it takes" was item separation and the airing
+cap, and every S-tier and A-tier episode went out a second time three hours
+after the first, with seven rules given up. By the evening they were back
+catalogue. A second surfacing is only worth anything **somewhere else in the
+day**, so the rules that put it there — item separation scaled by credit, and
+the airing cap — are never bent for it. The cap does honour the plan, though:
+an episode owed two surfacings may air twice in a listening day whatever its
+length, once the separation has run.
+
+Among owed episodes the **most urgent** plays — of the category the balance
+chose, whatever the score band says. The band (`selection.epsilon`) is for
+choosing between interchangeable records; the queue's order does not depend on
+the score, so a never-heard episode that the commitment cost or the plan's
+weights put well below the top scorer still goes before a second surfacing,
+and a plan that asks for no randomness at all (`epsilon: 0`) still gets the
+queue's order. Which category plays remains the balance's decision: the queue
+settles which spoken item goes out once spoken word has won the position, and
+never reaches into another category. Length has no vote here either: a new
+three-hour episode of a B-tier show is not a "rested giant" that gets the
+floor, it is a B-tier episode, and the S-tier one from two hours ago goes
+first — unless somebody has heard that one, in which case the B-tier episode
+is the one nobody has had, and it goes first. The record says which decided:
+`most urgent of what is owed` is the queue, `highest scoring candidate` is the
+score, and the candidate marked as the contender is the one the choice was
+actually made between, which under the queue is not always the top scorer.
 
 **Two witnesses, and they are not interchangeable.** The station writes its own
 airings into the playback table under the reserved server account, so an
@@ -201,7 +282,18 @@ that the rule re-fires on the break's own last item for ever.
 A block can carry a repeating `pattern` of wants — `obligation`, `break`,
 `fill` — which is how "new podcast, short break, new podcast, short break, until
 there is nothing new left" is expressed. Combined with
-`exit: when obligations.pending == 0`, the cycle ends itself and hands over.
+`exit: when obligations.ready == 0`, the cycle ends itself and hands over.
+
+`obligations.pending` is everything owed; `obligations.ready` is the part of
+it that could go out right now without a rule being bent. They differ by
+exactly what a new-episodes block should not sit waiting on — a second
+surfacing with hours of separation still to run, an episode too long for the
+room before the next booked show, one held for the listening day — and a block
+gated on `pending` never hands over while any of those exist, which on a
+two-surfacing plan is the whole afternoon. Gate the entry and the exit on
+`ready` and the block comes on when there is something to give it and steps
+aside when there is not. A break position at the top of a pattern is passed
+over when a break is what just played, across a handover included.
 
 It says nothing about how long each step takes, which is the part a broadcast
 clock gets wrong.
@@ -370,7 +462,13 @@ samo-server radio-sim --channel <id> --warmup "talk:8h"
 
 Runs the **real** scheduler against a virtual clock and an in-memory play log.
 It writes nothing — no play-log rows, no programme state, no decisions — so it
-can be pointed at the live station safely. It reports the block timeline, whether
+can be pointed at the live station safely. The station's own playback ledger
+is layered the same way: the simulated station's airings are recorded in
+memory over whatever the real table says, so an episode the run has aired in
+full is retired exactly as the live station retires it. Without that the
+simulator never exercised the already-heard rule at all, and a station whose
+second surfacing was being cancelled by its own first airing looked healthy
+for three simulated weeks. It reports the block timeline, whether
 each booked slot went out and how close to on time, category airtime, the longest
 unbroken run of each category, source and creator airtime, separation violations
 and relaxations, and any moment with nothing to play.
@@ -389,14 +487,17 @@ repeat, with a cap that scales by length so a long one cannot eat the day:
 | ~1 hr | 2 |
 | 3 hr | 1 |
 
-`clamp(1, floor(2h / length), 3)`. How *soon* a repeat may land is item
-separation's job — `separation.item` in the plan, **8 hours** unless the plan
-says otherwise, so a repeat lands at a genuinely different time of day. For
-something still owed, that window is scaled by the credit it has earned: an
-airing nobody heard is not a time you heard it, and holds it back for nothing.
-For a new release the count is of airings **inside the listening day**, so an
-overnight play does not use up one of the two chances you had to actually catch
-it.
+`clamp(1, floor(2h / length), 3)` — or the number of surfacings the plan asks
+for, whichever is larger, for something still owed: the budget is there so
+back-catalogue repeats cannot eat the day, and "surface this show's new
+episodes twice" is a decision the owner made about exactly these items. How
+*soon* a repeat may land is item separation's job — `separation.item` in the
+plan, **8 hours** unless the plan says otherwise, so a repeat lands at a
+genuinely different time of day. For something still owed, that window is
+scaled by the credit it has earned: an airing nobody heard is not a time you
+heard it, and holds it back for nothing. For a new release the count is of
+airings **inside the listening day**, so an overnight play does not use up one
+of the two chances you had to actually catch it.
 
 Only a **clean end** counts as the whole item having gone out. A skip, a booked
 show cutting in, the play window closing, the last listener leaving — each cuts
@@ -522,18 +623,24 @@ When a rule fires, the scheduler caps the picked item's
 podcast picked at 16:30 inside a 17:00 boundary will play for 30
 minutes then yield.
 
-### On-the-hour preemption
+### On-the-hour cut-ins
 
-While a rule's window is active, the streamer re-checks the scheduler
-every 15 seconds. If a higher-priority rule has just become active
-mid-track, the current ffmpeg subprocess is killed and the next pick
-takes over. This is what makes "NPR cuts in at 16:00" feel live
-instead of "NPR starts whenever the previous song happened to end."
+A booked slot's start is known in advance, so the handover is timed rather
+than noticed. Eight seconds out, the slot's station is dialled and decoded
+into a ring whose contents are thrown away; three seconds out, the crossfade
+begins — what is playing goes down as the station comes up, over the same
+three seconds — and on the second the item on air is cancelled and the
+decision at the boundary adopts the station already on air. "NPR at 16:00"
+starts at 16:00:00 at full level, with the end of the previous item under it
+rather than chopped off. A slot with no live station to warm (a folder of
+files, a station that did not answer in time) gets the item on air faded to
+silence by the boundary and whatever the decision picks fading in after it.
 
-Rule-driven items are exempt from their own preemption check (they
-won't preempt themselves), and the watchdog ignores transitions where
-the new pick has the same source as the current item (avoids audible
-pops on rule changes that don't actually change content).
+A slow ticker still re-asks the scheduler every 15 seconds, as a backstop for
+a plan that changed mid-item; a cut it catches goes out under the ordinary
+two-second fade. Rule-driven items are exempt from their own check (they would
+otherwise preempt themselves every tick), and a transition to the same source
+is ignored.
 
 ## Data model
 
@@ -585,19 +692,54 @@ api.channelStream — attach to per-channel broadcaster
 channelStreamer.loop:
    for {
      item := scheduler.NextItem(channel)
-     ffmpeg -i <item.url> ... -c:a libmp3lame -b:a 192k -f mp3 -
+     ffmpeg -re -i <item.url> [-af volume=…] -f s16le -   → PCM ring
+   }
+mixer (every 20ms): gain-shape the item on air, sum with the one on its
+   way out, one frame → ffmpeg -f s16le -i - -c:a libmp3lame -f mp3 -
         ↓ stdout
      broadcaster.fanOut → all attached listeners
-        ↑ preemption watchdog (every 15s) kills ffmpeg
-          when a higher-priority rule activates
-   }
       ▲ last listener leaves → streamer teardown
 ```
 
-One ffmpeg subprocess per channel. Slow listeners get dropped (a
-non-blocking send into a buffered channel; if it fills, the listener
-is removed). The broadcaster ships live bytes only — no historical
-backfill on connect.
+Each item is **decoded**, not transcoded: its own ffmpeg turns it into raw PCM
+in a bounded ring, and a mixer holds the clock. Every twenty milliseconds it
+takes one frame from whatever is on air, runs it through a gain envelope, sums
+it with whatever is on its way out, and hands the frame to one long-lived
+encoder. That is what makes fades possible at all — by the time audio is MP3
+there is no level left to move — and it is why the output is one continuous
+encoded stream rather than encoded items laid end to end, with a header at
+every join and a frame torn in half at every cut.
+
+- An item **fades in** (1.2s after a clean end, 0.6s after a cut), **fades
+  out** into a play window it will not outlive (2s, or the 3s a boundary fill
+  asks for), and a booked show **crossfades** in over 3s, landing at full
+  level on its second. A skip goes out under a 300ms fade: the cut is meant to
+  be heard, this only keeps it from being a click.
+- The mixer **paces** the output at real time whatever the input does. A file
+  is paced by `-re` and blocked on its ring; a live station is never blocked —
+  the far end would drop a client that stopped reading — so its connect burst
+  fills its ring and goes out at real time, and past four seconds the oldest
+  audio is dropped. Nothing reaches a listener faster than real time.
+- With nothing on air the encoder is fed silence, so a client sees a stream
+  that has gone quiet rather than one whose bytes stopped.
+
+One decoder per item on air (two during a crossfade), one encoder per channel.
+Slow listeners get dropped (a non-blocking send into a buffered channel; if it
+fills, the listener is removed). The broadcaster ships live bytes only — no
+historical backfill on connect.
+
+A play-log row left open — by a crash, or by a write that failed at shutdown —
+reads as "still playing" to every rule that consults the log, so any row open
+when a streamer starts, or when the server starts, is closed where its own
+length says it ended. The same housekeeping prunes settled obligations older
+than a month; the decision only ever reads what is pending plus a week of
+what settled.
+
+A decision that is only being *asked about* — the loudness warm-up, the
+cut-in warm-up, a preview — writes nothing: it reads the obligation table as
+it stands rather than noticing or settling anything. The preemption backstop
+does not decide at all; it asks the timeline whether a slot that cuts in is
+on air.
 
 ## Loudness levelling
 
@@ -749,7 +891,14 @@ commercials as filler.
 ## Implementation notes
 
 - **Package**: `internal/channels`. Owns types, store, scheduler,
-  streamer, service. API handlers live in `internal/api/channel_handlers.go`.
+  streamer, service. The audio stage is `mixer.go` (the ring, the envelopes,
+  the clock) and `streamer_audio.go` (decoders, the encoder, warming). API
+  handlers live in `internal/api/channel_handlers.go`.
+- **Booked slots in a stored plan** are rebuilt from their schedule rules on
+  every load: the window, days and pool follow the rule; the start policy,
+  grace, exposure, breaks, limits and long-form policy are the plan's and
+  survive. The status endpoint reports a booked show no slot names as
+  unreachable, since a match pool never sweeps a show in.
 - **No god types**: `Channel`, `Source`, `ScheduleRule`, `PlaybackItem`,
   `NowPlaying`, `PlayLogEntry` are all narrow. Source kinds are strings
   with constants in `types.go`; new kinds are added by extending the
@@ -768,8 +917,6 @@ commercials as filler.
 
 ## Future work
 
-- **On-the-clock alignment** for live cut-ins (start exactly at
-  16:00:00 rather than within 15s)
 - **Bumper/transition** support — short audio between rule changes
 - **HLS output** for clients that prefer it over raw MP3 over HTTP
 - **Per-source dayparting** — finer-grained weight schedules without

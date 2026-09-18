@@ -95,8 +95,8 @@ func TestLoudnessFilterOffWithoutAPlanner(t *testing.T) {
 // The filter has to land in the ffmpeg command line, not just be computed.
 // This pins the position too: -af must come after -i, or ffmpeg applies it to
 // the wrong side of the graph.
-func TestTranscodeArgsCarryTheFilter(t *testing.T) {
-	args := transcodeArgs(PlaybackItem{URL: "/music/quiet.flac"}, "mp3", "mp3", 192, 44100, "volume=8.0dB")
+func TestDecodeArgsCarryTheFilter(t *testing.T) {
+	args := decodeArgs(PlaybackItem{URL: "/music/quiet.flac"}, 44100, "volume=8.0dB")
 
 	afIndex, inputIndex := -1, -1
 	for i, arg := range args {
@@ -118,8 +118,8 @@ func TestTranscodeArgsCarryTheFilter(t *testing.T) {
 	}
 }
 
-func TestTranscodeArgsOmitAnEmptyFilter(t *testing.T) {
-	for _, arg := range transcodeArgs(PlaybackItem{URL: "/music/x.flac"}, "mp3", "mp3", 192, 44100, "") {
+func TestDecodeArgsOmitAnEmptyFilter(t *testing.T) {
+	for _, arg := range decodeArgs(PlaybackItem{URL: "/music/x.flac"}, 44100, "") {
 		if arg == "-af" {
 			t.Fatal("an unlevelled item must get no -af at all, not an empty one")
 		}

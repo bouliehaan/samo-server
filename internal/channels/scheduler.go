@@ -193,13 +193,20 @@ type EpisodeAiringRecorder interface {
 // routinely stop before the file ends.
 const listenedFraction = 0.9
 
-// startedSeconds is the absolute fallback: this much of an episode means you
-// have engaged with it, whatever its length.
+// startedSeconds is the fallback for an episode whose length nobody knows:
+// this much of it means you have engaged with it.
 //
-// It is the signal that actually works. `Completed` is never set by the server
-// — only a client can PATCH it, and none do — and a ratio needs a duration,
-// which feed-derived episodes routinely lack (DurationSeconds = 0). Relying on
-// either alone meant the filter could not return true for any real episode.
+// `Completed` is never set by the server — only a client can PATCH it, and
+// none do — and a ratio needs a duration, which feed-derived episodes
+// sometimes lack (DurationSeconds = 0). Relying on either alone meant the
+// filter could not return true for such an episode at all.
+//
+// It is a fallback and nothing more. Applied to episodes whose length IS
+// known, it read two minutes of a three-hour episode as the episode heard:
+// the obligation was settled on the spot and the already-heard rule kept it
+// off the air for good, on the strength of a person having pressed play once.
+// Where the length is known, the fraction is the witness, as the rule has
+// always been documented.
 const startedSeconds = 120
 
 func (p EpisodeProgress) listened(durationSeconds int) bool {
@@ -209,8 +216,8 @@ func (p EpisodeProgress) listened(durationSeconds int) bool {
 	if p.ProgressSeconds <= 0 {
 		return false
 	}
-	if durationSeconds > 0 && float64(p.ProgressSeconds) >= float64(durationSeconds)*listenedFraction {
-		return true
+	if durationSeconds > 0 {
+		return float64(p.ProgressSeconds) >= float64(durationSeconds)*listenedFraction
 	}
 	return p.ProgressSeconds >= startedSeconds
 }
@@ -292,6 +299,8 @@ func (s *Scheduler) decideAt(ctx context.Context, channelID string, at time.Time
 	}
 	now = now.In(engine.location())
 	engine.Rand = rand.New(rand.NewSource(decisionSeed(engine.Plan, channelID, now)))
+	// A decision that is only being asked about writes nothing.
+	engine.ReadOnly = !commit
 
 	item, decision, next, err := engine.Decide(ctx, now, state)
 	if commit {
@@ -432,6 +441,9 @@ func filterEnabledSources(items []Source) []Source {
 // Reports only appointments that CUT IN. One that waits for the current item is
 // not a deadline, it is a queue position.
 func (s *Scheduler) NextCutIn(ctx context.Context, channelID string) (time.Time, bool) {
+	if s == nil || s.deps.DB == nil {
+		return time.Time{}, false
+	}
 	engine, _, err := s.engineFor(ctx, channelID)
 	if err != nil {
 		return time.Time{}, false
@@ -450,6 +462,58 @@ func (s *Scheduler) NextCutIn(ctx context.Context, channelID string) (time.Time,
 		return time.Time{}, false
 	}
 	return timeline.Next.Start, true
+}
+
+// ActiveCutIn reports the appointment cutting in at this moment, if there is
+// one: the anchor covering now whose start policy permits cutting in, and the
+// sources its block reaches.
+//
+// This is what the preemption watchdog asks. It used to ask for a whole
+// decision — enumerating every source, scanning the play log four ways,
+// upserting every fresh obligation — every fifteen seconds, to learn a fact
+// the timeline already holds. A cut-in is a question about the clock and the
+// plan, and those are five small reads.
+func (s *Scheduler) ActiveCutIn(ctx context.Context, channelID string) (Anchor, map[string]bool, bool) {
+	if s == nil || s.deps.DB == nil {
+		return Anchor{}, nil, false
+	}
+	engine, state, err := s.engineFor(ctx, channelID)
+	if err != nil {
+		return Anchor{}, nil, false
+	}
+	loc := engine.location()
+	now := s.deps.now().In(loc)
+	timeline := BuildTimeline(engine.Plan, now, loc)
+	if timeline.Active == nil {
+		return Anchor{}, nil, false
+	}
+	if policy := timeline.Active.Policy; policy != "" && policy != StartImmediately {
+		return Anchor{}, nil, false
+	}
+	// An appointment the engine has already released is not cutting in on
+	// anything: the item on air is the one it handed the last of its hour to.
+	// Without this the watchdog's first tick after a release cut that item —
+	// fifteen seconds of a Stavvy's World episode, two mornings running.
+	if state.released(timeline.Active, now) {
+		return Anchor{}, nil, false
+	}
+	block, ok := engine.Plan.Block(timeline.Active.BlockID)
+	if !ok {
+		return Anchor{}, nil, false
+	}
+	sources := map[string]bool{}
+	for _, ref := range block.Pools {
+		pool, ok := engine.Plan.Pool(ref.Pool)
+		if !ok {
+			continue
+		}
+		for _, src := range pool.Resolve(engine.Sources) {
+			if src.Enabled {
+				sources[src.ID] = true
+			}
+		}
+	}
+	return *timeline.Active, sources, true
 }
 
 // ----- resolving the items that need the outside world -----------------

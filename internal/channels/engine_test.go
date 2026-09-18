@@ -1118,7 +1118,7 @@ func TestADeadPickDoesNotSpendItsTurnInTheCycle(t *testing.T) {
 
 	// That item turns out to be unplayable. The streamer passes it over and
 	// rewinds — so the cycle is still AT the obligation position.
-	s.engine.Skips.SuppressRef(item.ItemRef)
+	s.engine.Skips.SuppressRef(s.engine.Channel.ID, item.ItemRef)
 	rewound := s.state
 
 	again, _, _, err := s.engine.Decide(context.Background(), now.Add(2*time.Second), rewound)

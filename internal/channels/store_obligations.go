@@ -24,12 +24,18 @@ func (s *sqlObligations) List(ctx context.Context, now time.Time) ([]Obligation,
 	if channelID == "" {
 		return nil, ErrInvalidID
 	}
+	// Everything pending, and what was settled recently — the settled rows
+	// are why something is NOT being offered, and a week of them is all any
+	// screen shows. Without the bound this read every episode the station
+	// had ever surfaced, on every decision, for ever.
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT source_id, item_ref, title, tier, published_at, noticed_at, expires_at, credit, state, airings, target
 		FROM channel_obligations
 		WHERE channel_id = ? AND state <> ?
+		  AND (state = ? OR updated_at > ?)
 		ORDER BY published_at DESC`,
 		channelID, string(ObligationExpired),
+		string(ObligationPending), now.Add(-settledObligationsShown).UTC().Format(time.RFC3339),
 	)
 	if err != nil {
 		return nil, fmt.Errorf("list obligations: %w", err)
@@ -178,6 +184,37 @@ func (s *sqlObligations) Reached(ctx context.Context, itemRef string, now time.T
 		return fmt.Errorf("settle a heard obligation: %w", err)
 	}
 	return nil
+}
+
+// settledObligationsShown is how long a settled obligation stays in the list
+// after it settles.
+const settledObligationsShown = 7 * 24 * time.Hour
+
+// obligationRetention is how long a settled or expired row is kept at all.
+//
+// Longer than any freshness window, so nothing pruned can be noticed again:
+// an episode only becomes an obligation while it is still inside its fresh
+// window, which is days, and this is weeks.
+const obligationRetention = 30 * 24 * time.Hour
+
+// PruneObligations deletes settled and expired rows nothing will read again,
+// and reports how many. Pending rows are never touched.
+func PruneObligations(ctx context.Context, db *sql.DB, channelID string, now time.Time) (int, error) {
+	channelID = strings.TrimSpace(channelID)
+	if channelID == "" {
+		return 0, ErrInvalidID
+	}
+	result, err := db.ExecContext(ctx, `
+		DELETE FROM channel_obligations
+		WHERE channel_id = ? AND state <> ? AND updated_at < ?`,
+		channelID, string(ObligationPending),
+		clockOr(now).Add(-obligationRetention).UTC().Format(time.RFC3339),
+	)
+	if err != nil {
+		return 0, fmt.Errorf("prune obligations: %w", err)
+	}
+	pruned, _ := result.RowsAffected()
+	return int(pruned), nil
 }
 
 func formatStoredTime(at time.Time) string {

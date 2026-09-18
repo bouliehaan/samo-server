@@ -573,9 +573,71 @@ func TestOwedIsJudgedTheSameWayAsWhatWouldReplaceIt(t *testing.T) {
 	}
 	t.Logf("the selection path airs it after giving up: %v", relaxed)
 
-	if !anyQualify(owed, env) {
+	if airable, _, _ := owedSurvivors(owed, env); len(airable) == 0 {
 		t.Fatal("the owed-content gate refused an episode the selection path would have aired — " +
 			"that asymmetry is what plays old podcasts over new ones")
+	}
+}
+
+// The mirror image, and the one that cost Jake the Church of What's Happening
+// Now: a second surfacing is only ever due somewhere ELSE in the day, so when
+// the shelf has something that plays cleanly, an owed episode held by item
+// separation or the airing cap stays held rather than the rules being bent to
+// air it again three hours after the first time.
+func TestASecondSurfacingWaitsWhenTheShelfHasSomethingClean(t *testing.T) {
+	now := time.Date(2026, 9, 14, 12, 16, 0, 0, time.UTC)
+	firstAiring := now.Add(-3 * time.Hour)
+
+	owed := Candidate{
+		Ref: "episode:mssp-700", Title: "MSSP 700", SourceID: "pod-mssp", Show: "podcast:mssp",
+		Category: "talk", Duration: 75 * time.Minute, Creator: "pod-mssp",
+		Owed: true, Credit: 1, Target: 2, Urgency: 12.5,
+		Traits: Traits{HasCreator: true, SharedCreator: true, SupportsFreshness: true},
+	}
+	rerun := Candidate{
+		Ref: "episode:other-old", Title: "Other archive", SourceID: "pod-other", Show: "podcast:other",
+		Category: "talk", Duration: 45 * time.Minute, Creator: "pod-other",
+		Traits: Traits{HasCreator: true, SharedCreator: true, SupportsFreshness: true},
+	}
+	env := constraintEnv{
+		now:               now,
+		lastByRef:         map[string]time.Time{owed.Ref: firstAiring},
+		lastBySource:      map[string]lastAiring{},
+		lastByShow:        map[string]lastAiring{},
+		lastByCreator:     map[string]lastAiring{},
+		airings:           map[string]int{owed.Ref: 1},
+		lastAirings:       map[string]time.Time{owed.Ref: firstAiring},
+		listened:          map[string]bool{},
+		separationItem:    8 * time.Hour,
+		categoriesPresent: map[CategoryID]int{"talk": 2},
+		// Already sized to a deep shelf: this is about the gate, not the fit.
+		separationFitted: true,
+	}
+	airable, rejections, relaxed := owedSurvivors([]Candidate{owed, rerun}, env)
+	if len(airable) != 0 {
+		t.Fatalf("the second surfacing was offered three hours after the first (relaxed %v)", relaxed)
+	}
+	if len(relaxed) != 0 {
+		t.Fatalf("a rule was given up to reach an owed episode the shelf did not need it for: %v", relaxed)
+	}
+	held := ""
+	for _, rejection := range rejections {
+		if rejection.Ref == owed.Ref {
+			held = rejection.Rule
+		}
+	}
+	if held != "itemSeparation" {
+		t.Fatalf("the second surfacing should be held by item separation, got %q", held)
+	}
+
+	// And once the separation has run, the surfacing policy — not the
+	// length-derived daily budget — decides whether it may go out again today.
+	later := env
+	later.now = firstAiring.Add(9 * time.Hour)
+	airable, _, relaxed = owedSurvivors([]Candidate{owed, rerun}, later)
+	if len(airable) != 1 || len(relaxed) != 0 {
+		t.Fatalf("a 75-minute episode owed two surfacings should get its second the same day once "+
+			"item separation has run (airable %d, relaxed %v)", len(airable), relaxed)
 	}
 }
 

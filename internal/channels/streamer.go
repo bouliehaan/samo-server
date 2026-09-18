@@ -7,9 +7,6 @@ import (
 	"io"
 	"log"
 	"net/url"
-	"os/exec"
-	"strconv"
-	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -172,14 +169,15 @@ type StreamerOptions struct {
 
 // channelStreamer owns one channel's playback pipeline:
 //
-//	scheduler → playback item → ffmpeg subprocess → in-memory
-//	broadcaster → connected HTTP listeners.
+//	scheduler → playback item → ffmpeg decoder → PCM ring → mixer
+//	→ ffmpeg encoder → in-memory broadcaster → connected HTTP listeners.
 //
 // The streamer is lazy: it spins up only when the first listener
 // connects and tears down when the last one leaves. While running,
-// each item is transcoded to the channel's configured output format
-// so podcast (mp3), commercial (m4a), live HTTP stream, etc. all mux
-// into one continuous output the listeners experience as radio.
+// each item is decoded to PCM and the mixer fades it in, fades it out and
+// paces it, so podcast (mp3), commercial (m4a), live HTTP stream, etc. all
+// mix into one continuous, continuously encoded output the listeners
+// experience as radio. See mixer.go.
 type channelStreamer struct {
 	channel   Channel
 	deps      Dependencies
@@ -225,6 +223,20 @@ type channelStreamer struct {
 	// that started it, because it is meant to outlive that item.
 	warmMu sync.Mutex
 	warm   *warmSource
+
+	// mix is the audio stage — the mixer and its encoder — alive for the life
+	// of a loop. See mixer.go.
+	mixMu sync.Mutex
+	mix   *mixerRun
+	// cutFade is the fade the item on air goes out under the next time its
+	// context is cancelled, in nanoseconds. A skip sets it before cancelling;
+	// anything else gets the default. Read once, by playItem.
+	cutFade atomic.Int64
+	// cutCause is why the item on air is being cancelled, set by whichever
+	// watchdog or button cancels it just before it does. Read once, by the
+	// loop, to tell a listener's skip from the station's own clock: the two
+	// are accounted for differently when barely any of the item went out.
+	cutCause atomic.Int32
 
 	// Mirror of the last item handed to the streamer, for now-playing.
 	currentMu     sync.RWMutex
@@ -550,6 +562,9 @@ func (s *channelStreamer) stopAndWait(ctx context.Context) {
 	s.stopLocked()
 	wait := s.lastDone
 	s.mu.Unlock()
+	// The loop stops its own stage on the way out; this covers a stage started
+	// by an item played outside the loop, and is a no-op otherwise.
+	defer s.stopMixer()
 	if wait == nil {
 		return
 	}
@@ -560,10 +575,9 @@ func (s *channelStreamer) stopAndWait(ctx context.Context) {
 	}
 }
 
-// loop pulls the next item from the scheduler, transcodes it via
-// ffmpeg, and writes the encoded bytes to every attached listener
-// until the item ends, the context is cancelled, or the item's
-// MaxDuration elapses.
+// loop pulls the next item from the scheduler, plays it through the mixer,
+// and asks again when it ends — or when it is cancelled, or when its play
+// window elapses.
 func (s *channelStreamer) loop(ctx context.Context) {
 	// The loop owns `current`, so the loop clears it — that keeps now-playing
 	// honest whether we exit via stop, shutdown, or a panic caught upstream,
@@ -577,11 +591,36 @@ func (s *channelStreamer) loop(ctx context.Context) {
 		// A connection warmed for a boundary this channel will not reach is a
 		// held socket and a running ffmpeg with nobody to hand them to.
 		s.dropWarm()
+		// And the stage itself: the mixer, its encoder, and any decoder still
+		// fading something out.
+		s.stopMixer()
 		s.logger.Printf("channel %s: streamer stopped", s.channel.ID)
 	}()
 	s.logger.Printf("channel %s: streamer started", s.channel.ID)
 
+	// Nothing of this channel's is on air when its loop starts, so a row still
+	// open in the play log is a leftover — a crash, a lost write — and it would
+	// read as "playing now" to every rule that consults the log until it fell
+	// out of the window. Closed here rather than trusted.
+	if s.deps.DB != nil {
+		if closed, err := CloseOrphanedPlays(ctx, s.deps.DB, s.channel.ID, time.Now().UTC()); err != nil {
+			s.logger.Printf("channel %s: could not close orphaned play-log rows: %v", s.channel.ID, err)
+		} else if closed > 0 {
+			s.logger.Printf("channel %s: closed %d play-log row(s) left open by an earlier run", s.channel.ID, closed)
+		}
+		if _, err := PruneObligations(ctx, s.deps.DB, s.channel.ID, time.Now().UTC()); err != nil {
+			s.logger.Printf("channel %s: could not prune settled obligations: %v", s.channel.ID, err)
+		}
+	}
+
+	// The stage is up before the first decision, so the encoder is already
+	// producing (silence) by the time a listener's first bytes are due.
+	s.ensureMixer()
+
 	failures := 0
+	// How the next item comes in depends on how the last one went out: gently
+	// after a clean end, promptly after a cut.
+	opening := fadeInAfterEnd
 	for {
 		if err := ctx.Err(); err != nil {
 			return
@@ -631,14 +670,19 @@ func (s *channelStreamer) loop(ctx context.Context) {
 		})
 
 		startedAt := time.Now()
-		written, err := s.playItem(ctx, item)
+		written, err := s.playItemWithFade(ctx, item, opening)
 		played := time.Since(startedAt)
+		cause := s.takeCutCause()
 		// A clean end-of-input is the only thing that counts as the whole item
 		// having gone out. Everything else — a skip, a booked show cutting in,
 		// the play window closing — left some of it unheard. Those come back as
 		// context errors, which is a statement about how the item ended and
 		// not a fault to report.
 		completed := err == nil
+		opening = fadeInAfterCut
+		if completed {
+			opening = fadeInAfterEnd
+		}
 		if err != nil && !errors.Is(err, context.Canceled) && !errors.Is(err, context.DeadlineExceeded) {
 			s.logger.Printf("channel %s: play error (%s): %v", s.channel.ID, item.Title, err)
 			s.setLastError(item, err)
@@ -671,7 +715,7 @@ func (s *channelStreamer) loop(ctx context.Context) {
 			// same reason: not this one, ask again.
 			if skips := s.skipRegistry(); skips != nil {
 				if item.ItemRef != "" {
-					skips.SuppressRef(item.ItemRef)
+					skips.SuppressRef(s.channel.ID, item.ItemRef)
 				}
 				// A whole feed can be down, not just one episode. Once several
 				// in a row have failed, step off the source too rather than
@@ -701,29 +745,50 @@ func (s *channelStreamer) loop(ctx context.Context) {
 		}
 
 		failures = 0
+		// The station started a programme and took it straight back: not an
+		// airing, and not written up as one. The row goes, nothing is credited,
+		// and the cycle stands where it did before the pick, so the position
+		// this was meant to fill is filled properly at the next decision —
+		// which, the boundary now behind it, can be this very item.
+		if written > 0 && falseStart(item, played, completed, cause, err) {
+			s.logger.Printf("channel %s: %q was cut after %s, before it amounted to an airing; forgotten",
+				s.channel.ID, item.Title, played.Truncate(time.Second))
+			if s.recorder != nil && logID != "" {
+				s.recorder.OnPlayDiscard(logID)
+			}
+			s.rewindProgramState(ctx, priorState)
+			continue
+		}
 		if s.recorder != nil {
 			s.recorder.OnPlayEnd(s.channel.ID, item, played, completed, logID)
 		}
 	}
 }
 
-// playItem runs ffmpeg on the item's URL and copies its stdout into
-// the broadcaster. Returns nil on normal end-of-input, an error on
-// subprocess failure.
+// playItem plays one item through the mixer and returns how much audio it
+// decoded and how it ended: nil for the item reaching its own end, the
+// context's error for a cut, anything else for a decoder that failed.
 //
-// Two things can end an item early:
-//   - MaxDuration timeout (live cut-in window ended, channel deleted, …)
-//   - Preemption: a higher-priority schedule rule just became active
-//     while we were mid-track. We poll the scheduler every preemptTick
-//     and bail when the next pick differs from what we're playing.
+// Three things can end an item early:
+//   - Its play window (MaxDuration) closing: the mixer fades it out into the
+//     boundary and reports the deadline.
+//   - A booked slot cutting in: the crossfade starts three seconds before the
+//     boundary and the item is cancelled on it.
+//   - A skip, the stall watchdog, or a preemption the ticker caught: the item
+//     is cancelled and fades out under whatever fade the cause asked for.
 //
-// Preemption is what makes "NPR at 16:00" feel like real radio
-// instead of "NPR at whenever the previous track happened to finish."
+// Whichever way, the fade-out runs in the mixer after this returns, so the
+// next item can come in on top of it.
 func (s *channelStreamer) playItem(ctx context.Context, item PlaybackItem) (int64, error) {
+	return s.playItemWithFade(ctx, item, fadeInAfterEnd)
+}
+
+func (s *channelStreamer) playItemWithFade(ctx context.Context, item PlaybackItem, fadeIn time.Duration) (int64, error) {
 	if s.ffmpeg == "" {
 		return 0, errors.New("ffmpeg path not configured")
 	}
-	var written int64
+	run := s.ensureMixer()
+
 	itemCtx, itemCancel := context.WithCancel(ctx)
 	defer itemCancel()
 	s.skipMu.Lock()
@@ -734,38 +799,19 @@ func (s *channelStreamer) playItem(ctx context.Context, item PlaybackItem) (int6
 		s.skipCancel = nil
 		s.skipMu.Unlock()
 	}()
-	if item.MaxDuration > 0 {
-		timed, cancel := context.WithTimeout(itemCtx, item.MaxDuration)
-		defer cancel()
-		itemCtx = timed
-	}
-
-	codec, ext := codecArgs(s.channel.Codec)
-	bitrate := s.channel.BitrateKbps
-	if bitrate <= 0 {
-		bitrate = defaultBitrateKbps
-	}
-	sampleRate := s.channel.SampleRateHz
-	if sampleRate <= 0 {
-		sampleRate = 44100
-	}
-
-	// Level this item against everything else the channel plays. A constant
-	// gain, computed from a measurement taken earlier — see internal/loudness
-	// for why it is a constant and not a compressor.
-	args := transcodeArgs(item, codec, ext, bitrate, sampleRate, s.loudnessFilter(itemCtx, item))
 
 	// Already connected, if this is the appointment the last item was warming
-	// up for. Adopting it is the difference between a booked show that opens on
-	// its second and one that opens two and a half seconds later, which is how
-	// long a live station takes to answer.
-	source, err := s.openSource(itemCtx, item, args)
+	// up for — and already on air, if the crossfade to it has begun. Adopting
+	// it is the difference between a booked show that opens on its second and
+	// one that opens two and a half seconds later, which is how long a live
+	// station takes to answer.
+	src, err := s.openSource(item)
 	if err != nil {
 		return 0, err
 	}
-	stdout := source.read
+	run.mixer.play(src, fadeIn, item.MaxDuration, fadeOutFor(item))
 
-	// When the next appointment is due. Read once, here, so the two things that
+	// When the next appointment is due. Read once, here, so the things that
 	// care about it cannot disagree about when the hour turns.
 	cutInAt, booked := s.scheduler.NextCutIn(itemCtx, s.channel.ID)
 
@@ -788,32 +834,26 @@ func (s *channelStreamer) playItem(ctx context.Context, item PlaybackItem) (int6
 		})
 	}
 
-	// Preemption watchdog. Every preemptTick we re-ask the scheduler
-	// what should be playing right now. If it returns a different
-	// source than what we started this item with — only happens when
-	// a higher-priority schedule rule has just become active — we
-	// cancel itemCtx to kill the ffmpeg subprocess, the read loop
-	// breaks on EOF, and the outer loop calls NextItem which picks
-	// up the new rule. Items launched FROM a rule are exempt to avoid
-	// infinitely re-preempting themselves — and they do not need it, since a
-	// booked item is already capped at the end of its own slot.
+	// Preemption watchdog. The boundary is known, so the handover is timed
+	// rather than noticed: the crossfade begins a few seconds out, and the
+	// item is cancelled on the second. The slow ticker stays as a backstop
+	// for a plan that changes mid-item. Items launched FROM a rule are exempt
+	// — a booked item is already capped at the end of its own slot, and would
+	// otherwise preempt itself on every tick.
 	if !item.IsRuleDriven {
 		safego.Go(fmt.Sprintf("channel %s preempt watchdog", s.channel.ID), func() {
-			// Fire ON the boundary, not every fifteen seconds.
-			//
-			// A booked show is an appointment with a known time, so waiting to
-			// notice it has arrived costs up to a full tick before ffmpeg is
-			// even asked to start — and then the listener misses the top of the
-			// programme. The slow ticker stays as a backstop for a plan that
-			// changes mid-item; the timer is what makes the switch land.
 			ticker := time.NewTicker(preemptTick)
 			defer ticker.Stop()
+			fadeAt := timerUntil(cutInAt.Add(-crossfadeCutIn), booked)
+			defer fadeAt.Stop()
 			cutIn := timerUntil(cutInAt, booked)
 			defer cutIn.Stop()
 			for {
 				select {
 				case <-itemCtx.Done():
 					return
+				case <-fadeAt.C:
+					s.beginCutIn(run, src, cutInAt)
 				case <-cutIn.C:
 					s.logger.Printf("channel %s: %q gives way at %s, its booked slot is due",
 						s.channel.ID, item.Title, cutInAt.Format("15:04:05"))
@@ -821,15 +861,13 @@ func (s *channelStreamer) playItem(ctx context.Context, item PlaybackItem) (int6
 					// boundary was known when the item started and the incoming
 					// source was checked while warming; a question here would
 					// only push the appointment past its own start time.
-					s.flushListeners()
+					s.cutCause.Store(int32(cutByBoundary))
 					itemCancel()
 					return
 				case <-ticker.C:
 					if s.shouldPreempt(itemCtx, item) {
 						s.logger.Printf("channel %s: preempting %q for scheduled rule", s.channel.ID, item.Title)
-						// A scheduled slot that starts a minute late because
-						// the old item was still draining is not "on time".
-						s.flushListeners()
+						s.cutCause.Store(int32(cutByPreempt))
 						itemCancel()
 						return
 					}
@@ -838,17 +876,11 @@ func (s *channelStreamer) playItem(ctx context.Context, item PlaybackItem) (int6
 		})
 	}
 
-	// Stall watchdog. stdout.Read below blocks with no deadline of its own, so
-	// a source that connects and then goes quiet would hold this item — and
-	// therefore the channel — forever. Cancelling itemCtx kills ffmpeg, which
-	// unblocks the read and sends the outer loop back to the scheduler for a
-	// different pick. This is what makes a dead upstream a skipped track
-	// instead of a dead station.
-	lastByteAt := &atomic.Int64{}
-	// started separates "has not begun yet" from "was playing and stopped",
-	// which need very different patience.
-	started := &atomic.Bool{}
-	lastByteAt.Store(time.Now().UnixNano())
+	// Stall watchdog. A source that connects and then goes quiet would leave
+	// the mixer playing silence from an empty ring for ever — no error, no
+	// EOF, no log line. Cancelling the item sends the loop back to the
+	// scheduler for a different pick. This is what makes a dead upstream a
+	// skipped track instead of a dead station.
 	safego.Go(fmt.Sprintf("channel %s stall watchdog", s.channel.ID), func() {
 		ticker := time.NewTicker(stallCheck)
 		defer ticker.Stop()
@@ -857,12 +889,17 @@ func (s *channelStreamer) playItem(ctx context.Context, item PlaybackItem) (int6
 			case <-itemCtx.Done():
 				return
 			case <-ticker.C:
-				// Two different questions, two different budgets.
-				idle := time.Since(time.Unix(0, lastByteAt.Load()))
-				if started.Load() {
-					if idle >= stallTimeout {
+				// Two different questions, two different budgets: "has not
+				// begun yet" and "was playing and stopped" need very different
+				// patience. A decoder blocked on a full ring is neither — the
+				// ring is what it is waiting on — so a stall is only a stall
+				// once the ring has run dry.
+				idle := time.Since(time.Unix(0, src.lastByteAt.Load()))
+				if src.decoded.Load() > 0 {
+					if idle >= stallTimeout && src.ring.len() == 0 {
 						s.logger.Printf("channel %s: %q went quiet for %s mid-item, skipping to next",
 							s.channel.ID, item.Title, idle.Truncate(time.Second))
+						s.cutCause.Store(int32(cutByStall))
 						itemCancel()
 						return
 					}
@@ -871,6 +908,7 @@ func (s *channelStreamer) playItem(ctx context.Context, item PlaybackItem) (int6
 				if idle >= startupTimeout {
 					s.logger.Printf("channel %s: %q never produced a first byte in %s — the source is unreachable or too slow to start",
 						s.channel.ID, item.Title, idle.Truncate(time.Second))
+					s.cutCause.Store(int32(cutByStall))
 					itemCancel()
 					return
 				}
@@ -878,405 +916,57 @@ func (s *channelStreamer) playItem(ctx context.Context, item PlaybackItem) (int6
 		}
 	})
 
-	// Pump stdout → listeners until EOF / cancel.
-	buf := make([]byte, streamChunk)
-	for {
-		n, readErr := stdout.Read(buf)
-		if n > 0 {
-			written += int64(n)
-			started.Store(true)
-			lastByteAt.Store(time.Now().UnixNano())
-			s.broadcast(buf[:n])
-		}
-		if readErr != nil {
-			if errors.Is(readErr, io.EOF) {
-				readErr = nil
-			}
-			waitErr := source.wait()
-			if readErr != nil {
-				return written, readErr
-			}
-			// An item WE ended is not an item that ended. A skip, a booked show
-			// cutting in, the stall watchdog, the play window closing, the last
-			// listener leaving — each kills ffmpeg, and a killed ffmpeg closes
-			// its pipe exactly as a finished one does: EOF, then an exit status
-			// that says "signal: killed". The exit status is not a fault of the
-			// source and is rightly not reported as one; but reading the EOF as
-			// a clean end told the loop the whole item had gone out. Every skip
-			// therefore paid a full surfacing on top of the one the skip itself
-			// spends, and a torn-down airing wrote the episode up as heard.
-			// Context errors carry the distinction, so hand them back.
-			if ctxErr := itemCtx.Err(); ctxErr != nil {
-				return written, ctxErr
-			}
-			if waitErr != nil {
-				return written, waitErr
-			}
-			return written, nil
-		}
-		if itemCtx.Err() != nil {
-			source.stop()
-			return written, itemCtx.Err()
-		}
-	}
-}
-
-// itemSource is one item's encoded audio, however it was started.
-//
-// A struct rather than a bare reader because the two ways an item can begin —
-// spawned here, or adopted from a connection made before the boundary — have to
-// be reaped differently, and the pump must not know which it got.
-type itemSource struct {
-	read io.Reader
-	// wait collects the exit status once the audio has ended.
-	wait func() error
-	// stop kills the transcoder without waiting for it to be polite.
-	stop func()
-}
-
-// openSource returns the audio for an item, adopting a connection warmed for
-// this appointment when there is one.
-func (s *channelStreamer) openSource(ctx context.Context, item PlaybackItem, args []string) (itemSource, error) {
-	if warm := s.takeWarm(item); warm != nil {
-		s.logger.Printf("channel %s: %q was already connected when its slot came round",
-			s.channel.ID, item.Title)
-		return warm.adopt(ctx), nil
-	}
-	cmd := exec.CommandContext(ctx, s.ffmpeg, args...)
-	stdout, err := cmd.StdoutPipe()
-	if err != nil {
-		return itemSource{}, fmt.Errorf("ffmpeg stdout: %w", err)
-	}
-	cmd.Stderr = newPrefixWriter(s.logger, fmt.Sprintf("channel %s ffmpeg", s.channel.ID))
-	if err := cmd.Start(); err != nil {
-		return itemSource{}, fmt.Errorf("start ffmpeg: %w", err)
-	}
-	return itemSource{
-		read: stdout,
-		wait: cmd.Wait,
-		stop: func() {
-			_ = cmd.Process.Kill()
-			_ = cmd.Wait()
-		},
-	}, nil
-}
-
-// cutInWarmLead is how long before an appointment its source is connected.
-//
-// A live station measured on the real server takes about two and a half seconds
-// from spawning ffmpeg to producing its first audio: DNS, TLS, the HTTP
-// response, and then a probe whose data arrives at real-time speed. Spent after
-// the boundary that is two and a half seconds of the news nobody hears, so it is
-// spent before instead, and the audio it produces in the meantime is thrown
-// away. Eight seconds leaves room for a slow station without warming things so
-// early that the item playing is likely to end first.
-const cutInWarmLead = 8 * time.Second
-
-// warmSource is a station connected ahead of its appointment.
-//
-// Everything it produces before the boundary is DISCARDED, which is the whole
-// point: a live stream has no beginning to preserve, so what should go out at
-// 16:00:00 is what the station is broadcasting at 16:00:00 — not the eight
-// seconds we spent getting ready to listen.
-type warmSource struct {
-	item PlaybackItem
-	at   time.Time
-	// out carries audio once the boundary has passed and this source is on air.
-	out    chan []byte
-	cancel context.CancelFunc
-	// done closes when the pump goroutine has finished with the pipe.
-	done chan struct{}
-	wait func() error
-
-	mu    sync.Mutex
-	taken bool
-}
-
-// pump reads the warmed transcoder for as long as it lives: dropping what it
-// produces before the boundary, delivering everything after it.
-//
-// Dropping is not waste, it is the point. The listener should hear the station
-// as it is at the appointed second, not a recording of it starting from
-// whenever we happened to connect.
-func (w *warmSource) pump(ctx context.Context, stdout io.Reader) {
-	defer close(w.done)
-	defer close(w.out)
-	buf := make([]byte, streamChunk)
-	for {
-		n, err := stdout.Read(buf)
-		if n > 0 && w.forwarding() {
-			chunk := make([]byte, n)
-			copy(chunk, buf[:n])
-			select {
-			case w.out <- chunk:
-			case <-ctx.Done():
-				return
-			}
-		}
-		if err != nil {
-			return
-		}
-		if ctx.Err() != nil {
-			return
-		}
-	}
-}
-
-// forwarding reports whether this source is on air yet, under the lock that
-// makes the handover atomic: audio is either dropped or delivered, never both
-// and never neither.
-func (w *warmSource) forwarding() bool {
-	w.mu.Lock()
-	defer w.mu.Unlock()
-	return w.taken
-}
-
-// adopt puts the warmed source on air and returns its audio from this moment.
-func (w *warmSource) adopt(ctx context.Context) itemSource {
-	w.mu.Lock()
-	w.taken = true
-	w.mu.Unlock()
-
-	// The item's own context now owns this transcoder: a skip, a MaxDuration or
-	// a shutdown has to kill it, and it was started on a context of its own so
-	// that it could outlive the item that warmed it.
-	go func() {
-		select {
-		case <-ctx.Done():
-			w.cancel()
-		case <-w.done:
-		}
-	}()
-	return itemSource{
-		read: &channelReader{ch: w.out},
-		wait: w.wait,
-		stop: func() {
-			w.cancel()
-			<-w.done
-			_ = w.wait()
-		},
-	}
-}
-
-// channelReader turns the warm pump's chunks into the io.Reader the item pump
-// already knows how to drain.
-type channelReader struct {
-	ch   <-chan []byte
-	rest []byte
-}
-
-func (r *channelReader) Read(p []byte) (int, error) {
-	if len(r.rest) == 0 {
-		chunk, ok := <-r.ch
-		if !ok {
-			return 0, io.EOF
-		}
-		r.rest = chunk
-	}
-	n := copy(p, r.rest)
-	r.rest = r.rest[n:]
-	return n, nil
-}
-
-// warmCutIn connects the source of an upcoming appointment so that when the
-// boundary arrives there is nothing left to do but switch.
-//
-// Only for a live source. A file opens in milliseconds, and warming one would
-// mean either holding its opening seconds (which then all go out at once, and
-// every listener is that much further behind) or throwing away its first words.
-func (s *channelStreamer) warmCutIn(ctx context.Context, at time.Time) {
-	// An item that ends inside the warm-up window hands over to another, and
-	// that one arms its own timers — which fire immediately, since the boundary
-	// is already close. Re-connecting would throw away the connection that is
-	// already open and pay for it a second time, this time with no room left to
-	// pay in.
-	if s.warmedFor(at) {
-		return
-	}
-	next, err := s.scheduler.PeekItemAt(ctx, s.channel.ID, at)
-	if err != nil || next.URL == "" || !next.Live {
-		return
-	}
-	if !next.IsRuleDriven {
-		return
-	}
-
-	codec, ext := codecArgs(s.channel.Codec)
-	bitrate := s.channel.BitrateKbps
-	if bitrate <= 0 {
-		bitrate = defaultBitrateKbps
-	}
-	sampleRate := s.channel.SampleRateHz
-	if sampleRate <= 0 {
-		sampleRate = 44100
-	}
-	// Rooted at the streamer, not at the item being warmed against: this
-	// connection is meant to outlive the item playing now — that is the whole
-	// idea — and dies with the channel or when it is reaped unused.
-	warmCtx, cancel := context.WithCancel(s.baseCtx)
-	args := transcodeArgs(next, codec, ext, bitrate, sampleRate, s.loudnessFilter(warmCtx, next))
-	cmd := exec.CommandContext(warmCtx, s.ffmpeg, args...)
-	stdout, err := cmd.StdoutPipe()
-	if err != nil {
-		cancel()
-		return
-	}
-	cmd.Stderr = newPrefixWriter(s.logger, fmt.Sprintf("channel %s ffmpeg (warming)", s.channel.ID))
-	if err := cmd.Start(); err != nil {
-		cancel()
-		s.logger.Printf("channel %s: could not warm %q for its slot: %v", s.channel.ID, next.Title, err)
-		return
-	}
-
-	// Reaped from more than one direction — the item that adopts it, the
-	// streamer replacing it, a shutdown — and os/exec answers a second Wait
-	// with an error about the first, which would be reported as the item having
-	// failed. Asked once, answered the same way to everyone.
-	var once sync.Once
-	var waitErr error
-	warm := &warmSource{
-		item:   next,
-		at:     at,
-		out:    make(chan []byte, listenerBuffer),
-		cancel: cancel,
-		done:   make(chan struct{}),
-		wait: func() error {
-			once.Do(func() { waitErr = cmd.Wait() })
-			return waitErr
-		},
-	}
-	safego.Go(fmt.Sprintf("channel %s warm pump", s.channel.ID), func() {
-		warm.pump(warmCtx, stdout)
-	})
-
-	s.setWarm(warm)
-	s.logger.Printf("channel %s: connecting %q now, on air at %s",
-		s.channel.ID, next.Title, at.Format("15:04:05"))
-}
-
-// warmedFor reports whether a live connection is already open and healthy for
-// the appointment at this moment.
-func (s *channelStreamer) warmedFor(at time.Time) bool {
-	s.warmMu.Lock()
-	warm := s.warm
-	s.warmMu.Unlock()
-	if warm == nil || !warm.at.Equal(at) {
-		return false
-	}
-	// A source whose ffmpeg has already exited is not warm, it is a corpse
-	// holding the slot open.
 	select {
-	case <-warm.done:
-		return false
-	default:
-		return true
+	case <-src.finished:
+		// The mixer settled it: the audio ended (nil), the play window closed
+		// (the deadline), a crossfade took it off air (cancelled), or the
+		// decoder broke (its own error). A killed decoder reads as cancelled
+		// too, which is right — an item WE ended is not an item that ended.
+		return src.decoded.Load(), src.reason
+	case <-itemCtx.Done():
+		// Cut. The fade-out runs on in the mixer; whatever comes next is free
+		// to come in on top of it.
+		run.mixer.retire(src, s.takeCutFade())
+		return src.decoded.Load(), itemCtx.Err()
 	}
 }
 
-// setWarm stores a warmed source, discarding any it replaces.
-func (s *channelStreamer) setWarm(warm *warmSource) {
-	s.warmMu.Lock()
-	previous := s.warm
-	s.warm = warm
-	s.warmMu.Unlock()
-	discardWarm(previous)
+// takeCutFade is the fade the item being cancelled should go out under: what
+// a skip asked for, or the default. Spent once.
+func (s *channelStreamer) takeCutFade() time.Duration {
+	if fade := s.cutFade.Swap(0); fade > 0 {
+		return time.Duration(fade)
+	}
+	return fadeOutDefault
 }
 
-// takeWarm hands over the warmed source if it is the one now going to air.
-//
-// A mismatch is not a fault — something short can still come and go in the
-// seconds before a boundary, and the station is entitled to change its mind —
-// so a connection whose own moment has not arrived yet is left where it is.
-// Only one that has been overtaken is killed, rather than left holding a socket
-// open on somebody's station.
-func (s *channelStreamer) takeWarm(item PlaybackItem) *warmSource {
-	s.warmMu.Lock()
-	warm := s.warm
-	if warm != nil && warm.item.URL != item.URL && time.Now().Before(warm.at) {
-		s.warmMu.Unlock()
-		return nil
-	}
-	s.warm = nil
-	s.warmMu.Unlock()
-	if warm == nil {
-		return nil
-	}
-	if warm.item.URL != item.URL {
-		discardWarm(warm)
-		return nil
-	}
-	// A connection that died during the warm-up window would hand the item pump
-	// an immediate EOF, and an item that produces no audio is treated as a dead
-	// source: the ref suppressed, the source stepped off. A station that blinked
-	// while we were waiting for its hour would take itself off the air. Better
-	// to find out by dialling again — that costs the two and a half seconds this
-	// was avoiding, and only when something has actually gone wrong.
-	select {
-	case <-warm.done:
-		s.logger.Printf("channel %s: the connection warmed for %q did not survive to its slot; dialling again",
-			s.channel.ID, item.Title)
-		discardWarm(warm)
-		return nil
-	default:
-	}
-	return warm
-}
-
-// dropWarm reaps a connection nothing is going to use.
-func (s *channelStreamer) dropWarm() {
-	s.warmMu.Lock()
-	warm := s.warm
-	s.warm = nil
-	s.warmMu.Unlock()
-	discardWarm(warm)
-}
-
-func discardWarm(warm *warmSource) {
-	if warm == nil {
-		return
-	}
-	warm.cancel()
-	<-warm.done
-	_ = warm.wait()
-}
-
-// shouldPreempt returns true when the scheduler now wants to play
-// something rule-driven and that something is NOT the current item.
-// Rule-vs-rule and rotation-vs-rotation transitions are ignored
-// (the natural end-of-item transition handles those) so we only
-// interrupt for the case that actually matters: a live cut-in or
-// scheduled block claiming the airwaves.
+// shouldPreempt reports whether a booked slot that cuts in is on air right
+// now and is not what is playing. Rule-vs-rule and rotation-vs-rotation
+// transitions are ignored (the natural end-of-item transition handles those),
+// so this only interrupts for the case that actually matters: a live cut-in or
+// scheduled block claiming the airwaves — and only as a backstop, since the
+// boundary itself is timed. See Scheduler.ActiveCutIn for why this is a
+// question about the timeline rather than a whole decision.
 func (s *channelStreamer) shouldPreempt(parent context.Context, current PlaybackItem) bool {
 	ctx, cancel := context.WithTimeout(parent, 3*time.Second)
 	defer cancel()
-	next, err := s.scheduler.PeekItem(ctx, s.channel.ID)
-	if err != nil {
-		return false
-	}
-	if !next.IsRuleDriven {
-		return false
-	}
-	// Only an appointment that asked to cut in gets to. The default is
-	// makeNext: let the item finish and start the block after it. With every
-	// candidate already filtered to what fits before the anchor, that almost
-	// never means a late start — and it means nothing is ever cut off
-	// mid-sentence, which is what used to happen and what burned the episode
-	// it happened to.
-	if next.AnchorPolicy != "" && next.AnchorPolicy != StartImmediately {
+	anchor, sources, ok := s.scheduler.ActiveCutIn(ctx, s.channel.ID)
+	if !ok {
 		return false
 	}
 	// Same appointment wins again? Don't preempt — would just restart the
 	// same source mid-stream.
-	if next.AnchorBlockID != "" && next.AnchorBlockID == current.AnchorBlockID {
+	if anchor.BlockID != "" && anchor.BlockID == current.AnchorBlockID {
 		return false
 	}
-	// Same source picked by a different code path (e.g., we were on
-	// rotation and the rule now points at the same source). Avoid the
-	// pop.
-	if next.SourceID != "" && next.SourceID == current.SourceID {
+	// Same source reached by a different route (e.g., we were on rotation
+	// and the slot now points at the same source). Avoid the pop.
+	if current.SourceID != "" && sources[current.SourceID] {
 		return false
 	}
-	return true
+	// A slot with nothing to play would fall straight through to ordinary
+	// programming; cutting the item off for that is a cut for nothing.
+	return len(sources) > 0
 }
 
 func (s *channelStreamer) broadcast(buf []byte) {
@@ -1294,101 +984,6 @@ func (s *channelStreamer) broadcast(buf []byte) {
 			l.close()
 		}
 	}
-}
-
-// transcodeArgs builds the ffmpeg command line for one item.
-//
-// Split out of playItem so the argument order — which is not cosmetic, since
-// ffmpeg reads options positionally relative to -i — can be tested without
-// spawning anything.
-func transcodeArgs(item PlaybackItem, codec, ext string, bitrate, sampleRate int, loudnessFilter string) []string {
-	args := []string{
-		"-hide_banner",
-		"-loglevel", "error",
-		"-nostdin",
-	}
-	// Network inputs get ffmpeg's own I/O timeout plus automatic reconnect.
-	// Without the timeout a source that stops sending mid-item wedges ffmpeg
-	// indefinitely; without reconnect, an ordinary blip on a live stream costs
-	// the listener the whole item. Local files take neither (the file protocol
-	// ignores them and reconnect is meaningless).
-	if isNetworkSource(item.URL) {
-		args = append(args,
-			"-rw_timeout", strconv.Itoa(networkIOTimeoutMicros),
-			"-reconnect", "1",
-			"-reconnect_streamed", "1",
-			"-reconnect_delay_max", "5",
-		)
-		// Stop ffmpeg spending its default five seconds of audio and 5MB
-		// probing a stream whose codec is obvious. On a live source that probe
-		// data arrives at real-time bitrate, so the default is literally
-		// seconds of silence before the first byte reaches a listener — the
-		// single biggest contributor to "it takes forever to start, then the
-		// watchdog kills it".
-		args = append(args,
-			"-analyzeduration", "3000000",
-			"-probesize", "1000000",
-		)
-	}
-	// `-re` pace input at real-time for local files / static remote
-	// files. Live streams already arrive in real-time, don't double-
-	// pace them.
-	if !item.Live {
-		args = append(args, "-re")
-	}
-	args = append(args, "-i", item.URL, "-vn")
-	// Levelling and the boundary fade are one filtergraph — ffmpeg takes a
-	// single -af, and a second one silently replaces the first, which would
-	// leave a faded item unlevelled or a levelled item cut dead.
-	if filters := audioFilters(item, loudnessFilter); filters != "" {
-		args = append(args, "-af", filters)
-	}
-	return append(args,
-		"-ac", "2",
-		"-ar", strconv.Itoa(sampleRate),
-		"-b:a", strconv.Itoa(bitrate)+"k",
-		"-c:a", codec,
-		"-f", ext,
-		"pipe:1",
-	)
-}
-
-// audioFilters combines everything that has an opinion about this item's audio
-// into the one filtergraph ffmpeg accepts.
-//
-// The fade comes last: it is a statement about the end of the item, and running
-// it before a limiter would let the limiter pull the tail back up.
-func audioFilters(item PlaybackItem, loudnessFilter string) string {
-	filters := []string{}
-	if loudnessFilter != "" {
-		filters = append(filters, loudnessFilter)
-	}
-	if fade := fadeFilter(item); fade != "" {
-		filters = append(filters, fade)
-	}
-	return strings.Join(filters, ",")
-}
-
-// fadeFilter is the fade that runs into an item's boundary, or "" for the
-// ordinary case of an item allowed to finish.
-//
-// Anchored on MaxDuration rather than on the item's own length, because the
-// whole reason this item is playing is that its own length does not fit: the
-// clock decides when it ends. An item that turns out to be shorter than the gap
-// simply finishes before the fade is reached, which is what should happen.
-func fadeFilter(item PlaybackItem) string {
-	if item.FadeOut <= 0 || item.MaxDuration <= 0 {
-		return ""
-	}
-	fade := item.FadeOut
-	if fade > item.MaxDuration {
-		fade = item.MaxDuration
-	}
-	start := (item.MaxDuration - fade).Seconds()
-	if start < 0 {
-		start = 0
-	}
-	return fmt.Sprintf("afade=t=out:st=%.2f:d=%.2f", start, fade.Seconds())
 }
 
 // loudnessFilter returns the -af filtergraph that levels this item, or "" to
@@ -1542,6 +1137,10 @@ func (s *channelStreamer) skipCurrent() bool {
 	}
 
 	s.flushListeners()
+	// Out under the short fade: the cut is meant to be heard, this only keeps
+	// it from being a click.
+	s.cutFade.Store(int64(fadeOutSkip))
+	s.cutCause.Store(int32(cutBySkip))
 	cancel()
 	return true
 }
@@ -1549,6 +1148,65 @@ func (s *channelStreamer) skipCurrent() bool {
 // countsAsAired is how much of an item has to go out before the channel is
 // considered to have played it. Below this it was skipped past, not aired.
 const countsAsAired = 60 * time.Second
+
+// cutCause is why an item on air was cancelled before its own end.
+type cutCause int32
+
+const (
+	// cutUnknown: nothing has said. The item ran to its end, its decoder
+	// failed, or its play window closed — the last of which the mixer reports
+	// as a deadline on its own.
+	cutUnknown cutCause = iota
+	// cutBySkip: the listener pressed a button.
+	cutBySkip
+	// cutByBoundary: the clock — a booked show cutting in on its second.
+	cutByBoundary
+	// cutByPreempt: the watchdog found an appointment on air that this item
+	// was not part of.
+	cutByPreempt
+	// cutByStall: the source went quiet.
+	cutByStall
+)
+
+// takeCutCause reads and clears why the item was cancelled.
+func (s *channelStreamer) takeCutCause() cutCause {
+	return cutCause(s.cutCause.Swap(int32(cutUnknown)))
+}
+
+// falseStart reports whether an airing was the station starting something and
+// then taking it away before it had amounted to anything.
+//
+// Three things have to be true. The station ended it — its clock, its cut-in,
+// its watchdog — and not the listener: a skip is somebody saying "not this",
+// which the skip path already accounts for as a hearing. Less of it went out
+// than counts as having aired. And it was a programme rather than a bag or a
+// stream: for a shuffled playlist the play log is the queue itself, and
+// forgetting a song's turn puts it back on top of the pile, which is the fault
+// the skip path documents at length.
+//
+// A false start is written up as never having happened: its play-log row is
+// discarded rather than closed, it earns no credit, and the cycle is put back
+// to where it stood before the pick. Left as an ordinary cut it earned a few
+// thousandths of a surfacing, left a fifteen-second row that every separation
+// rule then read as "this show aired just now", and moved the cycle on past
+// the position it never filled. 2026-09-14 and -15, Stavvy's World #198, both
+// mornings at 08:59.
+func falseStart(item PlaybackItem, played time.Duration, completed bool, cause cutCause, err error) bool {
+	if completed || item.Shuffled || item.Live {
+		return false
+	}
+	if played >= countsAsAired {
+		return false
+	}
+	switch cause {
+	case cutByBoundary, cutByPreempt:
+		return true
+	case cutBySkip, cutByStall:
+		return false
+	}
+	// The play window closing is the station's clock too.
+	return errors.Is(err, context.DeadlineExceeded)
+}
 
 // currentSourceID is the source behind what is playing, for source-level skips.
 func (s *channelStreamer) currentSourceID() string {

@@ -150,14 +150,37 @@ func (p FreshnessPolicy) SurfacingsFor(tier Tier) float64 {
 	return satisfyThreshold
 }
 
+// heardThreshold is the credit past which an episode counts as HEARD: more
+// than half of it went out at a time somebody could have been listening.
+//
+// Drawn on the credit rather than on minutes, because credit is already the
+// station's one definition of "reached the listener" — the fraction that
+// played, times what the block it aired in is worth — and a second definition
+// here would drift from it. A fifteen-second false start earns a few
+// thousandths and is not heard; the 52 of 87 minutes of Comedy Bang Bang that
+// went out on 2026-08-11 earned about 0.6 and is; a full airing at three in
+// the morning, in a block worth nothing, earned nothing and is not, however
+// long it ran. Exactly half is not "most of it", so the comparison is strict.
+const heardThreshold = 0.5
+
+// Heard reports whether the listener has had this episode once already —
+// whether what the station still owes on it is a SECOND surfacing.
+func (o Obligation) Heard() bool { return o.Credit > heardThreshold }
+
 // Urgency is how much the station wants to surface this right now.
 //
-// Three terms, and the relationship between them is the whole design:
+// Four terms, and the relationship between them is the whole design:
 //
-//   - TIER dominates. One tier step is worth more than the entire recency
-//     range, so an S-tier show published six hours ago beats a B-tier show
-//     published ten minutes ago. Anything else means the loudest publisher wins
-//     the morning.
+//   - NEVER HEARD comes first, across every tier. An episode nobody has had
+//     yet outranks any episode somebody has, so a brand-new A-tier episode
+//     goes before the second surfacing of an S-tier one, and everything owed
+//     a second hearing waits until nothing unheard can air. A second surfacing
+//     is a lower class of claim, not a smaller one: see unheardLift for why
+//     this is an order and not a weight.
+//   - TIER dominates within a class. One tier step is worth more than the
+//     entire recency range, so an S-tier show published six hours ago beats a
+//     B-tier show published ten minutes ago. Anything else means the loudest
+//     publisher wins the morning.
 //   - RECENCY orders within a tier. Among equals, newest first — that is what
 //     "here is today's episode" means.
 //   - EXPIRY lifts something about to stop being news. It is the last chance,
@@ -165,6 +188,9 @@ func (p FreshnessPolicy) SurfacingsFor(tier Tier) float64 {
 //     can climb past a fresher one at the same tier.
 func (o Obligation) Urgency(now time.Time, policy FreshnessPolicy) float64 {
 	value := policy.tierSpread() * o.Tier.Value()
+	if !o.Heard() {
+		value += policy.unheardLift()
+	}
 	window := o.ExpiresAt.Sub(o.PublishedAt)
 	if window <= 0 {
 		return value
@@ -217,6 +243,20 @@ func (p FreshnessPolicy) tierSpread() float64 {
 		return p.TierSpread
 	}
 	return 2.0
+}
+
+// unheardLift is what never having been heard is worth in the queue: more
+// than everything below it put together — every tier step from F to S, the
+// whole recency range and the whole expiry lift — plus one more tier step of
+// margin. No tier, age or deadline can therefore carry an episode somebody has
+// heard past one nobody has, which makes "never heard first" an order the
+// numbers cannot be tuned out of, rather than a term they could outweigh.
+//
+// Derived from the policy's own weights rather than fixed, so a plan that
+// widens the tier spread or the expiry lift widens this with it and the
+// guarantee holds for that plan too.
+func (p FreshnessPolicy) unheardLift() float64 {
+	return p.tierSpread()*(tierValues[TierS]+1) + p.recencyWeight() + p.expiryWeight()
 }
 
 func (p FreshnessPolicy) recencyWeight() float64 {

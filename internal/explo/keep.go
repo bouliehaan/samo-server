@@ -160,11 +160,11 @@ func (s *Service) keepOne(ctx context.Context, id, root string, dirs []string, r
 		return "", nil
 	}
 
-	albumTitle, err := s.keepAlbumTitle(ctx, id, track)
+	album, err := s.keepAlbum(ctx, id, track)
 	if err != nil {
 		return "", err
 	}
-	dest := keepDestination(root, track, albumTitle, filepath.Ext(source))
+	dest := keepDestination(root, track, album.Title, filepath.Ext(source))
 	if _, err := os.Stat(dest); err == nil {
 		// Not an error and not a no-op: Path is set so the id resolver below
 		// still hands back the existing library track.
@@ -189,7 +189,7 @@ func (s *Service) keepOne(ctx context.Context, id, root string, dirs []string, r
 	defer func() { _ = os.Remove(tmp) }()
 
 	cover := s.keepCoverPath(ctx, id, track)
-	if err := s.remuxWithTags(ctx, source, tmp, format, track, albumTitle, cover); err != nil {
+	if err := s.remuxWithTags(ctx, source, tmp, format, track, album, cover); err != nil {
 		return "", err
 	}
 	info, err := os.Stat(tmp)
@@ -364,8 +364,8 @@ func remuxFormat(dest string) (string, error) {
 // remuxWithTags copies the audio stream untouched and rewrites the tags around
 // it. `-c copy` means no re-encode, so this is lossless and fast. output is
 // the temp name and format the container it is written as; see keepTempPath.
-func (s *Service) remuxWithTags(ctx context.Context, source, output, format string, track catalog.MusicTrack, albumTitle, coverPath string) error {
-	cmd := exec.CommandContext(ctx, s.ffmpegPath, remuxArgs(source, output, format, coverPath, albumTitle, track)...)
+func (s *Service) remuxWithTags(ctx context.Context, source, output, format string, track catalog.MusicTrack, album keptAlbum, coverPath string) error {
+	cmd := exec.CommandContext(ctx, s.ffmpegPath, remuxArgs(source, output, format, coverPath, album, track)...)
 	if out, err := cmd.CombinedOutput(); err != nil {
 		detail := strings.TrimSpace(string(out))
 		if len(detail) > 200 {
@@ -399,9 +399,20 @@ func (s *Service) remuxWithTags(ctx context.Context, source, output, format stri
 //     source that carries one — ID3 art in a WAV, a picture block in an Ogg —
 //     otherwise fails to copy at all.
 //
+// The text tags are the identity the app showed for the track — the same
+// title and artist the now-playing card and every list render (keptTrackArtist)
+// and the album Keep files it under (keptAlbumArtist, keepAlbum) — so what was
+// kept is what was seen. `-map 0` copies the source's own tags underneath, and
+// for an identified drop that is where a second identity used to leak in: the
+// sharer's album artist and MusicBrainz ids survived the copy, so the scanner
+// filed "Creep" as artist Klangsberg with Radiohead's artist id and, keyed on
+// the source's release id, merged it into the drop's own album. Every
+// MusicBrainz identity tag the source carried is dropped for an identified
+// drop (sourceIdentityTags) and only what samo knows is written back.
+//
 // format is passed as an explicit -f because output carries no extension for
 // ffmpeg to infer the container from (keepTempPath).
-func remuxArgs(source, output, format, coverPath, albumTitle string, track catalog.MusicTrack) []string {
+func remuxArgs(source, output, format, coverPath string, album keptAlbum, track catalog.MusicTrack) []string {
 	args := []string{"-nostdin", "-y", "-loglevel", "error", "-i", source}
 	embed, embeddable := embedCoverArgs(format)
 	switch {
@@ -427,10 +438,20 @@ func remuxArgs(source, output, format, coverPath, albumTitle string, track catal
 			args = append(args, "-metadata", key+"="+value)
 		}
 	}
+	if album.Identified {
+		// An empty value deletes the key from the copied metadata, in every
+		// spelling ffmpeg surfaces (Vorbis/MP4 keys and Picard's ID3 TXXX
+		// descriptions), so nothing the sharer's tagger knew outranks what
+		// samo identified. Cleared before the sets below so a key samo does
+		// write comes back with samo's value.
+		for _, key := range sourceIdentityTags {
+			args = append(args, "-metadata", key+"=")
+		}
+	}
 	add("title", track.Title)
-	add("artist", track.DisplayArtist)
-	add("album", albumTitle)
-	add("album_artist", firstNonEmpty(track.AlbumArtistNames))
+	add("artist", keptTrackArtist(track))
+	add("album", album.Title)
+	add("album_artist", keptAlbumArtist(track))
 	if track.TrackNumber > 0 {
 		add("track", fmt.Sprintf("%d", track.TrackNumber))
 	}
@@ -446,7 +467,53 @@ func remuxArgs(source, output, format, coverPath, albumTitle string, track catal
 	if track.ExternalIDs.MusicBrainzRecordingID != "" {
 		add("musicbrainz_trackid", track.ExternalIDs.MusicBrainzRecordingID)
 	}
+	if album.Identified {
+		add("musicbrainz_releasegroupid", album.ReleaseGroupID)
+	}
 	return append(args, "-f", format, output)
+}
+
+// sourceIdentityTags are the MusicBrainz identity tags a sharer's file may
+// carry, as ffmpeg names them: Vorbis comment / MP4 keys (matched without
+// regard to case) and the ID3 TXXX descriptions Picard writes. Each one names
+// the artist, album or release the SHARER's tagger believed the file to be,
+// which for an identified drop is exactly what samo replaced. The recording
+// id is not here: keepOne writes samo's own over it.
+var sourceIdentityTags = []string{
+	"musicbrainz_artistid", "MusicBrainz Artist Id",
+	"musicbrainz_albumartistid", "MusicBrainz Album Artist Id",
+	"musicbrainz_albumid", "musicbrainz_releaseid", "MusicBrainz Album Id",
+	"musicbrainz_releasegroupid", "musicbrainz_albumgroupid", "MusicBrainz Release Group Id",
+	"musicbrainz_releasetrackid", "MusicBrainz Release Track Id",
+	"musicbrainz_workid", "MusicBrainz Work Id",
+}
+
+// keptTrackArtist is the artist a kept copy is tagged with: the one the app
+// shows for the track, by the same rule the now-playing card and the track
+// lists use (display artist, then the credited artists, then the album
+// artist). One rule in one place, so the copy cannot be tagged with an artist
+// the listener never saw.
+func keptTrackArtist(track catalog.MusicTrack) string {
+	if name := strings.TrimSpace(track.DisplayArtist); name != "" {
+		return track.DisplayArtist
+	}
+	if len(track.ArtistNames) > 0 {
+		return strings.Join(track.ArtistNames, ", ")
+	}
+	return strings.Join(track.AlbumArtistNames, ", ")
+}
+
+// keptAlbumArtist is the artist a kept copy is filed under and tagged as the
+// album artist: the album artist when the catalog has one (so every track of
+// a compilation files under one folder), otherwise the artist the app shows.
+// The folder and the album_artist tag come from this one function, and the
+// tag is always written — left blank, `-map 0` kept whichever album artist the
+// sharer's file carried, and the library showed the copy under that name.
+func keptAlbumArtist(track catalog.MusicTrack) string {
+	if artist := firstNonEmpty(track.AlbumArtistNames); artist != "" {
+		return artist
+	}
+	return keptTrackArtist(track)
 }
 
 // keepCoverPath picks the local image to embed in the kept copy: samo's
@@ -479,16 +546,10 @@ func (s *Service) keepCoverPath(ctx context.Context, trackID string, track catal
 
 // keepDestination builds <root>/<album artist>/<album>/<NN> - <title>.<ext>,
 // matching the layout the rest of the library already uses. albumTitle is the
-// RESOLVED name from keepAlbumTitle, never track.AlbumTitle — see there for
+// RESOLVED name from keepAlbum, never track.AlbumTitle — see there for
 // why the catalog's own value cannot be trusted for a drop.
 func keepDestination(root string, track catalog.MusicTrack, albumTitle, ext string) string {
-	artist := firstNonEmpty(track.AlbumArtistNames)
-	if artist == "" {
-		artist = track.DisplayArtist
-	}
-	if artist == "" && len(track.ArtistNames) > 0 {
-		artist = track.ArtistNames[0]
-	}
+	artist := keptAlbumArtist(track)
 
 	name := safeComponent(track.Title, "Untitled")
 	if track.TrackNumber > 0 {
@@ -801,7 +862,22 @@ func normalizeKeepIdentity(value string) string {
 	return out.String()
 }
 
-// keepAlbumTitle resolves the album a kept copy is filed under.
+// keptAlbum is the record a kept copy is filed under.
+type keptAlbum struct {
+	Title string
+	// ReleaseGroupID is the identified release group when the ledger holds
+	// one. Written into the copy, it is what the scanner keys the album on —
+	// the record Keep named it after, rather than whatever release id the
+	// sharer's tags carried.
+	ReleaseGroupID string
+	// Identified is true when the pipeline identified the track, so the
+	// copy's identity is samo's and the source's own MusicBrainz identity
+	// tags are dropped (see remuxArgs). False for a drop that was never
+	// identified: its tags are all it has, and they are left as they are.
+	Identified bool
+}
+
+// keepAlbum resolves the album a kept copy is filed under.
 //
 // track.AlbumTitle is NOT the first choice. For a drop it is whatever the
 // sharer tagged the file with — Soulseek rips come off hits compilations, so
@@ -824,26 +900,34 @@ func normalizeKeepIdentity(value string) string {
 // is the same release group applied as an override, so a track whose ledger
 // row predates matched_album still files correctly. Nothing justifies writing
 // the drop folder to disk.
-func (s *Service) keepAlbumTitle(ctx context.Context, trackID string, track catalog.MusicTrack) (string, error) {
+func (s *Service) keepAlbum(ctx context.Context, trackID string, track catalog.MusicTrack) (keptAlbum, error) {
+	album := keptAlbum{}
 	if s.db != nil {
-		var ledgerAlbum string
+		var status, ledgerAlbum, releaseGroup string
 		err := s.db.QueryRowContext(ctx, `
-			SELECT COALESCE(matched_album, '') FROM explo_tracks WHERE track_id = ?`, trackID).Scan(&ledgerAlbum)
+			SELECT status, COALESCE(matched_album, ''), COALESCE(musicbrainz_release_group_id, '')
+			FROM explo_tracks WHERE track_id = ?`, trackID).Scan(&status, &ledgerAlbum, &releaseGroup)
 		if err != nil && err != sql.ErrNoRows {
 			s.logger("explo: keep: ledger lookup failed for %s: %v", trackID, err)
 		}
+		if err == nil && (status == "matched" || status == "matched-fallback") {
+			album.Identified = true
+			album.ReleaseGroupID = strings.TrimSpace(releaseGroup)
+		}
 		if title := strings.TrimSpace(ledgerAlbum); title != "" {
-			return title, nil
+			album.Title = title
+			return album, nil
 		}
 	}
 
 	fallback := strings.TrimSpace(track.AlbumTitle)
 	if fallback == "" || s.isDropFolderName(fallback) {
-		return "", fmt.Errorf(
+		return keptAlbum{}, fmt.Errorf(
 			"no album identified for this track yet — keeping it now would file it under %q",
 			firstNonEmpty([]string{fallback, "Unknown Album"}))
 	}
-	return fallback, nil
+	album.Title = fallback
+	return album, nil
 }
 
 // isDropFolderName reports whether a name is one of the configured drop

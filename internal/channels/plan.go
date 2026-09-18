@@ -188,22 +188,51 @@ func (p Plan) UnreachableSources(sources []Source) []Source {
 			continue
 		}
 		// A booked show reaches the air through its own anchored block; it is
-		// not expected to be in a rotation pool.
+		// not expected to be in a rotation pool. Whether it HAS a block is a
+		// question for the reconciled plan — see UnreachableShows.
 		if src.Role == RoleShow {
 			continue
 		}
-		reachable := false
-		for _, pool := range p.Pools {
-			if pool.Selects(src) {
-				reachable = true
-				break
-			}
-		}
-		if !reachable {
+		if !p.reaches(src) {
 			out = append(out, src)
 		}
 	}
 	return out
+}
+
+// UnreachableShows is every enabled booked-show source that no block's pool
+// names — a show with no slot.
+//
+// Asked of the RECONCILED plan, where every enabled schedule rule has become a
+// block over a pool naming its source, so a show this cannot find is one the
+// schedule genuinely has no window for. That is the one way to have content
+// the station can never play that UnreachableSources does not catch: a
+// podcast subscription added as a show, say, is kept out of every match pool
+// on purpose — a rule names its source explicitly — and with no rule naming
+// it, it is noticed, owed, judged free, and never enumerated by any block.
+// Reported, never refused on save: a plan save is not where a stray show
+// source should stop the station.
+func (p Plan) UnreachableShows(sources []Source) []Source {
+	out := []Source{}
+	for _, src := range sources {
+		if !src.Enabled || src.Role != RoleShow {
+			continue
+		}
+		if !p.reaches(src) {
+			out = append(out, src)
+		}
+	}
+	return out
+}
+
+// reaches reports whether any pool in the plan selects the source.
+func (p Plan) reaches(src Source) bool {
+	for _, pool := range p.Pools {
+		if pool.Selects(src) {
+			return true
+		}
+	}
+	return false
 }
 
 // PoolRef is a block's use of a pool, with how much it prefers it.
@@ -733,6 +762,19 @@ func (p Plan) ExposureFor(block Block, at time.Time, fallback ListeningDay) floa
 	return 0
 }
 
+// asksForReadyObligations reports whether any block's conditions read
+// obligations.ready, so the decision only pays for the judgement behind it
+// when a plan actually asks.
+func (p Plan) asksForReadyObligations() bool {
+	for _, block := range p.Blocks {
+		if strings.Contains(block.Enter.When, "obligations.ready") ||
+			strings.Contains(block.Exit.When, "obligations.ready") {
+			return true
+		}
+	}
+	return false
+}
+
 // Block returns a block by id.
 func (p Plan) Block(id string) (Block, bool) {
 	for _, block := range p.Blocks {
@@ -1066,6 +1108,42 @@ func (p Plan) Validate() error {
 	return fmt.Errorf("%w: %s", ErrInvalidID, strings.Join(problems, "; "))
 }
 
+// Lint reports the problems a plan can have that do not stop it running but
+// mean part of it is doing nothing: a surfacing count on a tier that does not
+// exist, a weight on a term nobody scores. Refused on SAVE, where the person
+// who wrote the setting is there to fix it, and never on load — a stored plan
+// is not thrown back to the derived one because a later engine learned to
+// spot a typo in it.
+func (p Plan) Lint() error {
+	problems := []string{}
+	for tier, count := range p.Freshness.Surfacings {
+		if _, ok := tierValues[Tier(strings.ToUpper(strings.TrimSpace(tier)))]; !ok {
+			problems = append(problems, fmt.Sprintf(
+				"freshness.surfacings names unknown tier %q (S, A, B, C, D, E or F)", tier))
+		}
+		if count < 0 {
+			problems = append(problems, fmt.Sprintf(
+				"freshness.surfacings for %q is %d — a count cannot be negative", tier, count))
+		}
+	}
+	for name := range p.Selection.Weights {
+		if _, ok := defaultWeights[name]; !ok {
+			known := make([]string, 0, len(defaultWeights))
+			for term := range defaultWeights {
+				known = append(known, term)
+			}
+			sort.Strings(known)
+			problems = append(problems, fmt.Sprintf(
+				"selection.weights names unknown term %q (known: %s)", name, strings.Join(known, ", ")))
+		}
+	}
+	if len(problems) == 0 {
+		return nil
+	}
+	sort.Strings(problems)
+	return fmt.Errorf("%w: %s", ErrInvalidID, strings.Join(problems, "; "))
+}
+
 // validateBreaks checks a block's break policy. A break that can never be
 // assembled — no elements, an impossible count range, a pool that does not
 // exist — would show up as a station that mysteriously stops separating its
@@ -1391,6 +1469,34 @@ func slotBlockFor(rule ScheduleRule, poolID string) Block {
 	}
 }
 
+// keepingOwnerEdits carries a slot block's plan-side settings over onto the
+// block just rebuilt from its schedule rule.
+//
+// slotBlockFor writes the window — start, days, end, pool — because those are
+// the rule's, and the rule is what the owner edits on the schedule. It also
+// writes a START POLICY and nothing else about how the block behaves, and the
+// reconcile used to keep only what it wrote: a plan that set makeNext on a
+// booked show, or gave it an exposure, a grace, a break policy, was silently
+// put back to the defaults at every single decision. The comment on
+// slotBlockFor promised the owner could choose makeNext; the reconcile made
+// that promise unkeepable.
+func (b Block) keepingOwnerEdits(previous Block) Block {
+	if previous.Enter.Start != "" {
+		b.Enter.Start = previous.Enter.Start
+	}
+	b.Enter.Grace = previous.Enter.Grace
+	b.Enter.When = previous.Enter.When
+	b.Enter.MaxPerDay = previous.Enter.MaxPerDay
+	b.Next = previous.Next
+	b.Balance = previous.Balance
+	b.Limits = previous.Limits
+	b.Exposure = previous.Exposure
+	b.Breaks = previous.Breaks
+	b.LongForm = previous.LongForm
+	b.Pattern = previous.Pattern
+	return b
+}
+
 // ReconcileScheduleRules makes the plan's booked-slot blocks match the
 // schedule, and reports what it added and what it dropped.
 //
@@ -1450,9 +1556,12 @@ func (p Plan) ReconcileScheduleRules(rules []ScheduleRule, sources []Source) (Pl
 		}
 		var poolID string
 		poolID, pools = slotPoolFor(rule, showPools, pools)
-		// Rewritten from the rule rather than kept: the rule is what the owner
-		// edits, so a slot that has moved must move here too.
-		kept = append(kept, slotBlockFor(rule, poolID))
+		// The WINDOW is rewritten from the rule rather than kept: the rule is
+		// what the owner edits on the schedule, so a slot that has moved must
+		// move here too. Everything else about the block is the owner's, said
+		// in the plan, and survives: the rule knows nothing about how the show
+		// wants to take over, what its exposure is, or how it breaks.
+		kept = append(kept, slotBlockFor(rule, poolID).keepingOwnerEdits(block))
 		held[block.ID] = true
 	}
 

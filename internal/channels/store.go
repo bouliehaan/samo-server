@@ -922,6 +922,68 @@ func airedDuration(began, ended time.Time, durationSeconds int64, windowStart, n
 	return aired
 }
 
+// CloseOrphanedPlays closes any play-log row this channel left open.
+//
+// A row with no ended_at is something still on air, and every query in here
+// reads it that way — by overlap, up to now. That is right for the one item
+// actually playing and wrong for a row a crash or a lost write left behind,
+// which goes on "playing" until it falls out of every window: its show is on
+// air 0s ago to the separation rules, its category is filling the whole
+// balance horizon, and nothing about the station's output says why. Called
+// when a streamer starts, when nothing can legitimately be open, and each row
+// is closed where its own length says it ended, never later than now.
+func CloseOrphanedPlays(ctx context.Context, db *sql.DB, channelID string, now time.Time) (int, error) {
+	channelID = strings.TrimSpace(channelID)
+	if channelID == "" {
+		return 0, ErrInvalidID
+	}
+	now = clockOr(now)
+	rows, err := db.QueryContext(ctx, `
+		SELECT id, started_at, duration_seconds FROM channel_play_log
+		WHERE channel_id = ? AND ended_at = ''`,
+		channelID,
+	)
+	if err != nil {
+		return 0, fmt.Errorf("query open plays: %w", err)
+	}
+	type open struct {
+		id      string
+		endedAt time.Time
+	}
+	orphans := []open{}
+	for rows.Next() {
+		var id, startedAt string
+		var durationSeconds int64
+		if err := rows.Scan(&id, &startedAt, &durationSeconds); err != nil {
+			rows.Close()
+			return 0, fmt.Errorf("scan open play: %w", err)
+		}
+		began := parseStoredTime(startedAt)
+		ended := now
+		if !began.IsZero() && durationSeconds > 0 {
+			if natural := began.Add(time.Duration(durationSeconds) * time.Second); natural.Before(ended) {
+				ended = natural
+			}
+		}
+		if !began.IsZero() && began.After(ended) {
+			ended = began
+		}
+		orphans = append(orphans, open{id: id, endedAt: ended})
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return 0, err
+	}
+	rows.Close()
+	for _, orphan := range orphans {
+		if _, err := db.ExecContext(ctx, `UPDATE channel_play_log SET ended_at = ? WHERE id = ? AND ended_at = ''`,
+			orphan.endedAt.UTC().Format(time.RFC3339), orphan.id); err != nil {
+			return 0, fmt.Errorf("close open play: %w", err)
+		}
+	}
+	return len(orphans), nil
+}
+
 // DiscardPlayLog removes a play-log row entirely.
 //
 // Used when an item was skipped almost immediately. The log is what the

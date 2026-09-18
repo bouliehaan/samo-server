@@ -56,7 +56,7 @@ func TestSkipRegistryClearAndNilSafety(t *testing.T) {
 	if absent.Suppressed("x") {
 		t.Fatal("a nil registry suppresses nothing")
 	}
-	if absent.RefSuppressed("episode:x") {
+	if absent.RefSuppressed("ch", "episode:x") {
 		t.Fatal("a nil registry suppresses no items either")
 	}
 	if got := absent.PreferredSource("ch1"); got != "" {
@@ -153,12 +153,12 @@ func TestPreferredSourceIsOneShot(t *testing.T) {
 // so the next pick is another episode of the same podcast.
 func TestItemSuppressionIsSeparateFromSourceSuppression(t *testing.T) {
 	skips := NewSkipRegistry(nil)
-	skips.SuppressRef("episode:ep1")
+	skips.SuppressRef("ch", "episode:ep1")
 
-	if !skips.RefSuppressed("episode:ep1") {
+	if !skips.RefSuppressed("ch", "episode:ep1") {
 		t.Fatal("the skipped episode should be passed over")
 	}
-	if skips.RefSuppressed("episode:ep2") {
+	if skips.RefSuppressed("ch", "episode:ep2") {
 		t.Fatal("only the skipped episode, not its siblings")
 	}
 	// The show itself stays eligible — that is the whole difference between
@@ -171,13 +171,13 @@ func TestItemSuppressionIsSeparateFromSourceSuppression(t *testing.T) {
 // An item ref and a source id could collide as plain map keys; they must not.
 func TestRefAndSourceKeysCannotCollide(t *testing.T) {
 	skips := NewSkipRegistry(nil)
-	skips.SuppressRef("shared-name")
+	skips.SuppressRef("ch", "shared-name")
 	if skips.Suppressed("shared-name") {
 		t.Fatal("an item ref must not suppress a source that happens to share its name")
 	}
 	skips2 := NewSkipRegistry(nil)
 	skips2.Suppress("shared-name", time.Hour)
-	if skips2.RefSuppressed("shared-name") {
+	if skips2.RefSuppressed("ch", "shared-name") {
 		t.Fatal("a source id must not suppress an item ref that shares its name")
 	}
 }
@@ -228,5 +228,19 @@ func TestBackGoesToTheItemNotJustTheShow(t *testing.T) {
 	fallback, _ := s.decide()
 	if fallback.SourceID != "pod1" {
 		t.Fatalf("with the item gone, BACK should still land on the show; got %q", fallback.SourceID)
+	}
+}
+
+// A skipped episode is skipped on the channel it was skipped on. Two channels
+// carrying the same show share the item ref, and one used to inherit the
+// other's skips.
+func TestASkippedItemIsScopedToItsChannel(t *testing.T) {
+	skips := NewSkipRegistry(nil)
+	skips.SuppressRef("kitchen", "episode:ep1")
+	if !skips.RefSuppressed("kitchen", "episode:ep1") {
+		t.Fatal("the skipped episode should be passed over on its channel")
+	}
+	if skips.RefSuppressed("garage", "episode:ep1") {
+		t.Fatal("a skip on one channel must not pass the episode over on another")
 	}
 }

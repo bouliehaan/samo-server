@@ -128,7 +128,7 @@ func TestPodcastEnumerationOrdersNewestFirst(t *testing.T) {
 			episode("new", "New", now.Add(-2*time.Hour), 30),
 		}}},
 	}
-	env := enumerationContext{now: now, searchDepth: 50, day: DefaultListeningDay, heardInDay: map[string]int{}}
+	env := enumerationContext{now: now, searchDepth: 50, day: DefaultListeningDay}
 	env.owed = engine.refreshObligations(context.Background(), now, env)
 
 	candidates := engine.enumerateSource(context.Background(), src, env)
@@ -556,5 +556,62 @@ func TestNextCutInIsTheAppointmentTime(t *testing.T) {
 	patient := BuildTimeline(plan, now, loc)
 	if patient.Next != nil && patient.Next.Policy == StartImmediately {
 		t.Fatal("a makeNext slot should not be treated as a cut-in")
+	}
+}
+
+// The preemption backstop asks the timeline, not a whole decision.
+//
+// It used to ask for a full decision every fifteen seconds — every source
+// enumerated, the play log scanned four ways, every fresh obligation upserted
+// — to learn whether a booked slot was on air, which is a fact about the clock
+// and the plan.
+func TestActiveCutInIsATimelineQuestion(t *testing.T) {
+	db := newTestDB(t)
+	ctx := context.Background()
+	mustChannel(t, db, "chan-cutin")
+	show := mustSource(t, db, "chan-cutin", CreateSourceInput{
+		Kind: SourceLiveStream, Label: "News", Role: RoleShow, DefaultRotation: boolPtr(false),
+		Config: map[string]any{"url": "http://example.test/news"},
+	})
+	mustSource(t, db, "chan-cutin", CreateSourceInput{
+		Kind: SourcePodcastSubscription, Label: "A Show", Config: map[string]any{"podcastId": "p1"},
+	})
+	if _, err := InsertScheduleRule(ctx, db, "chan-cutin", CreateScheduleRuleInput{
+		SourceID: show.ID, Label: "News", WeekdayMask: 127, StartMinute: 16 * 60, EndMinute: 17 * 60,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	clock := time.Date(2026, 8, 11, 15, 42, 0, 0, time.UTC)
+	sched := NewScheduler(Dependencies{DB: db, Now: func() time.Time { return clock }})
+
+	if _, _, ok := sched.ActiveCutIn(ctx, "chan-cutin"); ok {
+		t.Fatal("no slot is on air at 15:42")
+	}
+	clock = time.Date(2026, 8, 11, 16, 5, 0, 0, time.UTC)
+	anchor, sources, ok := sched.ActiveCutIn(ctx, "chan-cutin")
+	if !ok {
+		t.Fatal("the 16:00 slot should be on air at 16:05")
+	}
+	if !sources[show.ID] || len(sources) != 1 {
+		t.Fatalf("the slot reaches %v, want just the show", sources)
+	}
+	if anchor.Policy != StartImmediately {
+		t.Fatalf("a derived slot cuts in, got policy %q", anchor.Policy)
+	}
+
+	// What the watchdog does with it: cut a rotation item, leave the slot's
+	// own item alone, and leave the same source alone.
+	streamer := transcodingStreamer(t, "")
+	streamer.scheduler = sched
+	streamer.channel.ID = "chan-cutin"
+	if !streamer.shouldPreempt(ctx, PlaybackItem{SourceID: "podcast-source", ItemRef: "episode:e1"}) {
+		t.Fatal("a rotation item should give way to the slot")
+	}
+	if streamer.shouldPreempt(ctx, PlaybackItem{SourceID: show.ID, AnchorBlockID: anchor.BlockID, IsRuleDriven: true}) {
+		t.Fatal("the slot's own item must not preempt itself")
+	}
+	if streamer.shouldPreempt(ctx, PlaybackItem{SourceID: show.ID}) {
+		t.Fatal("the same source reached another way must not be restarted")
 	}
 }

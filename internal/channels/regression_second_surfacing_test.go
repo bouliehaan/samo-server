@@ -161,7 +161,10 @@ func TestAnEpisodeTheStationAiredOnceIsStillOwedItsSecondSurfacing(t *testing.T)
 	}
 
 	// Well past the eight-hour item separation, with the afternoon's A-tier
-	// first airing behind it too.
+	// first airing behind it too — and it has to be behind it: an episode
+	// nobody has heard goes before any second surfacing, whatever the tiers.
+	s.now = time.Date(2026, 9, 10, 10, 30, 0, 0, time.UTC)
+	s.airedInFull(ears, "tetra", "tetra200", 111*time.Minute)
 	s.now = time.Date(2026, 9, 10, 19, 0, 0, 0, time.UTC)
 	item, decision := s.decide()
 	if rule, reason := rejectionOf(decision, "episode:ep635"); rule != "" {
@@ -214,8 +217,8 @@ func TestTheStationsOwnRecordStillKeepsASettledEpisodeOffTheAir(t *testing.T) {
 	if item.ItemRef == "episode:ep635" {
 		t.Fatalf("a settled episode came back as a rerun\n%s", decision.Explain())
 	}
-	if rule, _ := rejectionOf(decision, "episode:ep635"); rule != "alreadyHeard" {
-		t.Fatalf("a settled, twice-aired episode was refused for %q, want alreadyHeard\n%s", rule, decision.Explain())
+	if rule, _ := rejectionOf(decision, "episode:ep635"); rule != "stationAired" {
+		t.Fatalf("a settled, twice-aired episode was refused for %q, want stationAired\n%s", rule, decision.Explain())
 	}
 }
 

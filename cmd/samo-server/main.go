@@ -645,6 +645,15 @@ func main() {
 		BaseContext: ctx,
 		Loudness:    loudnessPlanner(loudnessService),
 	})
+	// Nothing is on air yet, so any play-log row still open was left behind by
+	// the last process — and an open row reads as "playing now" to every rule
+	// that consults the log. Closed before anything asks; and the obligation
+	// rows nothing will read again are pruned while we are there.
+	if closed, pruned, err := channelsService.Housekeep(ctx); err != nil {
+		log.Warnf("channels: housekeeping failed: %v", err)
+	} else if closed > 0 || pruned > 0 {
+		log.Infof("channels: closed %d play-log row(s) left open by a previous run, pruned %d settled obligation(s)", closed, pruned)
+	}
 
 	// samo-radio devices: headless players on a machine with a sound card.
 	// The token minter lets the service hand a device a durable Samo

@@ -163,7 +163,9 @@ func (s *Service) MusicTracksForAlbum(albumID string) []MusicTrack {
 			items = append(items, track)
 		}
 	}
-	return items
+	// The explo silo: a library album never lists the drop-folder twin of one
+	// of its tracks; an explo album lists everything. See AlbumTracksAsSeen.
+	return AlbumTracksAsSeen(items)
 }
 
 func (s *Service) MusicTracksForPlaylist(playlistID string) []MusicTrack {

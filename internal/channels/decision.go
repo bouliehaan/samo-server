@@ -95,13 +95,19 @@ func (d Decision) repeats(previous Decision) bool {
 
 // OwedSummary is one outstanding obligation, as the decision saw it.
 type OwedSummary struct {
-	Ref     string  `json:"ref"`
-	Title   string  `json:"title"`
-	Source  string  `json:"source,omitempty"`
-	Tier    string  `json:"tier"`
-	Credit  float64 `json:"credit"`
-	AgeMins int     `json:"ageMinutes"`
-	Expires string  `json:"expiresIn,omitempty"`
+	Ref    string  `json:"ref"`
+	Title  string  `json:"title"`
+	Source string  `json:"source,omitempty"`
+	Tier   string  `json:"tier"`
+	Credit float64 `json:"credit"`
+	// Heard is whether the listener has had this once already — what is owed
+	// on it is a second surfacing, which the queue puts behind everything
+	// nobody has heard yet, whatever the tiers say.
+	Heard   bool   `json:"heard,omitempty"`
+	AgeMins int    `json:"ageMinutes"`
+	Expires string `json:"expiresIn,omitempty"`
+	// Urgency is the queue's own number, never-heard episodes lifted above
+	// every heard one: compare it within a class, not across.
 	Urgency float64 `json:"urgency"`
 }
 
@@ -173,10 +179,19 @@ func capRejections(rejections []Rejection) []Rejection {
 // maxRecordedCandidates is how much of the ranking is kept.
 const maxRecordedCandidates = 8
 
-func summariseCandidates(scored []ScoredCandidate, contenders int) []CandidateSummary {
+// summariseCandidates records the ranking, marking the candidates the choice
+// was actually made between. By ref rather than by position: when the top
+// scorer is owed the contenders are the most urgent owed episodes, which need
+// not be the best-scoring ones, and a record that marked the first N by score
+// showed the wrong episode in contention and the chosen one outside it.
+func summariseCandidates(scored []ScoredCandidate, contenders []ScoredCandidate) []CandidateSummary {
 	limit := len(scored)
 	if limit > maxRecordedCandidates {
 		limit = maxRecordedCandidates
+	}
+	inContention := make(map[string]bool, len(contenders))
+	for _, candidate := range contenders {
+		inContention[candidate.Candidate.Ref] = true
 	}
 	out := make([]CandidateSummary, 0, limit)
 	for index := 0; index < limit; index++ {
@@ -188,7 +203,7 @@ func summariseCandidates(scored []ScoredCandidate, contenders int) []CandidateSu
 			Category:  string(candidate.Candidate.Category),
 			Minutes:   int(candidate.Candidate.Duration.Minutes()),
 			Score:     round2(candidate.Total),
-			Contender: index < contenders,
+			Contender: inContention[candidate.Candidate.Ref],
 			Terms:     roundTerms(candidate.Terms),
 		})
 	}
@@ -265,6 +280,7 @@ func (d *Decision) applyOwed(queue ObligationQueue, now time.Time, policy Freshn
 			Source:  obligation.SourceLabel,
 			Tier:    string(obligation.Tier),
 			Credit:  round2(obligation.Credit),
+			Heard:   obligation.Heard(),
 			AgeMins: int(now.Sub(obligation.PublishedAt).Minutes()),
 			Urgency: round2(obligation.Urgency(now, policy)),
 		}

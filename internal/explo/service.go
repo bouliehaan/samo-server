@@ -20,6 +20,7 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/bouliehaan/samo-server/internal/catalog"
@@ -123,6 +124,13 @@ type Service struct {
 	// so a slow, network-bound backfill doesn't block scan-triggered processing.
 	backfillMu sync.Mutex
 
+	// identityCheckDue asks the next identify pass to re-check every matched
+	// row whose recorded identity contradicts its own file (see
+	// reconcileIdentities). Set at construction and by Reprocess, cleared
+	// once the pass has run, so the check costs one bounded sweep per boot
+	// or per operator request rather than one per pass.
+	identityCheckDue atomic.Bool
+
 	// idleMu/lastIdleStatus deduplicate the "nothing due this pass" log line.
 	// With the periodic ticker driving passes every 30 minutes, an unchanged
 	// idle status would otherwise print ~48 identical lines a day; it still
@@ -153,7 +161,7 @@ func NewService(options ServiceOptions) *Service {
 		}
 	}
 	key := strings.TrimSpace(options.AcoustIDAPIKey)
-	return &Service{
+	service := &Service{
 		db:            options.DB,
 		fpcalcPath:    strings.TrimSpace(options.FpcalcPath),
 		httpClient:    httpClient,
@@ -175,6 +183,8 @@ func NewService(options ServiceOptions) *Service {
 		acoustidKey: key,
 		cfgSource:   "environment",
 	}
+	service.identityCheckDue.Store(true)
+	return service
 }
 
 // Enabled reports whether the explo pipeline has everything it needs to run.
@@ -249,6 +259,22 @@ func (s *Service) ProcessNewTracks(ctx context.Context) (Result, error) {
 		}
 	}
 
+	// Once per boot (and again after Reprocess): re-check the matched rows
+	// whose recorded identity contradicts the file's own tags, so a wrong
+	// recording choice heals without anyone re-dropping the file. Before the
+	// loop, so rows identified this pass — already chosen on their evidence —
+	// are not looked up a second time.
+	identitiesChanged := 0
+	if s.identityCheckDue.Load() {
+		report, err := s.reconcileIdentities(ctx, false)
+		if err != nil {
+			s.logger("explo: identity check failed: %v", err)
+		} else {
+			s.identityCheckDue.Store(false)
+			identitiesChanged = report.Changed
+		}
+	}
+
 	for _, candidate := range candidates {
 		select {
 		case <-ctx.Done():
@@ -311,7 +337,7 @@ func (s *Service) ProcessNewTracks(ctx context.Context) (Result, error) {
 	}
 	result.Hidden += hidden
 
-	if (result.Scanned > 0 || hidden > 0 || unhidden > 0 || otherChanged || titlesResolved > 0) && s.reloadCatalog != nil {
+	if (result.Scanned > 0 || hidden > 0 || unhidden > 0 || otherChanged || titlesResolved > 0 || identitiesChanged > 0) && s.reloadCatalog != nil {
 		if err := s.reloadCatalog(ctx); err != nil {
 			s.logger("explo: catalog reload failed: %v", err)
 		}
@@ -885,13 +911,13 @@ func (s *Service) ReconcileRecentlyAdded(ctx context.Context) error {
 	return nil
 }
 
-func (s *Service) identify(ctx context.Context, path string) (identifiedTrack, bool, error) {
-	fp, err := fingerprintFile(ctx, s.fpcalcPath, path)
+func (s *Service) identify(ctx context.Context, candidate candidateTrack) (identifiedTrack, bool, error) {
+	fp, err := fingerprintFile(ctx, s.fpcalcPath, candidate.path)
 	if err != nil {
 		return identifiedTrack{}, false, err
 	}
 	s.throttleAcoustID(ctx)
-	return lookupAcoustID(ctx, s.httpClient, s.effectiveKey(), fp)
+	return lookupAcoustID(ctx, s.httpClient, s.effectiveKey(), fp, candidate.evidence())
 }
 
 // identifyWithFallback tries AcoustID first (the primary, highest-confidence
@@ -910,8 +936,16 @@ func (s *Service) identify(ctx context.Context, path string) (identifiedTrack, b
 // stays visible in the error field instead of silently downgrading to a
 // plain "unmatched").
 func (s *Service) identifyWithFallback(ctx context.Context, candidate candidateTrack) (identifiedTrack, bool, error) {
-	match, matched, err := s.identify(ctx, candidate.path)
+	match, matched, err := s.identify(ctx, candidate)
 	if matched {
+		// One line when the audio's best-supported name is not what the file
+		// calls itself: either the sharer's tags are wrong (fine) or every
+		// recording AcoustID lists for this audio is, and that is worth a
+		// look — it is exactly how "Creep" was filed under a stranger's name.
+		if !identityAgrees(match, candidate.evidence()) {
+			s.logger("explo: identified %q as %s / %s [%s], which disagrees with its own tags (%s / %s [%s])",
+				candidate.path, match.Artist, match.Title, match.Album, candidate.artist, candidate.title, candidate.album)
+		}
 		return s.resolveAlbumTitle(ctx, match), true, nil
 	}
 
@@ -1080,7 +1114,7 @@ func (s *Service) recordProcessed(ctx context.Context, trackID, status string, m
 	// so that engine can build Cover Art Archive URLs without re-asking
 	// MusicBrainz for an id AcoustID already reported — and its title with it,
 	// for the same reason: Keep files the copy under the album, and used to
-	// re-ask MusicBrainz for the name inside the request (see keepAlbumTitle).
+	// re-ask MusicBrainz for the name inside the request (see keepAlbum).
 	// Wrapped in storage.Retry: a transient Postgres failure
 	// (serialization/deadlock) here would otherwise drop the ledger update
 	// even when identification succeeded, leaving the track "unmatched" to
@@ -1297,6 +1331,10 @@ func (s *Service) Reprocess(ctx context.Context) (ReprocessResult, error) {
 	}); err != nil {
 		return res, fmt.Errorf("reset covers: %w", err)
 	}
+	// The identity check is bounded to rows that contradict their own file, so
+	// asking for it again is cheap; the operator pressed retry because something
+	// looks wrong, and a wrong recording choice is one of the things that can.
+	s.identityCheckDue.Store(true)
 	s.logger("explo: reprocess reset %d failed identification(s) and %d cover(s)", res.IdentificationReset, res.CoversReset)
 	return res, nil
 }
@@ -1313,10 +1351,45 @@ type candidateTrack struct {
 	// case the fallback still parses the filename.
 	title  string
 	artist string
+	// album is the scanner's album tag, or "" when that was only the drop
+	// folder's name (findCandidateTracks blanks it): evidence for which
+	// record the file is from, never an identity on its own.
+	album string
 	// durationSeconds is the scanner's (ffprobe-measured) duration, used as
 	// the trusted reference for the text-search fallback's duration gate -
 	// independent of whether fpcalc/AcoustID ever ran successfully.
 	durationSeconds int
+	// musicBrainzRecordingID is the recording id embedded in the file's own
+	// tags, when the sharer's rip carried one (about half of a weekly drop
+	// does). It never identifies the file on its own; it breaks ties between
+	// the recordings AcoustID lists for its fingerprint.
+	musicBrainzRecordingID string
+}
+
+// evidence is what identification may hold the fingerprint's candidates up
+// against: everything the file says about itself.
+func (c candidateTrack) evidence() identityEvidence {
+	return identityEvidence{
+		Title:                  c.title,
+		Artist:                 c.artist,
+		Album:                  c.album,
+		Path:                   c.path,
+		MusicBrainzRecordingID: c.musicBrainzRecordingID,
+		DurationSeconds:        c.durationSeconds,
+	}
+}
+
+// embeddedRecordingID reads the MusicBrainz recording id out of a track's
+// external_ids_json column as the scanner wrote it.
+func embeddedRecordingID(externalIDsJSON string) string {
+	if strings.TrimSpace(externalIDsJSON) == "" {
+		return ""
+	}
+	var ids catalog.ExternalIDs
+	if err := json.Unmarshal([]byte(externalIDsJSON), &ids); err != nil {
+		return ""
+	}
+	return strings.TrimSpace(ids.MusicBrainzRecordingID)
 }
 
 // Identification retry policy. Explo drops are fresh releases: AcoustID
@@ -1395,7 +1468,8 @@ func (s *Service) findCandidateTracks(ctx context.Context) ([]candidateTrack, er
 		args = append(args, likePrefix(dir)+"%")
 	}
 	query := fmt.Sprintf(`
-		SELECT mt.id, COALESCE(mt.album_id, ''), mf.path, COALESCE(mt.title, ''), COALESCE(mt.display_artist, ''), mt.duration_seconds
+		SELECT mt.id, COALESCE(mt.album_id, ''), mf.path, COALESCE(mt.title, ''), COALESCE(mt.display_artist, ''), mt.duration_seconds,
+		       COALESCE(mt.external_ids_json, ''), COALESCE(mt.album_title, '')
 		FROM music_tracks mt
 		JOIN media_files mf ON mf.track_id = mt.id
 		LEFT JOIN explo_tracks et ON et.track_id = mt.id
@@ -1421,8 +1495,13 @@ func (s *Service) findCandidateTracks(ctx context.Context) ([]candidateTrack, er
 	var out []candidateTrack
 	for rows.Next() {
 		var candidate candidateTrack
-		if err := rows.Scan(&candidate.trackID, &candidate.albumID, &candidate.path, &candidate.title, &candidate.artist, &candidate.durationSeconds); err != nil {
+		var externalIDs string
+		if err := rows.Scan(&candidate.trackID, &candidate.albumID, &candidate.path, &candidate.title, &candidate.artist, &candidate.durationSeconds, &externalIDs, &candidate.album); err != nil {
 			return nil, err
+		}
+		candidate.musicBrainzRecordingID = embeddedRecordingID(externalIDs)
+		if s.isDropFolderName(candidate.album) {
+			candidate.album = ""
 		}
 		out = append(out, candidate)
 	}

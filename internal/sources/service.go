@@ -17,6 +17,7 @@ import (
 	"sort"
 	"strings"
 	"time"
+	"unicode"
 
 	"github.com/bouliehaan/samo-server/internal/catalog"
 	"github.com/bouliehaan/samo-server/internal/catalogstore"
@@ -891,7 +892,7 @@ func stableID(prefix string, parts ...string) string {
 }
 
 func normalizeHTTPURL(raw string) (string, error) {
-	parsed, err := url.Parse(strings.TrimSpace(raw))
+	parsed, err := url.Parse(scrubPastedURL(raw))
 	if err != nil || parsed.Scheme == "" || parsed.Host == "" {
 		return "", ErrInvalidURL
 	}
@@ -907,11 +908,28 @@ func normalizeHTTPURL(raw string) (string, error) {
 }
 
 func normalizeOptionalHTTPURL(raw string) (string, error) {
-	raw = strings.TrimSpace(raw)
+	raw = scrubPastedURL(raw)
 	if raw == "" {
 		return "", nil
 	}
 	return normalizeHTTPURL(raw)
+}
+
+// scrubPastedURL is TrimSpace plus the characters a copy-paste drags along
+// that TrimSpace leaves alone: zero-width spaces, BOMs, bidi marks, soft
+// hyphens — Unicode's Cf ("format") category. They render as nothing, so a
+// URL that looks exactly right in the field arrives with an invisible byte
+// glued to the front, url.Parse finds no scheme, and the user is told their
+// perfectly good https:// URL "must be absolute http or https". No valid URL
+// contains a format character unencoded, so dropping them everywhere in the
+// string loses nothing.
+func scrubPastedURL(raw string) string {
+	return strings.TrimSpace(strings.Map(func(r rune) rune {
+		if unicode.Is(unicode.Cf, r) {
+			return -1
+		}
+		return r
+	}, raw))
 }
 
 func defaultStationName(streamURL string) string {

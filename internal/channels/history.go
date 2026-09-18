@@ -3,7 +3,6 @@ package channels
 import (
 	"context"
 	"database/sql"
-	"sort"
 	"time"
 )
 
@@ -397,9 +396,29 @@ func typicalAired(tail []PlayTailEntry) time.Duration {
 			lengths = append(lengths, entry.Aired)
 		}
 	}
-	if len(lengths) == 0 {
-		return 0
+	return medianDuration(lengths)
+}
+
+// typicalAiredByCategory is the same measurement taken per category.
+//
+// The station-wide median is the wrong yardstick on any station that plays
+// songs between its podcasts: two three-minute tracks around every episode put
+// the median at three minutes, and a three-hour episode then reads as a
+// sixty-fold commitment rather than the three-fold one it is next to the other
+// podcasts. Taxed like that it never reached the contender band, and a new
+// B-tier episode lost its drop day to shorter episodes of the same tier — on a
+// station whose owner had asked for exactly that show. What a long item costs
+// is measured against what its own KIND of programming normally runs.
+func typicalAiredByCategory(tail []PlayTailEntry) map[CategoryID]time.Duration {
+	lengths := map[CategoryID][]time.Duration{}
+	for _, entry := range tail {
+		if entry.Aired > 0 {
+			lengths[entry.Category] = append(lengths[entry.Category], entry.Aired)
+		}
 	}
-	sort.Slice(lengths, func(i, j int) bool { return lengths[i] < lengths[j] })
-	return lengths[len(lengths)/2]
+	out := make(map[CategoryID]time.Duration, len(lengths))
+	for category, aired := range lengths {
+		out[category] = medianDuration(aired)
+	}
+	return out
 }

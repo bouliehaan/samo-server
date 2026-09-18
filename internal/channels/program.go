@@ -51,6 +51,31 @@ type ProgramState struct {
 	// file has vanished, or which no longer fits before an appointment, is
 	// dropped instead of played.
 	Queue []QueuedItem `json:"queue,omitempty"`
+	// ReleasedAnchor names a booked block the station left before its window
+	// closed, and ReleasedUntil is when that window closes.
+	//
+	// A booked hour whose last minute nothing can fill hands the air on early,
+	// and the block it hands to then starts something that may run well past
+	// the hour. That has to be a decision the whole station stands behind: the
+	// timeline still shows the appointment on air until the hour turns, and
+	// anything that reads the timeline alone — the next decision, the
+	// streamer's cut-in watchdog — takes the appointment to be claiming the
+	// air back and cuts the very item the engine chose seconds earlier. On
+	// 2026-09-14 and -15 that was a Stavvy's World episode started at 08:59:23
+	// and cut at fifteen seconds, then a song faded on the hour, then a break.
+	// The release is recorded here so that until the hour turns the released
+	// appointment is over as far as everything is concerned.
+	ReleasedAnchor string    `json:"releasedAnchor,omitempty"`
+	ReleasedUntil  time.Time `json:"releasedUntil,omitempty"`
+}
+
+// released reports whether this state has already given up the appointment
+// that the timeline says is on air.
+func (s ProgramState) released(anchor *Anchor, now time.Time) bool {
+	if anchor == nil || s.ReleasedAnchor == "" || s.ReleasedAnchor != anchor.BlockID {
+		return false
+	}
+	return now.Before(s.ReleasedUntil)
 }
 
 // QueuedItem is one thing already decided.
@@ -95,6 +120,10 @@ type BlockDecision struct {
 	// next appointment starts. Set only by the gap-filling retry; see
 	// ProgrammingIntent.CutAtBoundary for why the fit rule stands down for it.
 	CutAtBoundary bool
+	// AllowFalseStart lets a cut pass start a programme it will cut off. Set
+	// only by the station's floor, where the alternative is silence; see
+	// ProgrammingIntent.AllowFalseStart.
+	AllowFalseStart bool
 	// Changed reports whether this decision moved the station to a new block.
 	Changed bool
 }
@@ -113,8 +142,11 @@ type BlockDecision struct {
 //     accepts.
 //  5. The default block, which always accepts.
 func ResolveBlock(plan Plan, timeline Timeline, state ProgramState, cond ConditionContext, now time.Time) BlockDecision {
-	// 1 — an appointment.
-	if timeline.Active != nil {
+	// 1 — an appointment. Unless the station has already released it: a booked
+	// block that ran out of room and handed the air on early is over, even
+	// though its window has not closed, and taking it back would cut whatever
+	// the handover started.
+	if timeline.Active != nil && !state.released(timeline.Active, now) {
 		if block, ok := plan.Block(timeline.Active.BlockID); ok {
 			anchor := *timeline.Active
 			decision := BlockDecision{
@@ -162,7 +194,7 @@ func ResolveBlock(plan Plan, timeline Timeline, state ProgramState, cond Conditi
 			reason = "its booked window has ended"
 		}
 		// 4 — hand over.
-		next := followNext(plan, current, cond, now)
+		next := handoverFrom(plan, timeline, current, cond, now)
 		decision := BlockDecision{
 			Block:       next,
 			EntryReason: fmt.Sprintf("%s after %q (%s)", handoverVerb(current, next), blockName(current), reason),
@@ -281,6 +313,31 @@ func listeningDayElapsed(day ListeningDay, loc *time.Location, now time.Time) ti
 		return elapsed
 	}
 	return time.Second
+}
+
+// handoverFrom is the block that takes over when `from` is finished with the
+// air — whether it ended on its own terms or was released early.
+//
+// A block that names nothing to hand to falls back — and the fallback is not
+// the default block when a daypart is claiming the hour. The default block
+// yields to that daypart at the very next decision anyway, so going there first
+// only ever bought one item of the wrong block: after every booked slot the
+// station played a break from the default block, handed to the new-episodes
+// block, and opened it with a second break.
+//
+// One rule for both ways out of a block, on purpose. The early release used to
+// walk the chain with an EMPTY condition context, so a block gated on
+// `obligations.pending > 0` could never be the one released to, and the last
+// seconds of the music hour went to the default block instead of the
+// new-episodes block that would take over at the next decision anyway.
+func handoverFrom(plan Plan, timeline Timeline, from Block, cond ConditionContext, now time.Time) Block {
+	next := followNext(plan, from, cond, now)
+	if from.Next == "" {
+		if scheduled, found := scheduledBlockFor(plan, timeline, cond, now); found && scheduled.ID != from.ID {
+			next = scheduled
+		}
+	}
+	return next
 }
 
 func handoverVerb(from, to Block) string {
@@ -559,6 +616,14 @@ type ProgrammingIntent struct {
 	// pass, over a pool the plan has nominated as cuttable — the rule stands
 	// down, the item is capped at the gap and faded out on the boundary.
 	CutAtBoundary bool
+	// AllowFalseStart is the one exception to the rule that a cut pass never
+	// starts a programme: the floor, where the station has nothing else and
+	// a stub of an episode beats dead air. Everywhere else a gap is filled
+	// with what can be faded — a song, a spot, a stream — or handed on. A
+	// podcast that dies at fifteen seconds is not a way of filling anything;
+	// it is a false start the listener hears and the play log then reads as
+	// an airing.
+	AllowFalseStart bool
 
 	// Want is what this position in the block's cycle calls for.
 	Want WantKind
@@ -633,11 +698,26 @@ func resolveLimits(block Block, tail []PlayTailEntry, enteredAt time.Time) []Res
 // changes block is not a cap — it is the same defect as a break policy that only
 // chained in production, and it hides in exactly the same way, because in-memory
 // the counts look right until something re-enters by a different route.
+//
+// Whether the last thing on air was a break survives the move too. A break is a
+// fact about the running order, not about the block that planned it, and the
+// rule that a break never follows a break has to hold across a handover or the
+// new block opens with one on top of the one that just played.
+//
+// So does a released appointment, until its window closes: a station that
+// leaves the released block again before the hour turns is still not going
+// back to the appointment it gave up.
 func enteringBlock(previous ProgramState, blockID string, now time.Time) ProgramState {
-	return ProgramState{
+	state := ProgramState{
 		BlockID:      blockID,
 		EnteredAt:    now,
 		EnteredDay:   previous.EnteredDay,
 		EnteredToday: countEntry(previous, blockID),
+		LastWasBreak: previous.LastWasBreak,
 	}
+	if previous.ReleasedAnchor != "" && now.Before(previous.ReleasedUntil) {
+		state.ReleasedAnchor = previous.ReleasedAnchor
+		state.ReleasedUntil = previous.ReleasedUntil
+	}
+	return state
 }

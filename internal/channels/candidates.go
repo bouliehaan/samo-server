@@ -55,6 +55,10 @@ type Candidate struct {
 	// Separation is scaled by it: an airing nobody heard is not a time you
 	// heard it.
 	Credit float64
+	// Target is how much credit settles the obligation — how many surfacings
+	// the plan asks for this item, so the daily airing cap can honour a policy
+	// that asks for two rather than quietly capping a long episode at one.
+	Target float64
 	// Held marks a new episode the station owes but is deliberately saving for
 	// the listening day, rather than spending it on an empty room.
 	//
@@ -113,7 +117,6 @@ type enumerationContext struct {
 	now         time.Time
 	location    *time.Location
 	day         ListeningDay
-	heardInDay  map[string]int
 	searchDepth int
 	// owed is what the station currently owes the listener, so a candidate can
 	// be marked as satisfying an obligation without asking the store per item.
@@ -298,6 +301,7 @@ func (e *Engine) enumeratePodcast(ctx context.Context, src Source, base Candidat
 				candidate.Owed = true
 				candidate.Urgency = obligation.Urgency(env.now, freshness)
 				candidate.Credit = obligation.Credit
+				candidate.Target = obligation.Target()
 			}
 		}
 		out = append(out, candidate)

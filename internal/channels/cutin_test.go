@@ -2,8 +2,11 @@ package channels
 
 import (
 	"context"
+	"errors"
 	"io"
+	"log"
 	"os/exec"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
@@ -126,42 +129,119 @@ func boundaryPlan() Plan {
 	}
 }
 
-// A filler is faded onto the boundary, and nothing else is ever faded.
+// An item the clock will take fades into its boundary, and nothing else is
+// ever faded out.
 //
 // The fade is anchored on MaxDuration, not on the item's own length: the reason
 // this item is playing is that its length does not fit, so the clock decides
-// where it ends.
+// where it ends. And it is the MIXER's fade, not an ffmpeg filter's — the
+// levelling filter is the only thing the decoder is handed.
 func TestOnlyAnItemTheClockWillTakeIsFaded(t *testing.T) {
 	filler := PlaybackItem{URL: "/music/x.flac", MaxDuration: 48 * time.Second, FadeOut: 3 * time.Second}
-	if got := fadeFilter(filler); got != "afade=t=out:st=45.00:d=3.00" {
-		t.Fatalf("fade filter is %q", got)
+	m := newMixer(44100, func([]byte) error { return nil }, func(string, ...any) {})
+	src := constantSource("filler", 8000)
+	m.play(src, 0, filler.MaxDuration, fadeOutFor(filler))
+	if src.framesLeft != framesFor(48*time.Second) || src.fadeOutFrames != framesFor(3*time.Second) {
+		t.Fatalf("planned end = %d frames with a %d-frame fade; want 2400 and 150", src.framesLeft, src.fadeOutFrames)
 	}
-	// Ordinary programming ends where its audio ends.
-	if got := fadeFilter(PlaybackItem{URL: "/music/x.flac", MaxDuration: 48 * time.Second}); got != "" {
-		t.Fatalf("an item nobody asked to cut must not be faded, got %q", got)
+	// Ordinary programming ends where its audio ends: no planned end at all.
+	plain := constantSource("episode", 8000)
+	m.play(plain, 0, 0, fadeOutDefault)
+	if plain.framesLeft != -1 {
+		t.Fatalf("an item nobody asked to cut has a planned end of %d frames", plain.framesLeft)
 	}
 	// A gap shorter than the fade is all fade rather than a click at the end.
-	short := PlaybackItem{MaxDuration: 2 * time.Second, FadeOut: 3 * time.Second}
-	if got := fadeFilter(short); got != "afade=t=out:st=0.00:d=2.00" {
-		t.Fatalf("short-gap fade is %q", got)
+	short := constantSource("short", 8000)
+	m.play(short, 0, 2*time.Second, 3*time.Second)
+	if short.fadeOutFrames != short.framesLeft {
+		t.Fatalf("short-gap fade is %d frames over a %d-frame end", short.fadeOutFrames, short.framesLeft)
 	}
 
-	// Levelling and the fade have to arrive as ONE filtergraph. ffmpeg takes a
-	// single -af and the last one wins, so passing two means either the item is
-	// not levelled or it is not faded.
-	combined := audioFilters(filler, "volume=1.7dB,alimiter=limit=0.89")
-	if !strings.HasPrefix(combined, "volume=1.7dB") || !strings.Contains(combined, "afade=") {
-		t.Fatalf("levelling and fade must be one graph, got %q", combined)
-	}
-	args := transcodeArgs(filler, "libmp3lame", "mp3", 192, 44100, "volume=1.7dB")
-	filters := 0
-	for _, arg := range args {
-		if arg == "-af" {
+	// The decoder is handed levelling and nothing else: one -af, and it is
+	// the loudness filter, after -i.
+	args := decodeArgs(filler, 44100, "volume=1.7dB,alimiter=limit=0.89")
+	filters, inputAt, filterAt := 0, -1, -1
+	for index, arg := range args {
+		switch arg {
+		case "-af":
 			filters++
+			filterAt = index
+		case "-i":
+			inputAt = index
 		}
 	}
-	if filters != 1 {
-		t.Fatalf("ffmpeg was handed %d -af flags; it honours one", filters)
+	if filters != 1 || filterAt < inputAt || args[filterAt+1] != "volume=1.7dB,alimiter=limit=0.89" {
+		t.Fatalf("decoder args carry %d -af flags: %v", filters, args)
+	}
+	for _, arg := range args {
+		if strings.Contains(arg, "afade") {
+			t.Fatalf("the fade is the mixer's job, not a filter: %v", args)
+		}
+	}
+}
+
+// The fade itself: full level until the fade begins, down to silence on the
+// last frame, and the item reported as ended by its play window.
+func TestTheMixerFadesAnItemOutIntoItsPlayWindow(t *testing.T) {
+	levels := []float64{}
+	m := newMixer(44100, func(frame []byte) error {
+		levels = append(levels, peakOf(frame))
+		return nil
+	}, func(string, ...any) {})
+	src := constantSource("filler", 8000)
+	m.play(src, 0, 10*mixFrame, 4*mixFrame)
+	for i := 0; i < 12; i++ {
+		if err := m.emit(); err != nil {
+			t.Fatal(err)
+		}
+	}
+	select {
+	case <-src.finished:
+	default:
+		t.Fatal("the item did not end at its play window")
+	}
+	if !errors.Is(src.reason, context.DeadlineExceeded) {
+		t.Fatalf("an item cut at its window ended with %v, want the deadline", src.reason)
+	}
+	// Frames 0..5 at full level, 6..9 falling, 10.. silence.
+	if levels[5] < 7900 || levels[6] >= levels[5] || levels[9] >= levels[8] || levels[9] > 3000 || levels[10] != 0 {
+		t.Fatalf("fade profile is wrong: %v", levels)
+	}
+}
+
+// A crossfade: the outgoing item goes down as the incoming one comes up, the
+// two overlap, and the incoming one is at full level when the fade ends.
+func TestACrossfadeOverlapsAndLandsAtFullLevel(t *testing.T) {
+	frames := [][]byte{}
+	m := newMixer(44100, func(frame []byte) error {
+		frames = append(frames, append([]byte(nil), frame...))
+		return nil
+	}, func(string, ...any) {})
+	outgoing := constantSource("song", 8000)
+	m.play(outgoing, 0, 0, 0)
+	m.emit()
+	incoming := constantSource("station", -8000) // opposite sign, so the two can be told apart
+	m.crossfade(incoming, 4*mixFrame)
+	for i := 0; i < 5; i++ {
+		m.emit()
+	}
+	// During the fade both are present: the sum sits between the two levels
+	// and never at either extreme.
+	mid := sampleOf(frames[2])
+	if mid <= -8000 || mid >= 8000 {
+		t.Fatalf("mid-crossfade sample %d shows no overlap", mid)
+	}
+	// After it, only the incoming source, at full level.
+	if got := sampleOf(frames[len(frames)-1]); got != -8000 {
+		t.Fatalf("after the crossfade the incoming source is at %d, want -8000", got)
+	}
+	select {
+	case <-outgoing.finished:
+	default:
+		t.Fatal("the outgoing item was not settled once its fade completed")
+	}
+	if !m.onAir(incoming) || m.onAir(outgoing) {
+		t.Fatal("the incoming source should be on air alone")
 	}
 }
 
@@ -171,44 +251,29 @@ func TestOnlyAnItemTheClockWillTakeIsFaded(t *testing.T) {
 // seconds of the news nobody hears, so the connection is made early and what it
 // produces in the meantime is thrown away.
 func TestAWarmedStationIsSilentUntilItsBoundaryThenGoesStraightOut(t *testing.T) {
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-
-	warm := &warmSource{
-		item:   PlaybackItem{URL: "http://station/live", Title: "KRCC", Live: true},
-		at:     time.Now().Add(cutInWarmLead),
-		out:    make(chan []byte, 8),
-		cancel: cancel,
-		done:   make(chan struct{}),
-		wait:   func() error { return nil },
-	}
-	reader, writer := io.Pipe()
-	go warm.pump(ctx, reader)
+	ring := newPCMRing(1<<16, true)
+	ring.discard = true
+	src := newPCMSource("KRCC", ring, nil)
 
 	// Before the boundary: everything it produces is dropped.
-	if _, err := writer.Write([]byte("the end of the previous hour")); err != nil {
-		t.Fatalf("write: %v", err)
+	if !ring.push(context.Background(), []byte("the end of the previous hour")) {
+		t.Fatal("push refused")
 	}
-	select {
-	case chunk := <-warm.out:
-		t.Fatalf("audio from before the boundary reached the listener: %q", chunk)
-	case <-time.After(50 * time.Millisecond):
+	if ring.len() != 0 {
+		t.Fatalf("%d bytes of pre-boundary audio were kept for the listener", ring.len())
 	}
 
 	// On the boundary: on air, from this instant.
-	source := warm.adopt(ctx)
-	if _, err := writer.Write([]byte("live from NPR News")); err != nil {
-		t.Fatalf("write: %v", err)
+	m := newMixer(44100, func([]byte) error { return nil }, func(string, ...any) {})
+	m.crossfade(src, crossfadeCutIn)
+	if !ring.push(context.Background(), []byte("live from NPR News")) {
+		t.Fatal("push refused after the boundary")
 	}
 	got := make([]byte, 64)
-	n, err := source.read.Read(got)
-	if err != nil {
-		t.Fatalf("read after adoption: %v", err)
-	}
+	n := ring.pull(got)
 	if string(got[:n]) != "live from NPR News" {
 		t.Fatalf("expected the audio from after the boundary, got %q", got[:n])
 	}
-	writer.Close()
 }
 
 // And the streamer only adopts the connection it actually warmed.
@@ -218,15 +283,13 @@ func TestAWarmedStationIsSilentUntilItsBoundaryThenGoesStraightOut(t *testing.T)
 // connected.
 func TestAWarmedSourceIsOnlyAdoptedByTheItemItWasWarmedFor(t *testing.T) {
 	streamer := quietStreamer(t)
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
 
 	warmed := PlaybackItem{URL: "http://station/live", Title: "KRCC", Live: true}
 	streamer.setWarm(liveWarm(warmed))
 
 	// A different item: the warmed connection is dropped, not adopted, and this
 	// streamer has no ffmpeg to fall back on — so the error IS the assertion.
-	if _, err := streamer.openSource(ctx, PlaybackItem{URL: "http://elsewhere/live"}, nil); err == nil {
+	if _, err := streamer.openSource(PlaybackItem{URL: "http://elsewhere/live"}); err == nil {
 		t.Fatal("a warmed source was adopted by an item that is not the one it was warmed for")
 	}
 	if streamer.takeWarm(warmed) != nil {
@@ -235,14 +298,14 @@ func TestAWarmedSourceIsOnlyAdoptedByTheItemItWasWarmedFor(t *testing.T) {
 
 	// The item it WAS warmed for gets it, without going anywhere near ffmpeg.
 	streamer.setWarm(liveWarm(warmed))
-	if _, err := streamer.openSource(ctx, warmed, nil); err != nil {
+	if _, err := streamer.openSource(warmed); err != nil {
 		t.Fatalf("the warmed connection was not adopted at its own boundary: %v", err)
 	}
 }
 
 // A connection that dies before its slot must not be adopted.
 //
-// The item pump reads an immediate EOF from it, and an item that produces no
+// The mixer would read an immediate end from it, and an item that produces no
 // audio is treated as a dead source — ref suppressed, source stepped off. A
 // station that blinked while waiting for its hour would take itself off the air
 // for the rest of the day.
@@ -251,95 +314,186 @@ func TestAWarmedSourceThatDiedIsNotAdopted(t *testing.T) {
 	item := PlaybackItem{URL: "http://station/live", Title: "KRCC", Live: true}
 
 	dead := liveWarm(item)
-	dead.cancel() // as a lost connection does: the pump ends, the channel closes
-	<-dead.done
+	dead.src.release() // as a lost connection does: the decoder ends
 	streamer.setWarm(dead)
 
 	// No ffmpeg on this streamer, so "dialled again" surfaces as the start
 	// error rather than a silent adoption of a corpse.
-	if _, err := streamer.openSource(context.Background(), item, nil); err == nil {
+	if _, err := streamer.openSource(item); err == nil {
 		t.Fatal("a dead connection was adopted; the booked show would have read as a dead source")
 	}
 }
 
-// liveWarm is a warmed source with nothing behind it, whose pump ends when it
-// is cancelled — the shape the real one has, without a subprocess.
-func liveWarm(item PlaybackItem) *warmSource {
-	done := make(chan struct{})
-	out := make(chan []byte, 1)
-	var once sync.Once
-	return &warmSource{
-		item: item, at: time.Now(), out: out, done: done,
-		cancel: func() { once.Do(func() { close(out); close(done) }) },
-		wait:   func() error { return nil },
+// The crossfade only begins toward a warmed station that is actually
+// producing; one that has not answered yet gets the item ducked to silence
+// instead, and the decision at the boundary dials properly.
+func TestTheCrossfadeWaitsForAStationThatIsProducing(t *testing.T) {
+	streamer := quietStreamer(t)
+	at := time.Now().Add(time.Minute)
+	silent := liveWarm(PlaybackItem{URL: "http://station/live", Title: "KRCC", Live: true})
+	silent.at = at
+	streamer.setWarm(silent)
+	if streamer.warmReadyFor(at) != nil {
+		t.Fatal("a warmed source with no audio yet was offered for a crossfade")
+	}
+	silent.src.decoded.Store(4096)
+	if streamer.warmReadyFor(at) == nil {
+		t.Fatal("a warmed source that is producing was not offered for the crossfade")
 	}
 }
 
-// The same handover against a real transcoder and a real pipe.
+// liveWarm is a warmed source with nothing behind it — the shape the real one
+// has, without a subprocess.
+func liveWarm(item PlaybackItem) *warmSource {
+	ring := newPCMRing(1<<16, true)
+	ring.discard = true
+	var once sync.Once
+	src := newPCMSource(item.Title, ring, nil)
+	src.release = func() { once.Do(func() { ring.close(); close(src.decoderDone) }) }
+	return &warmSource{item: item, at: time.Now(), src: src}
+}
+
+// constantSource is a source whose audio is one sample value, for ever.
+func constantSource(title string, level int16) *pcmSource {
+	ring := newPCMRing(1<<20, true)
+	src := newPCMSource(title, ring, nil)
+	src.decoded.Store(1)
+	buf := make([]byte, 1<<20)
+	for i := 0; i < len(buf); i += 2 {
+		buf[i] = byte(level)
+		buf[i+1] = byte(level >> 8)
+	}
+	ring.push(context.Background(), buf)
+	// Kept topped up by the pull: a ring this size holds several seconds of
+	// frames, more than any test here consumes.
+	return src
+}
+
+// peakOf is the largest sample magnitude in a frame.
+func peakOf(frame []byte) float64 {
+	peak := 0.0
+	for i := 0; i+1 < len(frame); i += 2 {
+		sample := float64(int16(uint16(frame[i]) | uint16(frame[i+1])<<8))
+		if sample < 0 {
+			sample = -sample
+		}
+		if sample > peak {
+			peak = sample
+		}
+	}
+	return peak
+}
+
+// sampleOf is the first sample of a frame.
+func sampleOf(frame []byte) int {
+	return int(int16(uint16(frame[0]) | uint16(frame[1])<<8))
+}
+
+// The same handover against a real decoder and a real pipe.
 //
 // The parts that only exist once there is a subprocess: audio flowing before
-// anybody wants it, a pipe handed from the warming goroutine to the item pump,
-// and an exit status that more than one path will ask for — os/exec answers a
+// anybody wants it, a pipe handed from the warming goroutine to the mixer, and
+// an exit status that more than one path will ask for — os/exec answers a
 // second Wait with a complaint about the first, and reporting that as the item
 // having failed would make the station drop the show it just started.
-func TestAdoptingARealTranscoderYieldsAudioAndOneExitStatus(t *testing.T) {
+func TestAdoptingARealDecoderYieldsAudioAndOneExitStatus(t *testing.T) {
 	ffmpeg, err := exec.LookPath("ffmpeg")
 	if err != nil {
 		t.Skip("no ffmpeg on this machine")
 	}
+	wav := filepath.Join(t.TempDir(), "tone.wav")
+	if out, err := exec.Command(ffmpeg, "-hide_banner", "-loglevel", "error", "-nostdin",
+		"-f", "lavfi", "-i", "sine=frequency=440:duration=30", "-ac", "2", "-ar", "44100", wav).CombinedOutput(); err != nil {
+		t.Fatalf("could not make a test tone: %v\n%s", err, out)
+	}
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-
-	warmCtx, warmCancel := context.WithCancel(ctx)
-	cmd := exec.CommandContext(warmCtx, ffmpeg,
-		"-hide_banner", "-loglevel", "error", "-nostdin", "-re",
-		"-f", "lavfi", "-i", "sine=frequency=440:duration=30",
-		"-ac", "2", "-ar", "44100", "-b:a", "192k", "-c:a", "libmp3lame", "-f", "mp3", "pipe:1")
-	stdout, err := cmd.StdoutPipe()
+	streamer := newChannelStreamer(
+		Channel{ID: "chan-test", Name: "Test", Codec: "mp3"},
+		Dependencies{}, NewScheduler(Dependencies{}),
+		StreamerOptions{FFmpegPath: ffmpeg, Logger: log.New(io.Discard, "", 0), BaseContext: ctx},
+		nil,
+	)
+	// Warmed: decoding, discarding. A file paced at real time stands in for
+	// the station — a live source is not paced by ffmpeg, and a thirty-second
+	// file read at full speed would be over before the boundary.
+	src, err := streamer.spawnDecoder(PlaybackItem{URL: wav, Title: "A station"}, true)
 	if err != nil {
-		t.Fatalf("stdout: %v", err)
+		t.Fatalf("spawn: %v", err)
 	}
-	if err := cmd.Start(); err != nil {
-		t.Fatalf("start: %v", err)
-	}
-	var once sync.Once
-	var waitErr error
-	warm := &warmSource{
-		item:   PlaybackItem{URL: "lavfi://sine", Title: "A station", Live: true},
-		at:     time.Now().Add(500 * time.Millisecond),
-		out:    make(chan []byte, listenerBuffer),
-		cancel: warmCancel,
-		done:   make(chan struct{}),
-		wait:   func() error { once.Do(func() { waitErr = cmd.Wait() }); return waitErr },
-	}
-	go warm.pump(warmCtx, stdout)
-
-	// Let it get going — this is the two and a half seconds the boundary is not
-	// supposed to pay for — and check none of it has leaked out.
 	time.Sleep(700 * time.Millisecond)
-	if len(warm.out) != 0 {
-		t.Fatalf("%d chunks of pre-boundary audio were queued for the listener", len(warm.out))
+	if src.decoded.Load() == 0 {
+		t.Fatal("the warmed decoder produced nothing")
 	}
-	// Silence because it is being dropped, not because nothing is connected —
-	// which is the failure this test would otherwise pass straight through.
+	if src.ring.len() != 0 {
+		t.Fatalf("%d bytes of pre-boundary audio were kept for the listener", src.ring.len())
+	}
 	select {
-	case <-warm.done:
-		t.Fatal("the warmed transcoder died before its boundary")
+	case <-src.decoderDone:
+		t.Fatal("the warmed decoder died before its boundary")
 	default:
 	}
 
-	source := warm.adopt(ctx)
-	got := make([]byte, 4096)
-	n, err := source.read.Read(got)
-	if err != nil || n == 0 {
-		t.Fatalf("no audio after the handover: %d bytes, %v", n, err)
+	// On air: audio flows into the ring from here.
+	src.ring.keep()
+	time.Sleep(300 * time.Millisecond)
+	if src.ring.len() == 0 {
+		t.Fatal("no audio after the handover")
 	}
 
-	// Ending it twice — the item pump on its way out, and the streamer reaping
-	// what it thinks is still warm — must not manufacture an error.
-	source.stop()
-	if err := source.wait(); err != nil && !strings.Contains(err.Error(), "signal") {
-		t.Fatalf("second wait reported %v", err)
+	// Ending it twice — the mixer releasing it, and the streamer reaping what
+	// it thinks is still warm — must not manufacture an error or hang.
+	src.release()
+	src.release()
+	if stored := src.decoderErr.Load(); stored != nil && !errors.Is(*stored, context.Canceled) &&
+		!strings.Contains((*stored).Error(), "signal") {
+		t.Fatalf("release reported %v", *stored)
 	}
-	discardWarm(warm)
+}
+
+// The handover at a boundary, both ways: with the slot's station warmed and
+// producing, the item on air crossfades into it; without, the item is ducked
+// to silence by the boundary and nothing is put on air in its place.
+func TestBeginCutInCrossfadesToAWarmedStationOrDucks(t *testing.T) {
+	streamer := quietStreamer(t)
+	run := streamer.ensureMixer()
+	t.Cleanup(streamer.stopMixer)
+	at := time.Now().Add(crossfadeCutIn)
+
+	playing := constantSource("episode", 8000)
+	run.mixer.play(playing, 0, 0, 0)
+
+	// Nothing warmed: the episode goes out under the crossfade-length fade,
+	// and the mixer has nothing new on air.
+	streamer.beginCutIn(run, playing, at)
+	if run.mixer.onAir(playing) && run.mixer.current == playing {
+		t.Fatal("the item on air was not taken off for the boundary")
+	}
+	if run.mixer.current != nil {
+		t.Fatalf("nothing should have come on air, got %q", run.mixer.current.title)
+	}
+
+	// Warmed and producing: the station comes on air under the crossfade
+	// while the item goes out under it.
+	playing = constantSource("episode", 8000)
+	run.mixer.play(playing, 0, 0, 0)
+	warm := liveWarm(PlaybackItem{URL: "http://station/live", Title: "KRCC", Live: true})
+	warm.at = at
+	warm.src.decoded.Store(4096)
+	streamer.setWarm(warm)
+	streamer.beginCutIn(run, playing, at)
+	if run.mixer.current != warm.src {
+		t.Fatal("the warmed station was not crossfaded on air")
+	}
+	if run.mixer.outgoing != playing {
+		t.Fatal("the item on air was not faded out under the crossfade")
+	}
+	if warm.src.gain.frames != framesFor(crossfadeCutIn) || playing.gain.frames != framesFor(crossfadeCutIn) {
+		t.Fatalf("crossfade lengths are %d in / %d out frames, want %d",
+			warm.src.gain.frames, playing.gain.frames, framesFor(crossfadeCutIn))
+	}
+	// And the decision at the boundary adopts what is already on air.
+	if src := streamer.takeWarm(warm.item); src != warm.src {
+		t.Fatal("the station on air was not the one adopted at the boundary")
+	}
 }

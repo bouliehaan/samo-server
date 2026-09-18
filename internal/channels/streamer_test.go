@@ -255,9 +255,9 @@ func TestAnUnplayableItemIsPassedOver(t *testing.T) {
 
 	// What the streamer does when an item produces no audio.
 	if item.ItemRef != "" {
-		skips.SuppressRef(item.ItemRef)
+		skips.SuppressRef("chan-test", item.ItemRef)
 	}
-	if !skips.RefSuppressed(item.ItemRef) {
+	if !skips.RefSuppressed("chan-test", item.ItemRef) {
 		t.Fatal("a dead item is still on offer, so the next decision picks it again")
 	}
 	// Its siblings are still fine — one bad episode is not a bad show.
@@ -458,12 +458,16 @@ func TestSkippingAnEpisodeDoesNotForgetThatItPlayed(t *testing.T) {
 
 // ---- what "completed" means ---------------------------------------------
 
-// fakeTranscoder stands in for ffmpeg: a script that ignores its arguments and
-// runs the given shell body, writing to stdout as ffmpeg would.
+// fakeTranscoder stands in for ffmpeg: a script that runs the given shell body
+// for a decoder, writing PCM to stdout as ffmpeg would, and passes its input
+// straight through when it is asked to be the encoder.
 func fakeTranscoder(t *testing.T, body string) string {
 	t.Helper()
 	path := filepath.Join(t.TempDir(), "ffmpeg")
-	if err := os.WriteFile(path, []byte("#!/bin/sh\n"+body+"\n"), 0o755); err != nil {
+	script := "#!/bin/sh\n" +
+		"for a in \"$@\"; do if [ \"$a\" = \"pipe:0\" ]; then exec cat; fi; done\n" +
+		body + "\n"
+	if err := os.WriteFile(path, []byte(script), 0o755); err != nil {
 		t.Fatal(err)
 	}
 	return path
@@ -527,12 +531,16 @@ func TestAnItemTheStationCutOffIsNotComplete(t *testing.T) {
 		done <- result{written, err}
 	}()
 
-	// What a skip does, once the item is on air.
+	// What a skip does, once the item is on air. The ear hears the encoder
+	// from the first frame — silence is encoded too — so "on air" has to mean
+	// the decoder has produced something, or a skip that lands first reads
+	// as a dead source.
 	select {
 	case <-onAir:
 	case <-time.After(10 * time.Second):
-		t.Fatal("the transcoder never produced a byte")
+		t.Fatal("the encoder never produced a byte")
 	}
+	waitForDecodedAudio(t, streamer)
 	if !streamer.skipCurrent() {
 		t.Fatal("nothing was playing to skip")
 	}
@@ -568,6 +576,24 @@ func TestAnItemStoppedByItsPlayWindowIsNotComplete(t *testing.T) {
 	}
 }
 
+// waitForDecodedAudio blocks until the item on air has produced audio.
+func waitForDecodedAudio(t *testing.T, streamer *channelStreamer) {
+	t.Helper()
+	deadline := time.Now().Add(10 * time.Second)
+	for time.Now().Before(deadline) {
+		if run := streamer.currentMixer(); run != nil {
+			run.mixer.mu.Lock()
+			src := run.mixer.current
+			run.mixer.mu.Unlock()
+			if src != nil && src.decoded.Load() > 0 {
+				return
+			}
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatal("the decoder never produced a byte")
+}
+
 // attachedEar wires a listener straight into the broadcast and reports the
 // first chunk that reaches it, without starting the loop the way Attach would.
 func attachedEar(streamer *channelStreamer) <-chan struct{} {
@@ -581,4 +607,22 @@ func attachedEar(streamer *channelStreamer) <-chan struct{} {
 		close(heard)
 	}()
 	return heard
+}
+
+// The play-log write for the item on air when the process is told to stop has
+// to land. It derived its deadline from the signal context, which was already
+// cancelled by then, so every shutdown left that row open — and an open row is
+// "playing now" to the scheduler for the next twenty-four hours.
+func TestPlayLogWritesSurviveShutdown(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	recorder := &serviceRecorder{baseCtx: ctx}
+	cancel()
+	writeCtx, done := recorder.writeCtx()
+	defer done()
+	if err := writeCtx.Err(); err != nil {
+		t.Fatalf("the recorder's write context died with the signal context: %v", err)
+	}
+	if _, ok := writeCtx.Deadline(); !ok {
+		t.Fatal("a play-log write must still be bounded by a deadline")
+	}
 }

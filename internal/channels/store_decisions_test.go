@@ -285,7 +285,7 @@ func TestAnUnreachableBookedStationDoesNotFloodTheRecord(t *testing.T) {
 		// What the streamer does when the item produces no audio: pass it
 		// over, put the cycle back, step off the source after a few in a row,
 		// back off, ask again.
-		skips.SuppressRef(item.ItemRef)
+		skips.SuppressRef("ch1", item.ItemRef)
 		if prior.BlockID != "" {
 			if err := SaveProgramState(ctx, db, "ch1", prior); err != nil {
 				t.Fatal(err)
@@ -337,5 +337,68 @@ func TestAnUnreachableBookedStationDoesNotFloodTheRecord(t *testing.T) {
 	}
 	if decisions[1].Retries == nil || decisions[1].Retries.Count != attempts-1 {
 		t.Fatalf("the outage record should be intact behind it, got %+v", decisions[1].Retries)
+	}
+}
+
+// A play-log row left open by a crash or a lost write reads as "still playing"
+// to every query in here — the show is on air 0s ago to separation, and its
+// category fills the balance horizon — until it falls out of the window. Every
+// graceful shutdown used to leave one, because the recorder's write context
+// was the already-cancelled signal context.
+func TestCloseOrphanedPlaysClosesRowsWhereTheirLengthSaysTheyEnded(t *testing.T) {
+	db := newTestDB(t)
+	ctx := context.Background()
+	mustChannel(t, db, "chan-orphans")
+
+	now := time.Date(2026, 9, 14, 12, 0, 0, 0, time.UTC)
+	seed := func(id string, startedAt time.Time, durationSeconds int, endedAt string) {
+		t.Helper()
+		if _, err := db.ExecContext(ctx, `
+			INSERT INTO channel_play_log (id, channel_id, source_id, item_ref, title, started_at, ended_at, duration_seconds)
+			VALUES (?, 'chan-orphans', 'src', ?, ?, ?, ?, ?)`,
+			id, "episode:"+id, id, startedAt.UTC().Format(time.RFC3339), endedAt, durationSeconds); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// Left open three hours ago by a two-hour episode: it ended an hour ago.
+	seed("crashed", now.Add(-3*time.Hour), 7200, "")
+	// Left open ten minutes ago by a two-hour episode: cannot have ended yet,
+	// so it is closed at now rather than in the future.
+	seed("recent", now.Add(-10*time.Minute), 7200, "")
+	// Closed properly, and must not be touched.
+	seed("done", now.Add(-5*time.Hour), 3600, now.Add(-4*time.Hour).Format(time.RFC3339))
+
+	closed, err := CloseOrphanedPlays(ctx, db, "chan-orphans", now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if closed != 2 {
+		t.Fatalf("closed %d rows, want 2", closed)
+	}
+	endedAt := func(id string) time.Time {
+		var raw string
+		if err := db.QueryRowContext(ctx, `SELECT ended_at FROM channel_play_log WHERE id = ?`, id).Scan(&raw); err != nil {
+			t.Fatal(err)
+		}
+		return parseStoredTime(raw)
+	}
+	if got := endedAt("crashed"); !got.Equal(now.Add(-time.Hour)) {
+		t.Fatalf("the crashed row should end where its length says (%s), got %s", now.Add(-time.Hour), got)
+	}
+	if got := endedAt("recent"); !got.Equal(now) {
+		t.Fatalf("a row that could not have finished yet should end now, got %s", got)
+	}
+	if got := endedAt("done"); !got.Equal(now.Add(-4 * time.Hour)) {
+		t.Fatalf("a closed row was rewritten to %s", got)
+	}
+	// Afterwards the tail no longer reports the crashed show as on air now.
+	tail, err := PlayLogTail(ctx, db, "chan-orphans", 24*time.Hour, 50, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, entry := range tail {
+		if entry.ItemRef == "episode:crashed" && endedAt("crashed").Sub(entry.StartedAt) != entry.Aired {
+			t.Fatalf("the crashed row still reads as playing: aired %s", entry.Aired)
+		}
 	}
 }
