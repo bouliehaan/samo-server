@@ -259,9 +259,22 @@ type PlaybackItem struct {
 // NowPlaying summarises what the channel is currently emitting plus
 // the most recent finished items, for the now-playing API/UI.
 type NowPlaying struct {
-	ChannelID     string         `json:"channelId"`
-	Current       *PlaybackItem  `json:"current,omitempty"`
-	StartedAt     *time.Time     `json:"startedAt,omitempty"`
+	ChannelID string        `json:"channelId"`
+	Current   *PlaybackItem `json:"current,omitempty"`
+	StartedAt *time.Time    `json:"startedAt,omitempty"`
+	// EndsAt is when the station will move on from Current, as far as it
+	// knows at this moment — the earliest of the item's own length, the play
+	// window it was capped to and the appointment due to cut in on it (see
+	// itemEndsAt). It is what the streamer's own clocks are set to, which no
+	// client could work out from the fields above: MaxDuration never leaves
+	// the server, and a live relay has no length at all.
+	//
+	// A ceiling, not a promise, for an item nobody has measured: a feed
+	// episode that reports no duration is capped to the room in front of the
+	// next booked show, and ends here or sooner. Absent when nothing bounds
+	// the item — an unmeasured episode in an open stretch runs until its
+	// audio ends, and nobody can say when that is.
+	EndsAt        *time.Time     `json:"endsAt,omitempty"`
 	ListenerCount int            `json:"listenerCount"`
 	Recent        []PlayLogEntry `json:"recent,omitempty"`
 }

@@ -246,6 +246,12 @@ type channelStreamer struct {
 	current       *PlaybackItem
 	currentLog    string
 	currentAt     time.Time
+	// currentCutIn is the appointment the item on air will be cut for, as
+	// read when it started — the same moment the cut timer was set from —
+	// or zero when nothing is booked to interrupt it. Kept beside the item
+	// so now-playing can say when the item ends without asking the
+	// scheduler a question the streamer has already answered.
+	currentCutIn time.Time
 }
 
 // PlayRecorder is the slice of the service the streamer uses to write
@@ -459,6 +465,47 @@ func (s *channelStreamer) Now() (PlaybackItem, time.Time, string, bool) {
 	return *s.current, s.currentAt, s.currentLog, true
 }
 
+// EndsAt is when the item on air will leave it, as far as the streamer knows:
+// the moment its own clocks are set to. False when nothing is on, or when
+// nothing bounds what is.
+func (s *channelStreamer) EndsAt() (time.Time, bool) {
+	s.currentMu.RLock()
+	defer s.currentMu.RUnlock()
+	if s.current == nil {
+		return time.Time{}, false
+	}
+	return itemEndsAt(*s.current, s.currentAt, s.currentCutIn)
+}
+
+// itemEndsAt is the earliest moment the station is known to move on from an
+// item that started at startedAt: the end of its audio when its length is
+// known, the close of the play window it was capped to (a booked slot's end,
+// the gap in front of an appointment, a live station's turn), and the
+// appointment due to cut in on it — whichever comes first. False when none of
+// those is known, which is an unmeasured item in an open stretch.
+//
+// The cut-in counts only for an item the watchdog would actually cut: a
+// rule-driven item is already capped at the end of its own slot and is
+// exempt from preemption, so an appointment beyond it is not its end.
+func itemEndsAt(item PlaybackItem, startedAt, cutInAt time.Time) (time.Time, bool) {
+	var ends time.Time
+	consider := func(at time.Time) {
+		if !at.IsZero() && (ends.IsZero() || at.Before(ends)) {
+			ends = at
+		}
+	}
+	if item.DurationSeconds > 0 {
+		consider(startedAt.Add(time.Duration(item.DurationSeconds) * time.Second))
+	}
+	if item.MaxDuration > 0 {
+		consider(startedAt.Add(item.MaxDuration))
+	}
+	if !item.IsRuleDriven {
+		consider(cutInAt)
+	}
+	return ends, !ends.IsZero()
+}
+
 // ListenerCount returns the number of currently attached listeners.
 // Used by the now-playing endpoint so the UI can show "3 listeners" and
 // confirm a stream is reaching real ears.
@@ -587,6 +634,7 @@ func (s *channelStreamer) loop(ctx context.Context) {
 		s.current = nil
 		s.currentLog = ""
 		s.currentAt = time.Time{}
+		s.currentCutIn = time.Time{}
 		s.currentMu.Unlock()
 		// A connection warmed for a boundary this channel will not reach is a
 		// held socket and a running ffmpeg with nobody to hand them to.
@@ -661,6 +709,10 @@ func (s *channelStreamer) loop(ctx context.Context) {
 		s.current = &copyItem
 		s.currentLog = logID
 		s.currentAt = time.Now().UTC()
+		// Until playItem has read the timeline, the item ends on its own
+		// bounds; the previous item's appointment must not be mistaken for
+		// this one's.
+		s.currentCutIn = time.Time{}
 		s.currentMu.Unlock()
 
 		// Measure what comes after this while this one plays, so a first
@@ -812,8 +864,15 @@ func (s *channelStreamer) playItemWithFade(ctx context.Context, item PlaybackIte
 	run.mixer.play(src, fadeIn, item.MaxDuration, fadeOutFor(item))
 
 	// When the next appointment is due. Read once, here, so the things that
-	// care about it cannot disagree about when the hour turns.
+	// care about it cannot disagree about when the hour turns — now-playing
+	// included, which reports the item's end from the same reading.
 	cutInAt, booked := s.scheduler.NextCutIn(itemCtx, s.channel.ID)
+	s.currentMu.Lock()
+	s.currentCutIn = time.Time{}
+	if booked {
+		s.currentCutIn = cutInAt
+	}
+	s.currentMu.Unlock()
 
 	// Get the incoming station connected BEFORE the boundary, whatever is
 	// playing now.

@@ -325,6 +325,9 @@ func (s *Service) NowPlaying(ctx context.Context, channelID string) (NowPlaying,
 			np.Current = &cur
 			t := startedAt
 			np.StartedAt = &t
+			if ends, known := streamer.EndsAt(); known {
+				np.EndsAt = &ends
+			}
 		}
 	}
 	return np, nil

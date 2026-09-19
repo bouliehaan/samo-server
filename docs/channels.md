@@ -856,7 +856,7 @@ browser `<audio>` tags):
 
 | Method | Path | Notes |
 |---|---|---|
-| `GET` | `/api/v1/channels/{id}/now` | Current item + listener count + recent |
+| `GET` | `/api/v1/channels/{id}/now` | Current item + `startedAt` + `endsAt` + listener count + recent. `endsAt` is when the station will move on, as far as it knows: the item's own length, the play window it was capped to (a booked slot's end, the gap before an appointment, a live station's turn) or the appointment due to cut in, whichever is first — a ceiling for an episode nobody measured, absent when nothing bounds the item |
 | `GET` | `/api/v1/channels/{id}/recent?limit=N` | Play log |
 | `GET` | `/channels/{id}/playlist.m3u` | M3U pointing at the stream |
 | `GET` | `/channels/{id}/stream` | The audio bytes (one long pipe) |
