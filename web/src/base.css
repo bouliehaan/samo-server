@@ -230,6 +230,12 @@ html, body {
 .field input,
 .field select,
 .field textarea {
+  /* Stretching fills the field already; the explicit width is for narrow
+   * screens. A text input's intrinsic width (twenty characters of this mono
+   * face) otherwise sets the minimum of every grid track it sits in, and
+   * /pair, opened from a TV's QR code on a phone, came out wider than the
+   * phone. A percentage width takes that minimum away. */
+  width: 100%;
   font-family: var(--mono);
   font-size: 1.25rem;
   padding: 14px 16px;

@@ -67,6 +67,10 @@ type Service struct {
 
 	mu        sync.Mutex
 	streamers map[string]*channelStreamer
+
+	// forecasts is each channel's latest air-order forecast (forecast.go).
+	forecastMu sync.Mutex
+	forecasts  map[string]*forecastSlot
 }
 
 func NewService(opts ServiceOptions) *Service {
@@ -491,9 +495,10 @@ func (s *Service) ResetPlan(ctx context.Context, channelID string) error {
 
 // Owed is what the station currently owes the listener, most urgent first.
 //
-// Read straight from the store rather than from a decision, so it answers even
-// when nothing is on air — "why has my new episode not played yet" is usually
-// asked about a channel nobody is listening to.
+// Include episodes imported since the last playback decision. A long station
+// relay can go all night without a decision, while its podcast feeds keep
+// updating. Discovery happens in an in-memory copy so reading the queue never
+// changes listening credit or interrupts what is on air.
 func (s *Service) Owed(ctx context.Context, channelID string) ([]Obligation, error) {
 	if _, err := LoadChannel(ctx, s.db, channelID); err != nil {
 		return nil, err
@@ -530,7 +535,10 @@ func (s *Service) Owed(ctx context.Context, channelID string) ([]Obligation, err
 	// decides with. Best effort: a queue without judgements is the queue as it
 	// always was.
 	if engine, state, err := NewScheduler(deps).engineFor(ctx, channelID); err == nil {
-		judged := engine.JudgeOwed(ctx, deps.now(), state)
+		now := deps.now()
+		snapshot, current := engine.owedSnapshot(ctx, now, obligations)
+		queue = NewObligationQueue(current, now, plan.Freshness)
+		judged := snapshot.JudgeOwed(ctx, now, state)
 		for index := range queue.Pending {
 			judgement, ok := judged[queue.Pending[index].ItemRef]
 			if !ok {
@@ -560,7 +568,36 @@ func (s *Service) Owed(ctx context.Context, channelID string) ([]Obligation, err
 			queue.Pending[index].Held = &Hold{Rule: "source", Reason: "its source is disabled"}
 		}
 	}
+	// And when the station expects to air each one, which is the running
+	// order -- the queue's is urgency, and Held only says what could go out
+	// this second (forecast.go). Best effort and never waited for: an ask
+	// after anything changed starts a run and gets the last one that finished.
+	onAir := s.onAir(channelID)
+	if forecast, ok := s.airOrder(channelID, forecastKey(plan, sources, queue.Pending, onAir), onAir); ok {
+		for index := range queue.Pending {
+			if at, placed := forecast.Airings[queue.Pending[index].ItemRef]; placed {
+				queue.Pending[index].ExpectedAt = &at
+			}
+		}
+	}
 	return append(queue.Pending, queue.Satisfied...), nil
+}
+
+// onAir is what the channel's streamer is playing and when its clocks say it
+// ends, or nil when no streamer is running.
+func (s *Service) onAir(channelID string) *OnAir {
+	s.mu.Lock()
+	streamer, ok := s.streamers[channelID]
+	s.mu.Unlock()
+	if !ok {
+		return nil
+	}
+	item, startedAt, _, present := streamer.Now()
+	if !present {
+		return nil
+	}
+	ends, _ := streamer.EndsAt()
+	return &OnAir{Item: item, StartedAt: startedAt, EndsAt: ends}
 }
 
 // plan resolves the channel's plan without going through the API shape.

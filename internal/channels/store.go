@@ -890,6 +890,48 @@ func PlayLogTail(ctx context.Context, db *sql.DB, channelID string, window time.
 	return out, rows.Err()
 }
 
+// PlayLogSince is every play-log row that began after `since`, oldest first,
+// as the in-memory history holds them -- for a run that has to start from what
+// the station actually did rather than from nothing. A row still open (the
+// item on air) comes back with a zero EndedAt, exactly as stored.
+func PlayLogSince(ctx context.Context, db *sql.DB, channelID string, since time.Time) ([]MemoryPlay, error) {
+	channelID = strings.TrimSpace(channelID)
+	if channelID == "" {
+		return nil, ErrInvalidID
+	}
+	rows, err := db.QueryContext(ctx, `
+		SELECT source_id, item_ref, artist, category, started_at, ended_at, duration_seconds, exposure FROM channel_play_log
+		WHERE channel_id = ? AND started_at > ?
+		ORDER BY started_at ASC`,
+		channelID, since.UTC().Format(time.RFC3339),
+	)
+	if err != nil {
+		return nil, fmt.Errorf("query play log: %w", err)
+	}
+	defer rows.Close()
+	out := []MemoryPlay{}
+	for rows.Next() {
+		var sourceID, itemRef, artist, category, startedAt, endedAt string
+		var durationSeconds int64
+		var exposure float64
+		if err := rows.Scan(&sourceID, &itemRef, &artist, &category, &startedAt, &endedAt, &durationSeconds, &exposure); err != nil {
+			return nil, fmt.Errorf("scan play log: %w", err)
+		}
+		exposure = clampExposure(exposure)
+		out = append(out, MemoryPlay{
+			SourceID:        sourceID,
+			ItemRef:         itemRef,
+			Artist:          artist,
+			Category:        storedCategory(category),
+			StartedAt:       parseStoredTime(startedAt),
+			EndedAt:         parseStoredTime(endedAt),
+			DurationSeconds: int(durationSeconds),
+			Exposure:        &exposure,
+		})
+	}
+	return out, rows.Err()
+}
+
 // airedDuration is how much of the window a play-log row actually filled.
 //
 // One definition, used by every query that asks the question, because they must

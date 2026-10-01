@@ -10,6 +10,7 @@ import (
 
 	"github.com/bouliehaan/samo-server/internal/catalog"
 	"github.com/bouliehaan/samo-server/internal/metadata"
+	"github.com/bouliehaan/samo-server/internal/musicrelease"
 	"github.com/bouliehaan/samo-server/internal/storage"
 )
 
@@ -164,12 +165,25 @@ func (s *Service) backfillMissingCovers(ctx context.Context, dirs []string) (app
 		}
 
 		existing := s.existingTrackCover(ctx, target.trackID)
+		album := s.coverAlbumOf(ctx, target.trackID, target.releaseGroupID, target.artist, target.album)
+		albumArt, hasAlbumArt := s.albumCover(ctx, album, target.trackID)
+
+		// 0. A track of an album requested whole wears the album's cover once
+		//    it has one, over any art of its own: the album is one record, and
+		//    the sharer's embedded art on one of its tracks is no reason for
+		//    that track to look like another.
+		if album.requested != "" && hasAlbumArt && s.adoptCover(ctx, target.trackID, existing, albumArt, true) {
+			applied++
+			continue
+		}
 
 		// 1. Real local art that is NOT our own placeholder (a
 		//    successfully-downloaded cover, scanner sidecar/embedded art, or
-		//    an admin upload) → keep it, mark done, touch no network.
-		if existing.localPath != "" && !existing.isOwnPlaceholder {
+		//    an admin upload) → keep it, mark done, touch no network — and
+		//    it is the album's cover now if the album had none.
+		if existing.real() {
 			s.setTrackCoverStatus(ctx, target.trackID, coverStatusDone, false)
+			applied += s.shareAlbumCover(ctx, target.trackID, album)
 			continue
 		}
 
@@ -180,13 +194,14 @@ func (s *Service) backfillMissingCovers(ctx context.Context, dirs []string) (app
 		//    falls through to the chain.
 		if existing.overrideURL != "" && existing.localPath == "" {
 			if s.verifyCoverURL(ctx, existing.overrideURL) {
-				if err := s.applyTrackCover(ctx, target.trackID, existing.overrideURL); err != nil {
+				if err := s.applyTrackCover(ctx, target.trackID, catalog.Image{URL: existing.overrideURL}); err != nil {
 					s.logger("explo: re-adopt cover failed for track %s: %v", target.trackID, err)
 					s.setTrackCoverStatus(ctx, target.trackID, coverStatusPending, true)
 					continue
 				}
 				s.setTrackCoverStatus(ctx, target.trackID, coverStatusDone, true)
 				applied++
+				applied += s.shareAlbumCover(ctx, target.trackID, album)
 				continue
 			}
 		}
@@ -212,15 +227,24 @@ func (s *Service) backfillMissingCovers(ctx context.Context, dirs []string) (app
 			continue
 		}
 
-		// 3. Try the source chain for real art.
+		// 2.75 Another drop identified as the same album already has its
+		//      art: share it, with no network at all (see albumCover).
+		if hasAlbumArt && s.adoptCover(ctx, target.trackID, existing, albumArt, true) {
+			applied++
+			continue
+		}
+
+		// 3. Try the source chain for real art. The first track of an album
+		//    to get through gives it to the rest at once.
 		if url := s.resolveCoverURL(ctx, target); url != "" {
-			if err := s.applyTrackCover(ctx, target.trackID, url); err != nil {
+			if err := s.applyTrackCover(ctx, target.trackID, catalog.Image{URL: url}); err != nil {
 				s.logger("explo: apply cover failed for track %s: %v", target.trackID, err)
 				s.setTrackCoverStatus(ctx, target.trackID, coverStatusPending, true)
 				continue
 			}
 			s.setTrackCoverStatus(ctx, target.trackID, coverStatusDone, true)
 			applied++
+			applied += s.shareAlbumCover(ctx, target.trackID, album)
 			continue
 		}
 
@@ -254,19 +278,21 @@ func (s *Service) findCoverTargets(ctx context.Context, dirs []string) ([]coverT
 		       MAX(et.musicbrainz_release_group_id),
 		       MAX(et.musicbrainz_recording_id),
 		       MAX(et.matched_artist),
-		       COALESCE(MAX(ma.title), ''),
+		       MAX(et.matched_album),
 		       MAX(et.matched_title),
 		       MAX(et.cover_status)
 		FROM explo_tracks et
 		JOIN music_tracks mt ON mt.id = et.track_id
 		JOIN media_files mf ON mf.track_id = mt.id
-		LEFT JOIN music_albums ma ON ma.id = mt.album_id
 		WHERE et.cover_status IN ('', '%s', '%s')
 		  AND et.status IN ('matched', 'matched-fallback', 'unmatched', 'error')
 		  AND et.cover_attempts < %d
 		  AND (et.cover_attempted_at = '' OR %s)
 		  AND %s
-		GROUP BY et.track_id`,
+		GROUP BY et.track_id
+		ORDER BY EXISTS (
+		  SELECT 1 FROM explo_requests er WHERE er.track_id = et.track_id AND er.state = 'identifying'
+		) DESC, et.track_id`,
 		coverStatusPending, coverStatusPlaceholder,
 		exploMaxCoverAttempts,
 		exploCoverEligibilityExpr("et.cover_attempted_at"),
@@ -289,11 +315,10 @@ func (s *Service) findCoverTargets(ctx context.Context, dirs []string) ([]coverT
 		return nil, err
 	}
 
-	// The scanner's album title is often drop-folder noise ("2026-28"); the
-	// identified title lives in the album's metadata override. Overlay it so
-	// the text-searched album rungs query for the real record.
+	// Prefer the per-track ledger. Older rows may have the identified album
+	// only in an override; never use the scanner's unverified album tag.
 	for index := range targets {
-		if title := s.overriddenAlbumTitle(ctx, targets[index].albumID); title != "" {
+		if title := s.overriddenAlbumTitle(ctx, targets[index].albumID); targets[index].album == "" && title != "" && title != "Unknown Album" {
 			targets[index].album = title
 		}
 	}
@@ -307,6 +332,192 @@ func exploCoverEligibilityExpr(column string) string {
 		column, exploBackoffCaseOver("et.cover_attempts", exploCoverBackoff))
 }
 
+// An album wears one cover. Covers are resolved per track (see the state
+// machine above), but tracks identified as one album — above all the tracks of
+// an album requested whole — are not strangers: the first real cover any of
+// them lands is the album's cover. Every other track of the album with no real
+// art takes it that moment (shareAlbumCover), and a track that comes up for a
+// pass later takes it before asking any source (albumCover), so the source
+// chain runs per track only until one track of the album gets through.
+//
+// Before this, each track fetched its own copy of the same cover and only
+// looked at its siblings on its own next try. A source that refused some of
+// those fetches — Deezer's image CDN refuses the VPN in fits — left those
+// tracks on placeholders for the length of their backoff, and a request kept
+// after its hour carried the placeholder into the library: real art on one
+// track of Puer Aeternus, a gradient tile on the next.
+//
+// "Album" is never the path-derived album the scanner groups a drop folder
+// into (the reason covers are per track at all). It is the album a track was
+// requested as part of, else the album identification put it on: the same
+// release group, or the same album and artist names.
+type coverAlbum struct {
+	// requested is the album id of the whole-album request a drop was
+	// downloaded for, once identification credited the drop to that album.
+	requested string
+	// The identified album, for any other drop.
+	releaseGroupID, artist, title string
+}
+
+// albumTrack is another track of a cover album: a drop, with its cover
+// status, or the library copy of a requested track, with none.
+type albumTrack struct {
+	id          string
+	coverStatus string
+}
+
+// requestedAlbumTrackSQL holds, over explo_requests er and the drop's ledger
+// row et, when a drop is the track of the album it was requested with:
+// identified, and credited to that album as pinRequestedAlbum, pinLedgerAlbum
+// and adoptCatalogIdentity credit it. A wrong download keeps its real
+// identity, so it never takes the cover of the album it is not on.
+const requestedAlbumTrackSQL = `et.status IN ('matched', 'matched-fallback')
+	AND (lower(et.matched_album) = lower(er.album)
+	  OR (et.musicbrainz_release_group_id <> '' AND et.musicbrainz_release_group_id = er.album_id))`
+
+// coverAlbumOf is the album trackID shares its cover with, given the
+// identified album on its ledger row.
+func (s *Service) coverAlbumOf(ctx context.Context, trackID, releaseGroupID, artist, album string) coverAlbum {
+	var requested string
+	err := s.db.QueryRowContext(ctx, `
+		SELECT er.album_id FROM explo_requests er JOIN explo_tracks et ON et.track_id = er.track_id
+		WHERE er.track_id = ? AND er.album_id <> '' AND `+requestedAlbumTrackSQL+`
+		ORDER BY er.updated_at DESC LIMIT 1`, trackID).Scan(&requested)
+	switch {
+	case err == nil:
+		return coverAlbum{requested: requested}
+	case err != sql.ErrNoRows:
+		s.logger("explo: requested album lookup failed for track %s: %v", trackID, err)
+	}
+	releaseGroupID, artist, album = strings.TrimSpace(releaseGroupID), strings.TrimSpace(artist), strings.TrimSpace(album)
+	if musicrelease.CompilationTitle(album) {
+		album = ""
+	}
+	return coverAlbum{releaseGroupID: releaseGroupID, artist: artist, title: album}
+}
+
+// albumTracks lists the album's tracks other than trackID: first the drops
+// whose cover pass finished, in the order they finished, then the rest. For a
+// requested album that includes the library copies of its kept tracks — a
+// copy kept before the album had a cover has none, and nothing else will ever
+// give it one — but never a track the library already had, which keeps the
+// cover it came with.
+func (s *Service) albumTracks(ctx context.Context, album coverAlbum, trackID string) []albumTrack {
+	var rows *sql.Rows
+	var err error
+	switch {
+	case album.requested != "":
+		rows, err = s.db.QueryContext(ctx, `
+			SELECT id, status FROM (
+			  SELECT er.track_id AS id, et.cover_status AS status, et.cover_attempted_at AS at
+			  FROM explo_requests er JOIN explo_tracks et ON et.track_id = er.track_id
+			  WHERE er.album_id = ? AND `+requestedAlbumTrackSQL+`
+			  UNION ALL
+			  SELECT library_track_id, '', '' FROM explo_requests
+			  WHERE album_id = ? AND track_id <> '' AND library_track_id <> ''
+			) tracks
+			WHERE id <> ?
+			ORDER BY status = ? DESC, at, id`,
+			album.requested, album.requested, trackID, coverStatusDone)
+	case album.releaseGroupID != "" || (album.title != "" && album.artist != ""):
+		rows, err = s.db.QueryContext(ctx, `
+			SELECT et.track_id, et.cover_status FROM explo_tracks et
+			WHERE et.track_id <> ?
+			  AND ((? <> '' AND et.musicbrainz_release_group_id = ?)
+			    OR (? <> '' AND ? <> '' AND lower(et.matched_album) = lower(?) AND lower(et.matched_artist) = lower(?)))
+			ORDER BY et.cover_status = ? DESC, et.cover_attempted_at, et.track_id`,
+			trackID, album.releaseGroupID, album.releaseGroupID,
+			album.title, album.artist, album.title, album.artist, coverStatusDone)
+	default:
+		return nil
+	}
+	if err != nil {
+		s.logger("explo: album tracks lookup failed for track %s: %v", trackID, err)
+		return nil
+	}
+	defer rows.Close()
+	var tracks []albumTrack
+	seen := map[string]bool{}
+	for rows.Next() {
+		var track albumTrack
+		if rows.Scan(&track.id, &track.coverStatus) != nil || seen[track.id] {
+			continue // a drop and its kept copy can be one track
+		}
+		seen[track.id] = true
+		tracks = append(tracks, track)
+	}
+	return tracks
+}
+
+// albumCover is the cover trackID's album already wears: the real art of the
+// first of its other tracks to have any.
+func (s *Service) albumCover(ctx context.Context, album coverAlbum, trackID string) (trackCoverState, bool) {
+	for _, track := range s.albumTracks(ctx, album, trackID) {
+		if track.coverStatus == coverStatusPending || track.coverStatus == coverStatusPlaceholder {
+			continue // still waiting on the sources itself
+		}
+		if cover := s.existingTrackCover(ctx, track.id); cover.real() {
+			return cover, true
+		}
+	}
+	return trackCoverState{}, false
+}
+
+// shareAlbumCover gives the real cover trackID wears to every other track of
+// its album that has none — drops waiting on the sources or wearing a
+// placeholder, and library copies kept without art — and reports how many
+// took it. Art a track already has is never replaced here.
+func (s *Service) shareAlbumCover(ctx context.Context, trackID string, album coverAlbum) int {
+	cover := s.existingTrackCover(ctx, trackID)
+	if !cover.real() {
+		return 0
+	}
+	shared := 0
+	for _, track := range s.albumTracks(ctx, album, trackID) {
+		if track.coverStatus == coverStatusDone {
+			continue
+		}
+		existing := s.existingTrackCover(ctx, track.id)
+		if existing.real() {
+			continue
+		}
+		if s.adoptCover(ctx, track.id, existing, cover, false) {
+			shared++
+		}
+	}
+	if shared > 0 {
+		s.logger("explo: track %s's cover given to %d other track(s) of its album", trackID, shared)
+	}
+	return shared
+}
+
+// adoptCover makes trackID wear cover — another track's real art, already on
+// disk, so no network — and finishes its cover pass. Reports whether it now
+// wears it.
+func (s *Service) adoptCover(ctx context.Context, trackID string, existing, cover trackCoverState, bumpAttempts bool) bool {
+	if existing.localPath != cover.localPath {
+		if err := s.applyTrackCover(ctx, trackID, cover.image); err != nil {
+			s.logger("explo: share album cover with track %s failed: %v", trackID, err)
+			return false
+		}
+	}
+	s.setTrackCoverStatus(ctx, trackID, coverStatusDone, bumpAttempts)
+	return true
+}
+
+// adoptAlbumCover gives a drop the cover its album already wears (albumCover),
+// and reports whether it now has real art.
+func (s *Service) adoptAlbumCover(ctx context.Context, trackID string) bool {
+	var releaseGroupID, artist, album string
+	if err := s.db.QueryRowContext(ctx, `
+		SELECT COALESCE(musicbrainz_release_group_id, ''), COALESCE(matched_artist, ''), COALESCE(matched_album, '')
+		FROM explo_tracks WHERE track_id = ?`, trackID).Scan(&releaseGroupID, &artist, &album); err != nil {
+		return false
+	}
+	cover, ok := s.albumCover(ctx, s.coverAlbumOf(ctx, trackID, releaseGroupID, artist, album), trackID)
+	return ok && s.adoptCover(ctx, trackID, s.existingTrackCover(ctx, trackID), cover, false)
+}
+
 // resolveCoverURL walks the source chain and returns the first URL whose
 // image VERIFIABLY downloaded into the local cover store, or "" when every
 // source missed. Order is trust-descending: CAA is keyed by the exact
@@ -314,6 +525,9 @@ func exploCoverEligibilityExpr(column string) string {
 // text searches gated by a strict name match.
 func (s *Service) resolveCoverURL(ctx context.Context, target coverTarget) string {
 	releaseGroupID := strings.TrimSpace(target.releaseGroupID)
+	if musicrelease.CompilationTitle(target.album) {
+		releaseGroupID, target.album = "", ""
+	}
 	var releaseIDs []string
 	refsLoaded := false
 
@@ -328,6 +542,9 @@ func (s *Service) resolveCoverURL(ctx context.Context, target coverTarget) strin
 		} else {
 			releaseGroupID = refs.ReleaseGroupID
 			releaseIDs = refs.ReleaseIDs
+			if target.album == "" {
+				target.album = refs.ReleaseGroupTitle
+			}
 			refsLoaded = true
 		}
 	}
@@ -346,7 +563,7 @@ func (s *Service) resolveCoverURL(ctx context.Context, target coverTarget) strin
 		refs, err := fetchRecordingReleaseRefs(ctx, s.httpClient, target.recordingMBID)
 		if err != nil {
 			s.logger("explo: musicbrainz release lookup failed for track %s: %v", target.trackID, err)
-		} else {
+		} else if refs.ReleaseGroupID == releaseGroupID {
 			releaseIDs = refs.ReleaseIDs
 		}
 	}
@@ -364,14 +581,8 @@ func (s *Service) resolveCoverURL(ctx context.Context, target coverTarget) strin
 		}
 	}
 
-	// Album-level text searches first (they return the album's own art when
-	// the album identity is sound), then song-level searches — the
-	// compilation-proof rungs. A classic hit's MusicBrainz recording often
-	// lives only on sampler release groups, so every album-identity rung
-	// above yields nothing (or worse, sampler art the name gate rejects);
-	// searching by artist + TRACK title returns the canonical release's
-	// artwork directly. This is what fixes "Ordinary World" and "I Love the
-	// Nightlife" rendering artless forever.
+	// Song searches must agree with the resolved album as well as the song;
+	// a song can also appear on compilations with unrelated artwork.
 	if url := s.verifiedTextSearchCover(ctx, target.trackID, "itunes album", func(ctx context.Context) (string, error) {
 		s.itunesPacer.wait(ctx, itunesMinInterval)
 		return lookupITunesAlbumCover(ctx, s.httpClient, target.artist, target.album)
@@ -386,13 +597,13 @@ func (s *Service) resolveCoverURL(ctx context.Context, target coverTarget) strin
 	}
 	if url := s.verifiedTextSearchCover(ctx, target.trackID, "itunes song", func(ctx context.Context) (string, error) {
 		s.itunesPacer.wait(ctx, itunesMinInterval)
-		return lookupITunesTrackCover(ctx, s.httpClient, target.artist, target.title)
+		return lookupITunesTrackCover(ctx, s.httpClient, target.artist, target.title, target.album)
 	}); url != "" {
 		return url
 	}
 	return s.verifiedTextSearchCover(ctx, target.trackID, "deezer track", func(ctx context.Context) (string, error) {
 		s.deezerPacer.wait(ctx, deezerMinInterval)
-		return lookupDeezerTrackCover(ctx, s.httpClient, target.artist, target.title)
+		return lookupDeezerTrackCover(ctx, s.httpClient, target.artist, target.title, target.album)
 	})
 }
 
@@ -424,18 +635,19 @@ func (s *Service) verifyCoverURL(ctx context.Context, url string) bool {
 	return err == nil && image != nil && strings.TrimSpace(image.Path) != ""
 }
 
-// applyTrackCover persists a VERIFIED cover URL as the track's override
-// through the normal apply pipeline (which resolves it from the cover store's
-// cache to a local path, so it serves same-origin). Applied to the TRACK, not
-// its album, so each explo drop shows its own art.
-func (s *Service) applyTrackCover(ctx context.Context, trackID, url string) error {
+// applyTrackCover persists a VERIFIED cover as the track's override through
+// the normal apply pipeline (which resolves a URL from the cover store's cache
+// to a local path, so it serves same-origin; a cover shared from another track
+// arrives with its local path already). Applied to the TRACK, not its album,
+// so each explo drop shows its own art.
+func (s *Service) applyTrackCover(ctx context.Context, trackID string, cover catalog.Image) error {
 	return storage.Retry(ctx, exploWriteAttempts, func() error {
 		_, err := s.metadataApply.Apply(ctx, metadata.MetadataApplyRequest{
 			TargetKind: string(metadata.ApplyTargetMusicTrack),
 			TargetID:   trackID,
 			// ID satisfies the apply validation (needs a Title or ID); only the
 			// "cover" field is applied, so nothing else on the track moves.
-			Candidate:          metadata.SearchResult{Provider: "explo", MediaType: "recording", ID: trackID, Cover: &catalog.Image{URL: url}},
+			Candidate:          metadata.SearchResult{Provider: "explo", MediaType: "recording", ID: trackID, Cover: &cover},
 			Fields:             []string{"cover"},
 			DeferCatalogReload: true,
 		})
@@ -523,6 +735,16 @@ type trackCoverState struct {
 	localPath        string
 	overrideURL      string
 	isOwnPlaceholder bool
+	// image is the cover entry whose file is localPath, with the URL it came
+	// from when it came from one: what another track of the album is given
+	// when it shares this cover.
+	image catalog.Image
+}
+
+// real reports whether the track wears real art: a file on disk that is not
+// its own generated placeholder.
+func (c trackCoverState) real() bool {
+	return c.localPath != "" && !c.isOwnPlaceholder
 }
 
 // existingTrackCover inspects the track's effective cover. Precedence mirrors
@@ -541,7 +763,8 @@ func (s *Service) existingTrackCover(ctx context.Context, trackID string) trackC
 		var fields map[string]json.RawMessage
 		if json.Unmarshal([]byte(fieldsJSON), &fields) == nil {
 			if coverRaw, ok := fields["cover"]; ok {
-				state.overrideURL, state.localPath = firstImageURLAndPathOnDisk(string(coverRaw))
+				state.overrideURL, state.image = firstImageURLAndImageOnDisk(string(coverRaw))
+				state.localPath = state.image.Path
 				if state.localPath != "" {
 					state.isOwnPlaceholder = s.isPlaceholderCoverPath(ctx, trackID, state.localPath)
 				}
@@ -552,8 +775,9 @@ func (s *Service) existingTrackCover(ctx context.Context, trackID string) trackC
 
 	var imagesJSON string
 	if err := s.db.QueryRowContext(ctx,
-		`SELECT images_json FROM music_tracks WHERE id = ?`, trackID).Scan(&imagesJSON); err == nil {
-		_, state.localPath = firstImageURLAndPathOnDisk(imagesJSON)
+		`SELECT COALESCE(images_json, '') FROM music_tracks WHERE id = ?`, trackID).Scan(&imagesJSON); err == nil {
+		_, state.image = firstImageURLAndImageOnDisk(imagesJSON)
+		state.localPath = state.image.Path
 		// Scanner/embedded art is never our generated placeholder.
 	}
 	return state
@@ -578,19 +802,19 @@ func (s *Service) isPlaceholderCoverPath(ctx context.Context, trackID, path stri
 	return strings.TrimSpace(image.Path) != "" && image.Path == path
 }
 
-// firstImageURLAndPathOnDisk decodes a JSON image list (or single image) and
-// returns the first non-empty external URL and the first local path that
-// exists as a non-empty file. Either may be "".
-func firstImageURLAndPathOnDisk(rawJSON string) (url, path string) {
+// firstImageURLAndImageOnDisk decodes a JSON image list (or single image) and
+// returns the first non-empty external URL and the first image whose local
+// path exists as a non-empty file. Either may be empty.
+func firstImageURLAndImageOnDisk(rawJSON string) (url string, onDisk catalog.Image) {
 	rawJSON = strings.TrimSpace(rawJSON)
 	if rawJSON == "" {
-		return "", ""
+		return "", catalog.Image{}
 	}
 	var images []catalog.Image
 	if err := json.Unmarshal([]byte(rawJSON), &images); err != nil {
 		var single catalog.Image
 		if json.Unmarshal([]byte(rawJSON), &single) != nil {
-			return "", ""
+			return "", catalog.Image{}
 		}
 		images = []catalog.Image{single}
 	}
@@ -600,15 +824,16 @@ func firstImageURLAndPathOnDisk(rawJSON string) (url, path string) {
 				url = u
 			}
 		}
-		if path == "" {
+		if onDisk.Path == "" {
 			if p := strings.TrimSpace(image.Path); p != "" {
 				if info, err := os.Stat(p); err == nil && !info.IsDir() && info.Size() > 0 {
-					path = p
+					onDisk = image
+					onDisk.Path = p
 				}
 			}
 		}
 	}
-	return url, path
+	return url, onDisk
 }
 
 // overriddenAlbumTitle returns the identified album title from the album's

@@ -368,5 +368,9 @@ func (s *Service) Composite(ctx context.Context, playlistID, imagesHash string, 
 		return nil, fmt.Errorf("ffmpeg composite failed: %w, output: %s", err, string(output))
 	}
 
-	return s.finalizeExtract(ctx, "composite:"+playlistID, imagesHash, id, dest)
+	// Both id and source_path are unique in extracted_covers. The image ID
+	// includes the cover revision, so its source key must too: a fixed
+	// playlist key collides with the previous collage whenever its art changes.
+	// Keep old rows intact so their immutable image IDs still resolve.
+	return s.finalizeExtract(ctx, "composite:"+playlistID+":"+id, imagesHash, id, dest)
 }

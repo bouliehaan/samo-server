@@ -530,6 +530,9 @@ func (e *Engine) episodeURL(ctx context.Context, ep catalog.PodcastEpisode) (str
 	if strings.TrimSpace(ep.EnclosureURL) == "" {
 		return "", errors.New("episode has no playable source")
 	}
+	if e.Simulated {
+		return ep.EnclosureURL, nil
+	}
 	return resolveEnclosure(ctx, ep.EnclosureURL), nil
 }
 

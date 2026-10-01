@@ -3,6 +3,7 @@ package api
 import (
 	"net/http"
 	"net/url"
+	"os"
 	"strings"
 
 	"github.com/bouliehaan/samo-server/internal/catalog"
@@ -22,27 +23,35 @@ func (s *Server) serveMusicPlaylistCover(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
+	// This route names a playlist, whose source artwork can change without a
+	// playlist edit (metadata repair/download). It is not an immutable image ID.
+	w.Header().Set("Cache-Control", "private, no-cache")
 	images := s.catalog.MusicPlaylistCoverImages(id)
-	if len(images) == 4 {
-		hashParts, sourcePaths := s.playlistCoverCompositeSources(r, images)
+	wantsGrid := len(images) == 4
+	hashParts, sourcePaths := s.playlistCoverCompositeSources(r, images)
+	if len(sourcePaths) > 0 {
+		// Single covers and a failed compositor need the repaired local paths
+		// too; falling back to the original stale records would return a 404.
+		images = make([]catalog.Image, len(sourcePaths))
+		for i, path := range sourcePaths {
+			images[i] = catalog.Image{ID: hashParts[i], Path: path}
+		}
+	} else {
+		// A remote cover may still be usable by the client if its download
+		// failed here. Never let an obsolete local path hide that fallback.
+		for i := range images {
+			images[i].Path = ""
+		}
+	}
+	if wantsGrid {
 		if len(sourcePaths) == 4 {
-			imagesHash := strings.Join(hashParts, ",")
-			composite, err := s.coversService().Composite(r.Context(), id, imagesHash, sourcePaths)
+			composite, err := s.coversService().Composite(r.Context(), id, strings.Join(hashParts, ","), sourcePaths)
 			if err == nil {
 				images = []catalog.Image{*composite}
 			} else {
-				// The 2x2 grid failed to render (a common cause is ffmpeg
-				// choking on a cover that is still a remote URL instead of a
-				// downloaded local file). We deliberately fall through and serve
-				// the first cover rather than error the request — but log it, so
-				// the degrade from grid to single tile is diagnosable instead of
-				// silent.
 				log.Warnf("playlist cover %s: 2x2 composite failed, serving single cover: %v", id, err)
 			}
 		} else {
-			// Fewer than 4 servable sources (e.g. covers not yet backfilled)
-			// means no grid is possible; serving one cover is expected here, but
-			// log it so "the Explore tile isn't a grid" is explainable.
 			log.Infof("playlist cover %s: %d/4 servable sources, serving single cover", id, len(sourcePaths))
 		}
 	}
@@ -55,27 +64,36 @@ func (s *Server) playlistCoverCompositeSources(r *http.Request, images []catalog
 	sourcePaths := make([]string, 0, len(images))
 
 	for _, img := range images {
-		path := strings.TrimSpace(img.Path)
-		if path == "" {
-			path = strings.TrimSpace(img.URL)
+		// Stored paths can be stale and URL is often just provenance. Resolve
+		// the ID independently before asking ffmpeg to open a remote source.
+		candidates := []catalog.Image{img}
+		if resolved, ok := s.resolveCatalogImageRecord(r.Context(), []catalog.Image{{ID: img.ID}}); ok {
+			candidates = append(candidates, resolved)
 		}
-
-		hashID := strings.TrimSpace(img.ID)
+		path := ""
+		for _, candidate := range candidates {
+			if info, err := os.Stat(candidate.Path); err == nil && !info.IsDir() {
+				path = candidate.Path
+				break
+			}
+		}
 		if path == "" {
-			if resolved, ok := s.resolveCatalogImageRecord(r.Context(), []catalog.Image{img}); ok {
-				path = strings.TrimSpace(resolved.Path)
-				if path == "" {
-					path = strings.TrimSpace(resolved.URL)
+			for _, candidate := range candidates {
+				if strings.TrimSpace(candidate.URL) == "" {
+					continue
 				}
-				if resolvedID := strings.TrimSpace(resolved.ID); resolvedID != "" {
-					hashID = resolvedID
+				// Use the bounded, cached cover downloader; ffmpeg should only
+				// see local image files, not redirects or remote HTTP failures.
+				if downloaded, err := s.coversService().DownloadFromURL(r.Context(), candidate.URL); err == nil {
+					path = downloaded.Path
+					break
 				}
 			}
 		}
-
 		if path == "" {
 			continue
 		}
+		hashID := strings.TrimSpace(img.ID)
 		if hashID == "" {
 			hashID = path
 		}

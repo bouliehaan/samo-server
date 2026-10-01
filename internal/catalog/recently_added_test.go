@@ -12,7 +12,9 @@ func TestListRecentlyAddedMergesMediaKinds(t *testing.T) {
 
 	service := NewService(Seed{
 		MusicAlbums: []MusicAlbum{
-			{ID: "album-1", Title: "Album", DisplayArtist: "Artist", AddedAt: &middle},
+			{ID: "album-1", Title: "Album", DisplayArtist: "Artist", TrackCount: 10, AddedAt: &middle},
+			// Its files are gone and the row outlived them: nothing to open.
+			{ID: "album-empty", Title: "Emptied", DisplayArtist: "Artist", AddedAt: &newest},
 		},
 		Audiobooks: []AudiobookItem{
 			{

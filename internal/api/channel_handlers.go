@@ -553,7 +553,13 @@ func (s *Server) channelObligations(w http.ResponseWriter, r *http.Request) {
 			pending++
 		}
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"items": owed, "pending": pending, "total": len(owed)})
+	body := map[string]any{"items": owed, "pending": pending, "total": len(owed)}
+	// Which run the items' expectedAt came from, so a client can tell a
+	// forecast made a minute ago from none at all.
+	if forecast, ok := s.channels.Forecasted(r.PathValue("id")); ok {
+		body["forecast"] = forecast
+	}
+	writeJSON(w, http.StatusOK, body)
 }
 
 // channelWhy answers "why the hell did it play that".

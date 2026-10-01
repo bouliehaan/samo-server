@@ -1,0 +1,1 @@
+const e={confirm:"confirmă",create:"creează",biography:"biografie",areYouSure:"ești sigur?",no:"nu",name:"nume",ok:"ok",note:"notă",yes:"da",explicit:"explicit",year:"an",menu:"meniu"},o={common:e};export{e as common,o as default};

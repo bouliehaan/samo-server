@@ -9,6 +9,8 @@ import (
 	"net/url"
 	"strings"
 	"time"
+
+	"github.com/bouliehaan/samo-server/internal/musicrelease"
 )
 
 // itunesSearchURL is a var so tests can point it at an httptest server.
@@ -30,7 +32,7 @@ const itunesMinInterval = 3500 * time.Millisecond
 func lookupITunesAlbumCover(ctx context.Context, client *http.Client, artist, album string) (string, error) {
 	artist = strings.TrimSpace(artist)
 	album = strings.TrimSpace(album)
-	if artist == "" || album == "" {
+	if artist == "" || album == "" || musicrelease.CompilationTitle(album) {
 		return "", nil
 	}
 	values := url.Values{
@@ -68,7 +70,7 @@ func lookupITunesAlbumCover(ctx context.Context, client *http.Client, artist, al
 		if result.ArtworkURL100 == "" {
 			continue
 		}
-		if !coverNamesMatch(result.ArtistName, artist) || !coverNamesMatch(result.CollectionName, album) {
+		if !coverNamesMatch(result.ArtistName, artist) || !coverNamesMatch(result.CollectionName, album) || musicrelease.CompilationTitle(result.CollectionName) {
 			continue
 		}
 		return strings.Replace(result.ArtworkURL100, "100x100", "600x600", 1), nil
@@ -76,16 +78,11 @@ func lookupITunesAlbumCover(ctx context.Context, client *http.Client, artist, al
 	return "", nil
 }
 
-// lookupITunesTrackCover searches the iTunes Search API at the SONG level and
-// returns the matching track's artwork. This is the rung that rescues classic
-// hits: their MusicBrainz recordings often sit only on compilation release
-// groups (so every album-identity rung yields sampler art or nothing), but a
-// song search by artist + title returns the canonical release's artwork
-// directly. Same trust gate as the album rung: both names must loosely match.
-func lookupITunesTrackCover(ctx context.Context, client *http.Client, artist, title string) (string, error) {
+// Song artwork is usable only when its album matches the resolved record.
+func lookupITunesTrackCover(ctx context.Context, client *http.Client, artist, title, album string) (string, error) {
 	artist = strings.TrimSpace(artist)
 	title = strings.TrimSpace(title)
-	if artist == "" || title == "" {
+	if artist == "" || title == "" || strings.TrimSpace(album) == "" || musicrelease.CompilationTitle(album) {
 		return "", nil
 	}
 	values := url.Values{
@@ -111,9 +108,10 @@ func lookupITunesTrackCover(ctx context.Context, client *http.Client, artist, ti
 	}
 	var payload struct {
 		Results []struct {
-			ArtistName    string `json:"artistName"`
-			TrackName     string `json:"trackName"`
-			ArtworkURL100 string `json:"artworkUrl100"`
+			ArtistName     string `json:"artistName"`
+			TrackName      string `json:"trackName"`
+			CollectionName string `json:"collectionName"`
+			ArtworkURL100  string `json:"artworkUrl100"`
 		} `json:"results"`
 	}
 	if err := json.Unmarshal(body, &payload); err != nil {
@@ -123,7 +121,7 @@ func lookupITunesTrackCover(ctx context.Context, client *http.Client, artist, ti
 		if result.ArtworkURL100 == "" {
 			continue
 		}
-		if !coverNamesMatch(result.ArtistName, artist) || !coverNamesMatch(result.TrackName, title) {
+		if !coverNamesMatch(result.ArtistName, artist) || !coverNamesMatch(result.TrackName, title) || !coverNamesMatch(result.CollectionName, album) || musicrelease.CompilationTitle(result.CollectionName) {
 			continue
 		}
 		return strings.Replace(result.ArtworkURL100, "100x100", "600x600", 1), nil

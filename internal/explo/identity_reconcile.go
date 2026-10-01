@@ -9,6 +9,7 @@ import (
 	"github.com/bouliehaan/samo-server/internal/catalog"
 	"github.com/bouliehaan/samo-server/internal/catalogstore"
 	"github.com/bouliehaan/samo-server/internal/metadata"
+	"github.com/bouliehaan/samo-server/internal/musicrelease"
 )
 
 // identityCheckBatch caps how many contradicted rows one identity check
@@ -78,6 +79,9 @@ func identityAgrees(match identifiedTrack, evidence identityEvidence) bool {
 // contradicts a correct identity too; that row is re-checked once per boot,
 // comes out the same, and changes nothing.
 func identityContradicted(row ledgerIdentity) bool {
+	if musicrelease.CompilationTitle(row.match.Album) {
+		return true
+	}
 	evidence := row.candidate.evidence()
 	if !identityAgrees(row.match, evidence) {
 		return true
@@ -91,6 +95,7 @@ func identityContradicted(row ledgerIdentity) bool {
 func identityDiffers(a, b identifiedTrack) bool {
 	eq := func(x, y string) bool { return strings.TrimSpace(x) == strings.TrimSpace(y) }
 	return !eq(a.MusicBrainzRecordingID, b.MusicBrainzRecordingID) ||
+		!eq(a.MusicBrainzReleaseGroupID, b.MusicBrainzReleaseGroupID) ||
 		!eq(a.Title, b.Title) || !eq(a.Artist, b.Artist) || !eq(a.Album, b.Album)
 }
 

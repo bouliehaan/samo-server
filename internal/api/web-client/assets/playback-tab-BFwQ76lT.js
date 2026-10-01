@@ -1,0 +1,1 @@
+import{r,e as s,j as o,S as a,g0 as m}from"./main-BCL7l6Ne.js";import"./index-X39gNgVV.js";import"./index-DWeNNm-O.js";const p=r.memo(()=>{const e=s.c(1);let t;return e[0]===Symbol.for("react.memo_cache_sentinel")?(t=o.jsx(a,{gap:"md",children:o.jsx(m,{})}),e[0]=t):t=e[0],t});export{p as PlaybackTab};

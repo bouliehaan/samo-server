@@ -274,7 +274,7 @@ flowchart TD
     S18 --> S19["preferNoStub: prefer items whose remainder is 0 or ≥ shortest shelf item, ceiling = PlayCeiling"]
     S19 --> S20["scoreEnv + adoptSeparation → scoreCandidates §6"]
     S20 --> S21["chooseCandidate: band = 15% of top; if top is owed → contenders = owed with Urgency within 0.001 of the most urgent; weighted draw"]
-    S21 --> S22["Materialise winner, then next scored on failure → unplayable recorded"]
+    S21 --> S22["Materialise winner; on failure record unplayable and choose again from remaining candidates in queue order"]
     S22 --> S23["applyDuration: anchored → IsRuleDriven, MaxDuration = anchor end<br/>cutAtBoundary → MaxDuration = window, 3 s fade<br/>unmeasured non-live → MaxDuration = window<br/>live → playMinutes/PlayCeiling/limit remaining"]
     S23 --> S24["Exposure = ExposureOver block, now..now+plannedSpan"]
     S24 --> SD(["item + record"])

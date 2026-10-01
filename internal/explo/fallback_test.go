@@ -302,7 +302,7 @@ func TestIdentifyByTextSearchDerivedOnlyStillMatchesWithoutAlbum(t *testing.T) {
 			{
 				Authors:         []catalog.ContributorRef{{Name: "Alicia Bridges"}},
 				DurationSeconds: 187,
-				ExternalIDs:     catalog.ExternalIDs{MusicBrainzRecordingID: "mb-comp-only"},
+				ExternalIDs:     catalog.ExternalIDs{MusicBrainzRecordingID: "mb-comp-only", MusicBrainzReleaseGroupID: "rg-comp"},
 				Raw:             map[string]any{"releaseTitle": "Ultimate Disco: 30th Anniversary Collection", "releaseIsDerived": true},
 				Score:           100,
 				Title:           "I Love the Nightlife (Disco Round)",
@@ -315,7 +315,7 @@ func TestIdentifyByTextSearchDerivedOnlyStillMatchesWithoutAlbum(t *testing.T) {
 	if err != nil || !ok {
 		t.Fatalf("ok=%v err=%v, want match (identity is still correct, only the album title is unusable)", ok, err)
 	}
-	if match.Album != "" {
+	if match.Album != "" || match.MusicBrainzReleaseGroupID != "" {
 		t.Fatalf("album = %q, want empty — a sampler title must never become the track's album", match.Album)
 	}
 	if match.Title == "" || match.Artist == "" {

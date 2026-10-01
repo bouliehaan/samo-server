@@ -29,6 +29,7 @@ export default defineConfig({
         app: resolve(import.meta.dirname, "src/app.js"),
         setup: resolve(import.meta.dirname, "src/setup.js"),
         login: resolve(import.meta.dirname, "src/login.js"),
+        pair: resolve(import.meta.dirname, "src/pair.js"),
       },
       output: {
         entryFileNames: "[name]-[hash].js",

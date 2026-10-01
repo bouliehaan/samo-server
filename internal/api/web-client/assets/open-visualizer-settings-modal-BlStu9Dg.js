@@ -1,0 +1,1 @@
+import{cm as t,aE as o}from"./main-BCL7l6Ne.js";const s=()=>{t({innerProps:{},modal:"visualizerSettings",overlayProps:{blur:0,opacity:0},size:"xl",styles:{content:{height:"90%",maxWidth:"1400px",minHeight:"600px",width:"100%"}},title:o.t("common.setting",{count:2,postProcess:"titleCase"}),transitionProps:{transition:"pop"}})};export{s as o};

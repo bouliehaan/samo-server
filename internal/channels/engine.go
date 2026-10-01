@@ -43,6 +43,13 @@ type Engine struct {
 	// read as it stands. A peek that wrote was the station making an upsert
 	// per fresh episode every time anything asked what would play next.
 	ReadOnly bool
+	// Simulated marks a decision made on a virtual clock -- the simulator's,
+	// the air-order forecast's -- whose item will never be played. Nothing
+	// outside the process is asked on its behalf: an episode's enclosure is
+	// not walked to its CDN, because every hop of a tracking chain counts the
+	// request as a download, and a forecast re-run through the day would be
+	// the station downloading its whole queue over and over for nobody.
+	Simulated bool
 }
 
 // defaultLivePlayMinutes bounds a continuous source picked from rotation.
@@ -1418,20 +1425,27 @@ func (e *Engine) selectIn(
 	scoring.adoptSeparation(cenv)
 	out.decision.applyBalance(intent.Targets, scoring.airtime)
 	scored := scoreCandidates(survivors, scoring)
-	chosen, contenders := chooseCandidate(scored, e.Plan.epsilon(), e.Rand)
-	out.decision.Candidates = summariseCandidates(scored, contenders)
 
-	// Try the winner, then the next, and so on: a URL that will not resolve is
-	// a fact about one item, not a reason to give up on the whole decision.
-	for _, candidate := range append([]ScoredCandidate{chosen}, scored...) {
+	// Reapply the queue's order after each failed resolution. Falling back to
+	// raw score order could put a heard-once episode ahead of another fresh
+	// one, even though the first choice correctly respected their urgency.
+	remaining := scored
+	for len(remaining) > 0 {
+		candidate, contenders := chooseCandidate(remaining, e.Plan.epsilon(), e.Rand)
+		out.decision.Candidates = summariseCandidates(scored, contenders)
 		item, err := e.Materialise(ctx, candidate.Candidate)
 		if err != nil {
-			if candidate.Candidate.Ref == chosen.Candidate.Ref {
-				out.decision.Rejected = append(out.decision.Rejected, Rejection{
-					Ref: candidate.Candidate.Ref, Title: candidate.Candidate.Title,
-					Rule: "unplayable", Reason: err.Error(),
-				})
+			out.decision.Rejected = append(out.decision.Rejected, Rejection{
+				Ref: candidate.Candidate.Ref, Title: candidate.Candidate.Title,
+				Rule: "unplayable", Reason: err.Error(),
+			})
+			next := make([]ScoredCandidate, 0, len(remaining)-1)
+			for _, other := range remaining {
+				if other.Candidate.Ref != candidate.Candidate.Ref || other.Candidate.SourceID != candidate.Candidate.SourceID {
+					next = append(next, other)
+				}
 			}
+			remaining = next
 			continue
 		}
 		e.applyDuration(&item, candidate.Candidate, intent, timeline, block)

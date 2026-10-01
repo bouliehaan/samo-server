@@ -28,18 +28,27 @@ type fakeCoverStore struct {
 	dir       string
 	mu        sync.Mutex
 	okURLs    map[string]bool
+	refusals  map[string]int
 	downloads []string
 	generated []string
 }
 
 func newFakeCoverStore(t *testing.T) *fakeCoverStore {
-	return &fakeCoverStore{t: t, dir: t.TempDir(), okURLs: map[string]bool{}}
+	return &fakeCoverStore{t: t, dir: t.TempDir(), okURLs: map[string]bool{}, refusals: map[string]int{}}
 }
 
 func (f *fakeCoverStore) allow(url string) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.okURLs[url] = true
+}
+
+// refuse fails the next n downloads of url, allowed or not: a CDN that
+// refuses some requests and serves the rest.
+func (f *fakeCoverStore) refuse(url string, n int) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.refusals[url] = n
 }
 
 func (f *fakeCoverStore) writeFile(name string) string {
@@ -53,6 +62,10 @@ func (f *fakeCoverStore) writeFile(name string) string {
 func (f *fakeCoverStore) DownloadFromURL(ctx context.Context, url string) (*catalog.Image, error) {
 	f.mu.Lock()
 	ok := f.okURLs[url]
+	if f.refusals[url] > 0 {
+		f.refusals[url]--
+		ok = false
+	}
 	f.downloads = append(f.downloads, url)
 	f.mu.Unlock()
 	if !ok {

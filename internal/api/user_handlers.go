@@ -12,8 +12,8 @@ import (
 
 // issueStreamToken mints a short-lived credential the dashboard can put in
 // stream/cover URLs so HTML5 audio/img elements don't need to send the
-// bearer header (which they can't). The caller must already be
-// authenticated via the standard requireUser path.
+// bearer header (which they can't). Only a bearer mints one: a stream token
+// that could mint its successor would never expire.
 func (s *Server) issueStreamToken(w http.ResponseWriter, r *http.Request) {
 	principal, ok := s.currentUser(r)
 	if !ok {
@@ -130,6 +130,35 @@ func (s *Server) createUser(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusCreated, item)
 }
 
+func (s *Server) updateUser(w http.ResponseWriter, r *http.Request) {
+	principal, ok := s.requireAdmin(w, r)
+	if !ok {
+		return
+	}
+	var input users.UpdateUserInput
+	if !readJSONBody(w, r, &input) {
+		return
+	}
+	item, err := s.usersService().Update(r.Context(), principal, r.PathValue("id"), input)
+	if err != nil {
+		writeUserError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, item)
+}
+
+func (s *Server) deleteUser(w http.ResponseWriter, r *http.Request) {
+	principal, ok := s.requireAdmin(w, r)
+	if !ok {
+		return
+	}
+	if err := s.usersService().Delete(r.Context(), principal, r.PathValue("id")); err != nil {
+		writeUserError(w, err)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
 func (s *Server) updateCurrentUser(w http.ResponseWriter, r *http.Request) {
 	principal, ok := s.currentUser(r)
 	if !ok {
@@ -193,17 +222,45 @@ func (s *Server) revokeUserToken(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]bool{"revoked": true})
 }
 
+// revokeCurrentUserToken is a client signing out: it retires the bearer token
+// the request carries. Clients keep only their token's secret, never the id
+// the {id} route needs, so without this every disconnected device left a live
+// credential on the account.
+//
+// Only a bearer names a token to retire, and only a bearer gets a request
+// here: handleAPI refuses a stream token, so one leaked from a log cannot sign
+// out the device that minted it.
+func (s *Server) revokeCurrentUserToken(w http.ResponseWriter, r *http.Request) {
+	principal, ok := s.currentUser(r)
+	if !ok {
+		writeError(w, http.StatusUnauthorized, "unauthorized")
+		return
+	}
+	service := s.usersService()
+	if service == nil || !service.Enabled() {
+		writeError(w, http.StatusServiceUnavailable, "user accounts are not configured")
+		return
+	}
+	if err := service.RevokePresentedToken(r.Context(), principal, tokenFromRequest(r)); err != nil {
+		writeUserError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]bool{"revoked": true})
+}
+
 func writeUserError(w http.ResponseWriter, err error) {
 	switch {
 	case errors.Is(err, users.ErrUnauthorized):
 		writeError(w, http.StatusUnauthorized, err.Error())
-	case errors.Is(err, users.ErrForbidden):
+	case errors.Is(err, users.ErrForbidden), errors.Is(err, users.ErrSharedToken):
 		writeError(w, http.StatusForbidden, err.Error())
 	case errors.Is(err, users.ErrNotFound):
 		writeError(w, http.StatusNotFound, err.Error())
 	case errors.Is(err, users.ErrInvalidUsername), errors.Is(err, users.ErrInvalidPassword), errors.Is(err, users.ErrInvalidToken):
 		writeError(w, http.StatusBadRequest, err.Error())
-	case errors.Is(err, users.ErrUsernameTaken):
+	case errors.Is(err, users.ErrInvalidRole):
+		writeError(w, http.StatusBadRequest, err.Error())
+	case errors.Is(err, users.ErrProtectedUser), errors.Is(err, users.ErrLastAdmin), errors.Is(err, users.ErrUsernameTaken):
 		writeError(w, http.StatusConflict, err.Error())
 	default:
 		writeError(w, http.StatusInternalServerError, err.Error())

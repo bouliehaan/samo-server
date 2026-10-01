@@ -61,6 +61,6 @@ export async function api(path, options) {
   }
   if (res.status === 204) return null;
   const body = await res.json().catch(() => ({}));
-  if (!res.ok) throw new Error(body.error || ("request failed: " + res.status));
+  if (!res.ok) { const error = new Error(body.error || ("request failed: " + res.status)); error.status = res.status; throw error; }
   return body;
 }

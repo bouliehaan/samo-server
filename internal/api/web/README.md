@@ -1,16 +1,16 @@
 # internal/api/web
 
-The server's three page shells, plus the bundle Vite builds from `../../../web/src`.
+The server's page shells, plus the bundle Vite builds from `../../../web/src`.
 
 | | |
 |---|---|
-| `app.html` / `setup.html` / `login.html` | page shells — structure only, no CSS or JS |
+| `app.html` / `setup.html` / `login.html` / `pair.html` | page shells — structure only, no CSS or JS |
 | `build/` | **generated** by `make ui`; hashed JS/CSS + `manifest.json` |
 
 Each shell carries two placeholders, `__SAMO_STYLES__` and `__SAMO_SCRIPT__`,
 which `pageSource` (in `../web.go`) fills at startup by reading the manifest.
-The result is served by `html/template`, which the pages use for nothing else —
-they contain no template actions at all.
+The result is served by `html/template` (the pairing page, which never had a
+template, as plain bytes); none of them contain any template actions at all.
 
 Assets are served from `/assets/build/` with an immutable cache lifetime, which
 is safe because every filename carries a content hash.

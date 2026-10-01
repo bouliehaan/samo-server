@@ -304,6 +304,33 @@ func (s *Service) SetSystemTracks(ctx context.Context, id string, trackIDs []str
 	return s.loadByID(ctx, id)
 }
 
+// EnsureNamed returns the owner's playlist of this name, creating it empty
+// when there is none. Like Import, it is an explicit request for the playlist
+// to exist, so a deletion tombstone on the name is lifted.
+func (s *Service) EnsureNamed(ctx context.Context, ownerID, name string, public bool) (catalog.MusicPlaylist, error) {
+	if s == nil || s.db == nil {
+		return catalog.MusicPlaylist{}, ErrDisabled
+	}
+	ownerID, name = strings.TrimSpace(ownerID), strings.TrimSpace(name)
+	if ownerID == "" {
+		return catalog.MusicPlaylist{}, ErrForbidden
+	}
+	if name == "" {
+		return catalog.MusicPlaylist{}, fmt.Errorf("%w: playlist name is required", ErrInvalidInput)
+	}
+	current, err := s.loadByID(ctx, playlistID(ownerID, name))
+	if errors.Is(err, ErrNotFound) {
+		current, err = s.Create(ctx, ownerID, CreateInput{Name: name, Public: public})
+	}
+	if err != nil {
+		return catalog.MusicPlaylist{}, err
+	}
+	if current.System {
+		return catalog.MusicPlaylist{}, ErrSystemPlaylist
+	}
+	return current, s.clearTombstone(ctx, name)
+}
+
 // Get reads one playlist straight from the database, bypassing the in-memory
 // catalog projection.
 //

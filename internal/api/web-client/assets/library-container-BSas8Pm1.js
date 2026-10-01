@@ -1,0 +1,1 @@
+import{e as o,j as s}from"./main-BCL7l6Ne.js";const i="fs-library-container-module-container",c={container:i},l=r=>{const n=o.c(2),{children:e}=r;let t;return n[0]!==e?(t=s.jsx("div",{className:c.container,children:e}),n[0]=e,n[1]=t):t=n[1],t};export{l as L};

@@ -160,6 +160,18 @@ func loadUserByTokenHash(ctx context.Context, db *sql.DB, tokenHash string) (Use
 	return user, tokenID, nil
 }
 
+// loadTokenByHash names the token a secret belongs to. Unlike
+// loadUserByTokenHash it is not a use of the token, so it leaves last_used_at
+// alone.
+func loadTokenByHash(ctx context.Context, db *sql.DB, tokenHash string) (id, userID, label string, err error) {
+	err = db.QueryRowContext(ctx, `
+		SELECT id, user_id, label FROM user_tokens WHERE token_hash = ?`, tokenHash).Scan(&id, &userID, &label)
+	if err == sql.ErrNoRows {
+		return "", "", "", ErrInvalidToken
+	}
+	return id, userID, label, err
+}
+
 func listTokens(ctx context.Context, db *sql.DB, userID string) ([]Token, error) {
 	rows, err := db.QueryContext(ctx, `
 		SELECT id, label, created_at, last_used_at

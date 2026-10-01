@@ -233,8 +233,8 @@ func (s *Server) allowSetupOrAdmin(w http.ResponseWriter, r *http.Request) bool 
 	}
 	if status.NeedsSetup {
 		// During setup the admin token was just minted by createSetupAdmin and
-		// is required for every subsequent step. Require it.
-		principal, ok := s.authenticateRequest(r)
+		// is required for every subsequent step. Require it, as a bearer.
+		principal, ok := s.authenticateBearer(r)
 		if !ok || principal.User.Role != users.RoleAdmin {
 			writeError(w, http.StatusUnauthorized, "setup requires the admin token issued during step 1")
 			return false

@@ -38,6 +38,17 @@ type SimOptions struct {
 	// begin from "the station has been playing talk all night" rather than from
 	// a station that has never played anything.
 	Warmup []MemoryPlay
+	// State is the programme state the run starts in. Zero is a station
+	// switched on for the first time; the air-order forecast starts from the
+	// live station's, so its first decision is the one the streamer will make.
+	State ProgramState
+	// Stop, when set, ends the run after the first step it returns true for.
+	Stop func(SimStep) bool
+	// Clock, when set, is told the virtual time before every decision, for
+	// anything the engine reads that keeps time of its own -- a skip
+	// registry's step-asides have to run out on the run's clock, not the
+	// wall's.
+	Clock func(time.Time)
 }
 
 // SimStep is one item the simulated station played.
@@ -221,7 +232,12 @@ func Simulate(ctx context.Context, engine *Engine, opts SimOptions) (SimResult, 
 	}
 	ledger := &simLedger{base: engine.Listened, station: map[string]EpisodeProgress{}}
 	engine.Listened = ledger
-	defer func() { engine.Listened = ledger.base }()
+	simulated := engine.Simulated
+	engine.Simulated = true
+	defer func() {
+		engine.Listened = ledger.base
+		engine.Simulated = simulated
+	}()
 
 	loc := engine.location()
 	start := opts.Start.In(loc)
@@ -236,11 +252,19 @@ func Simulate(ctx context.Context, engine *Engine, opts SimOptions) (SimResult, 
 	end := start.Add(duration)
 
 	result := SimResult{History: history}
-	state := ProgramState{}
+	state := opts.State
 	now := start
 	consecutiveFailures := 0
 
 	for step := 0; step < maxSteps && now.Before(end); step++ {
+		// A run somebody has stopped waiting for ends where it is; what it got
+		// through is still a true account of those hours.
+		if ctx.Err() != nil {
+			break
+		}
+		if opts.Clock != nil {
+			opts.Clock(now)
+		}
 		seed := opts.Seed
 		if seed == 0 {
 			seed = decisionSeed(engine.Plan, engine.Channel.ID, now)
@@ -304,6 +328,9 @@ func Simulate(ctx context.Context, engine *Engine, opts SimOptions) (SimResult, 
 		})
 		state = next
 		now = ends
+		if opts.Stop != nil && opts.Stop(result.Steps[len(result.Steps)-1]) {
+			break
+		}
 	}
 
 	result.Report = buildSimReport(engine, result, start, now)

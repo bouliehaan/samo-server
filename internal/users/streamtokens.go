@@ -71,3 +71,13 @@ func (s *streamTokenStore) gcLocked(now time.Time) {
 		}
 	}
 }
+
+func (s *streamTokenStore) revokeUser(userID string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for token, entry := range s.tokens {
+		if entry.userID == userID {
+			delete(s.tokens, token)
+		}
+	}
+}

@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"net/http"
 	"strings"
+
+	"github.com/bouliehaan/samo-server/internal/musicrelease"
 )
 
 // musicbrainzRecordingURL is the MusicBrainz recording-lookup base. A package
@@ -80,7 +82,7 @@ func fetchRecordingReleaseRefs(ctx context.Context, client *http.Client, recordi
 	bestRank := len(releaseGroupRankOrder) + 2
 	for _, r := range body.Releases {
 		rgID := strings.TrimSpace(r.ReleaseGroup.ID)
-		if rgID == "" {
+		if rgID == "" || musicrelease.Rejected(r.ReleaseGroup.Title, r.ReleaseGroup.PrimaryType, r.ReleaseGroup.SecondaryTypes) {
 			continue
 		}
 		rank := releaseGroupRank(r.ReleaseGroup.PrimaryType, r.ReleaseGroup.SecondaryTypes)
@@ -90,16 +92,10 @@ func fetchRecordingReleaseRefs(ctx context.Context, client *http.Client, recordi
 			refs.ReleaseGroupTitle = strings.TrimSpace(r.ReleaseGroup.Title)
 		}
 	}
-	// Order candidate releases so the chosen release group's own releases
-	// come first: the per-release CAA rung should try the real record's
-	// pressings before any compilation appearance.
+	// Only the chosen album's pressings may supply artwork. Another
+	// appearance of this song can carry a completely different cover.
 	for _, r := range body.Releases {
-		if strings.TrimSpace(r.ID) != "" && strings.TrimSpace(r.ReleaseGroup.ID) == refs.ReleaseGroupID {
-			refs.ReleaseIDs = append(refs.ReleaseIDs, strings.TrimSpace(r.ID))
-		}
-	}
-	for _, r := range body.Releases {
-		if strings.TrimSpace(r.ID) != "" && strings.TrimSpace(r.ReleaseGroup.ID) != refs.ReleaseGroupID {
+		if refs.ReleaseGroupID != "" && strings.TrimSpace(r.ID) != "" && strings.TrimSpace(r.ReleaseGroup.ID) == refs.ReleaseGroupID {
 			refs.ReleaseIDs = append(refs.ReleaseIDs, strings.TrimSpace(r.ID))
 		}
 	}
@@ -138,10 +134,15 @@ func fetchReleaseGroupTitle(ctx context.Context, client *http.Client, releaseGro
 		return "", fmt.Errorf("musicbrainz release-group lookup %s: status %d", id, resp.StatusCode)
 	}
 	var body struct {
-		Title string `json:"title"`
+		Title          string   `json:"title"`
+		PrimaryType    string   `json:"primary-type"`
+		SecondaryTypes []string `json:"secondary-types"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
 		return "", err
+	}
+	if musicrelease.Rejected(body.Title, body.PrimaryType, body.SecondaryTypes) {
+		return "", nil
 	}
 	return strings.TrimSpace(body.Title), nil
 }

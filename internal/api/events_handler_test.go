@@ -13,7 +13,7 @@ import (
 )
 
 // adminRequest builds a request already carrying an admin principal, the way
-// the requireUser middleware would have left it.
+// handleAPI's credential check would have left it.
 func adminRequest(server *Server, ctx context.Context) *http.Request {
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/events", nil).WithContext(ctx)
 	principal := users.Principal{User: users.User{ID: "user-1", Role: users.RoleAdmin}}

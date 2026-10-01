@@ -188,6 +188,25 @@ func (r *SkipRegistry) Suppressed(sourceID string) bool {
 	return true
 }
 
+// Snapshot copies what the registry is passing over onto a clock of the
+// caller's, for a run ahead of real time: a step-aside that ends in twenty
+// minutes has to end twenty minutes into the run, and nothing the run does
+// may reach the real registry. BACK's one-shot hints stay behind -- the
+// station spends them on its very next decision, not on every decision of a
+// forecast.
+func (r *SkipRegistry) Snapshot(now func() time.Time) *SkipRegistry {
+	out := NewSkipRegistry(now)
+	if r == nil {
+		return out
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	for key, until := range r.until {
+		out.until[key] = until
+	}
+	return out
+}
+
 // Clear forgets every suppression for a channel's sources.
 func (r *SkipRegistry) Clear(sourceIDs []string) {
 	if r == nil {

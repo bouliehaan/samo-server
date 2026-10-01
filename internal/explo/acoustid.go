@@ -14,6 +14,8 @@ import (
 	"strings"
 	"time"
 	"unicode"
+
+	"github.com/bouliehaan/samo-server/internal/musicrelease"
 )
 
 // fallbackHTTPClient backs the nil-client path. http.DefaultClient must never
@@ -296,7 +298,7 @@ func recordingAgreement(recording acoustidRecording, evidence identityEvidence) 
 	if album := strings.TrimSpace(evidence.Album); album != "" {
 		best := 0
 		for _, group := range recording.ReleaseGroups {
-			if releaseGroupDerived(group.SecondaryTypes) {
+			if musicrelease.Rejected(group.Title, group.Type, group.SecondaryTypes) {
 				continue
 			}
 			if got := tokenAgreement(album, group.Title); got > best {
@@ -392,13 +394,13 @@ func durationGap(recording acoustidRecording, evidence identityEvidence) float64
 // bestReleaseGroup returns the MBID and title of the release group that best
 // represents the track's OWN record, so the caller can both name the album
 // and fetch its cover art. Ranking: a clean (underived) Album, then
-// a clean Single, then a clean EP, then anything else clean, and only as a
-// last resort a derived release group (Compilation/Live/Remix/...). Either
+// a clean Single, then a clean EP, then anything else clean. Derived release
+// groups (Compilation/Live/Remix/...) are never accepted. Either
 // value may be empty.
 func bestReleaseGroup(groups []acoustidReleaseGrp) (id, title string) {
 	bestRank := len(releaseGroupRankOrder) + 2
 	for _, group := range groups {
-		if strings.TrimSpace(group.Title) == "" {
+		if strings.TrimSpace(group.Title) == "" || musicrelease.Rejected(group.Title, group.Type, group.SecondaryTypes) {
 			continue
 		}
 		rank := releaseGroupRank(group.Type, group.SecondaryTypes)
@@ -414,44 +416,14 @@ func bestReleaseGroup(groups []acoustidReleaseGrp) (id, title string) {
 // release groups. Lower index wins.
 var releaseGroupRankOrder = []string{"album", "single", "ep"}
 
-// derivedSecondaryTypes are the MusicBrainz secondary types that make a
-// release group somebody else's record of the song rather than the artist's
-// own: a sampler, a live tape, a remix package, a DJ mix, a film's licensed
-// soundtrack. The other secondary types describe what the artist's own
-// record IS — "Mixtape/Street" (More Life, Sweet Boy), "Demo", "Spokenword"
-// — and ranking those as derived filed mixtape tracks under whichever single
-// or sampler the recording also appeared on.
-var derivedSecondaryTypes = map[string]bool{
-	"compilation": true,
-	"live":        true,
-	"remix":       true,
-	"dj-mix":      true,
-	"soundtrack":  true,
-}
-
-// releaseGroupDerived reports whether a release group's secondary types mark
-// it as somebody else's record of the song (derivedSecondaryTypes).
-func releaseGroupDerived(secondaryTypes []string) bool {
-	for _, secondary := range secondaryTypes {
-		if derivedSecondaryTypes[strings.ToLower(strings.TrimSpace(secondary))] {
-			return true
-		}
-	}
-	return false
-}
-
-// releaseGroupRank scores a release group for bestReleaseGroup /
-// fetchRecordingReleaseRefs: clean primaries by preference order, any other
-// clean primary next, derived groups (releaseGroupDerived) last.
+// releaseGroupRank ranks eligible groups; rejected releases must be filtered first.
 func releaseGroupRank(primaryType string, secondaryTypes []string) int {
-	if releaseGroupDerived(secondaryTypes) {
-		return len(releaseGroupRankOrder) + 1
+	if musicrelease.Derived(secondaryTypes) {
+		return 4
 	}
-	primary := strings.ToLower(strings.TrimSpace(primaryType))
-	for index, name := range releaseGroupRankOrder {
-		if primary == name {
-			return index
-		}
-	}
-	return len(releaseGroupRankOrder)
+	return musicrelease.Rank(primaryType)
+}
+
+func releaseGroupDerived(secondaryTypes []string) bool {
+	return musicrelease.Derived(secondaryTypes)
 }

@@ -906,6 +906,12 @@ func (s *Service) UpsertMusicPlaylist(playlist MusicPlaylist) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
+	// Match full-load enrichment. Otherwise incremental playlist writes drop
+	// generated images from list/detail responses until the next full reload.
+	if len(s.resolvedImagesLocked(playlist.Images)) == 0 {
+		playlist.Images = s.musicPlaylistAutoCoverImagesLocked(playlist)
+	}
+
 	next := slices.Clone(s.musicPlaylists)
 	replaced := false
 	for i, existing := range next {

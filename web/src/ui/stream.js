@@ -50,6 +50,13 @@ export function musicCoverURL(id) {
   return "/api/v1/music/albums/" + encodeURIComponent(id) + "/cover" + streamQuery();
 }
 
+// The cover of an album found through Search for new, by its MusicBrainz
+// release group or deezer-<n> id. Fetched by samo from that catalog; 404 when
+// there is none, and the result shows its own placeholder.
+export function exploArtURL(albumId) {
+  return "/api/v1/explo/art/" + encodeURIComponent(albumId) + streamQuery();
+}
+
 export function musicPlaylistCoverURL(id, bust) {
   let url = "/api/v1/music/playlists/" + encodeURIComponent(id) + "/cover" + streamQuery();
   if (bust) url += (url.includes("?") ? "&" : "?") + "_=" + bust;

@@ -10,7 +10,7 @@ import (
 	"strings"
 )
 
-// webFS holds the three page shells and the bundle Vite builds from web/src.
+// webFS holds the page shells and the bundle Vite builds from web/src.
 //
 // The pages used to be Go string constants — a 6,000-line one for the
 // dashboard — which cost more than ugliness. A Go raw string cannot contain a
@@ -50,7 +50,7 @@ var manifest = loadManifest()
 
 // loadManifest reads the build manifest once at startup. A missing or
 // unparseable manifest means the bundle was never built or is corrupt, which
-// should stop the server rather than serve three pages with no styles or
+// should stop the server rather than serve pages with no styles or
 // behaviour at all.
 func loadManifest() viteManifest {
 	data, err := webFS.ReadFile("web/build/manifest.json")

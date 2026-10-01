@@ -1,3 +1,4 @@
+import { renderUsers } from "./ui/users.js";
 // Entry point for the app page. Vite bundles this into
 // internal/api/web/build/, which go:embed compiles into the binary.
 //
@@ -6,6 +7,8 @@
 // via an @import at the top of that stylesheet, which keeps it first in the
 // cascade — as a separate shared chunk its order would not be guaranteed.
 import "./app.css";
+import { mountExploSearch } from "./ui/explo_search.js";
+import { importOpen, playlistImportPanel } from "./ui/playlist_import.js";
 
 import { api, currentUser, isAdmin, lastFMPendingStorageKey, legacyLastFMPendingKey, loginRedirect, setCurrentUser, token, tokenKey } from "./ui/auth.js";
 import { audiobookCoverURL, audiobookStreamURL, audiobookStreamURLAt, channelStreamURL, ensureStreamToken, musicCoverURL, musicPlaylistCoverURL, musicStreamURL, podcastCoverURL, podcastEpisodeStreamURL, podcastEpisodeStreamURLAt, radioCoverURL, refreshStreamToken } from "./ui/stream.js";
@@ -52,6 +55,9 @@ import { globalScanActionsHTML, libraryKindScanActionsHTML, libraryScanActionsHT
   let activeTab = "";
   let musicMode = "recent";
   let playlistTracksBulkEditId = "";
+  // Whether the import composer offers downloading the missing songs of a
+  // YouTube Music playlist with Explo (set when the playlists list loads).
+  let exploPlaylistImport = false;
   const playlistTracksBulkSelected = new Set();
   let musicSort = "recent";
   let musicDirection = "desc";
@@ -786,7 +792,11 @@ import { globalScanActionsHTML, libraryKindScanActionsHTML, libraryScanActionsHT
         musicListOffset += items.length;
         body = artistList(musicListItems) + musicPaginationFooter(musicListItems.length, musicListTotal);
       } else if (musicMode === "playlists") {
-        const data = await api("/api/v1/music/playlists?" + pageQuery);
+        const [data, explo] = await Promise.all([
+          api("/api/v1/music/playlists?" + pageQuery),
+          isAdmin() ? api("/api/v1/explo/discovery/status").catch(() => null) : Promise.resolve(null),
+        ]);
+        exploPlaylistImport = Boolean(explo && explo.available && explo.playlists);
         const items = (data && data.items) || [];
         musicListTotal = (data && data.total) || items.length;
         musicListItems = append ? musicListItems.concat(items) : items;
@@ -811,7 +821,7 @@ import { globalScanActionsHTML, libraryKindScanActionsHTML, libraryScanActionsHT
       const musicActions = musicMode === "playlists" ?
         '<div class="view-actions"><button class="btn primary btn-small" data-action="composer-toggle" data-composer="playlist-import">IMPORT PLAYLIST</button><button class="btn ghost btn-small" data-action="composer-toggle" data-composer="playlist">+ NEW PLAYLIST</button></div>' :
         '<span class="crumb">// library</span>';
-      const playlistComposers = musicMode === "playlists" ? composerPlaylistImport() + composerPlaylist() : "";
+      const playlistComposers = musicMode === "playlists" ? composerPlaylistImport(exploPlaylistImport) + composerPlaylist() : "";
       main.innerHTML = '<section class="view">' +
         '<div class="view-head"><h1>MUSIC</h1>' + musicActions + '</div>' +
         playlistComposers + pills + sortControls + body +
@@ -824,14 +834,20 @@ import { globalScanActionsHTML, libraryKindScanActionsHTML, libraryScanActionsHT
     return '<div class="album-grid">' + items.map(albumCard).join("") + '</div>';
   }
 
-  function trackList(items) {
+  // thumbs: the album cover in place of the track number, for lists whose
+  // tracks come from many albums (search results).
+  function trackList(items, { thumbs = false } = {}) {
     if (!items || items.length === 0) return '<div class="empty-state">// no tracks to show yet</div>';
     return '<div class="list">' + items.map((track, idx) => {
       const playback = track.playback || {};
       const artist = track.displayArtist || (track.artistNames || []).join(", ");
       const meta = [artist, track.albumTitle, formatDuration(track.durationSeconds)].filter(Boolean).join(" · ");
+      const cover = thumbs && track.albumId ? musicCoverURL(track.albumId) : "";
+      const lead = thumbs ?
+        '<div class="list-thumb ' + (cover ? "" : "empty") + '" ' + (cover ? 'style="background-image:url(&quot;' + attr(cover) + '&quot;)"' : "") + '></div>' :
+        '<div class="num">' + String(track.trackNumber || idx + 1).padStart(2, "0") + '</div>';
       return '<div class="list-row">' +
-        '<div class="num">' + String(track.trackNumber || idx + 1).padStart(2, "0") + '</div>' +
+        lead +
         '<div class="main">' +
           '<div class="name">' + escapeHTML(track.title || "Untitled") + '</div>' +
           '<div class="meta">' + escapeHTML(meta) + '</div>' +
@@ -1062,9 +1078,10 @@ import { globalScanActionsHTML, libraryKindScanActionsHTML, libraryScanActionsHT
     renderLoading();
     try {
       await ensureStreamToken();
-      const [playlist, tracksPage] = await Promise.all([
+      const [playlist, tracksPage, imported] = await Promise.all([
         api("/api/v1/music/playlists/" + encodeURIComponent(id)),
         api("/api/v1/music/playlists/" + encodeURIComponent(id) + "/tracks").catch(() => ({ items: [] })),
+        api("/api/v1/music/playlists/" + encodeURIComponent(id) + "/import").catch(() => null),
       ]);
       const tracks = (tracksPage && tracksPage.items) || [];
       const canEdit = playlistOwnedByCurrentUser(playlist);
@@ -1102,7 +1119,8 @@ import { globalScanActionsHTML, libraryKindScanActionsHTML, libraryScanActionsHT
           '</div>' +
         '</div>' +
         composerPlaylistEdit(playlist) +
-        '<div class="section-row"><div class="section-label">// tracks</div>' + bulkToolbar + playlistTrackList(playlist.id, tracks, canEdit, bulkMode) + '</div>' +
+        (imported ? playlistImportPanel(imported, isAdmin()) : "") +
+        '<div class="section-row" id="playlistTracksSection"><div class="section-label">// tracks</div>' + bulkToolbar + playlistTrackList(playlist.id, tracks, canEdit, bulkMode) + '</div>' +
       '</section>';
       if (canEdit) {
         const editName = document.getElementById("composerPlaylistEditName");
@@ -1115,7 +1133,36 @@ import { globalScanActionsHTML, libraryKindScanActionsHTML, libraryScanActionsHT
         if (editID) editID.value = playlist.id || "";
       }
       main.innerHTML = html;
+      if (imported && importOpen(imported)) followPlaylistImport(playlist.id, imported, canEdit);
     } catch (err) { renderError(err.message); }
+  }
+
+  // Follows an imported playlist's downloads while its page is open: the
+  // panel updates in place, and the track list is re-read whenever another
+  // song has joined. Stops by itself once nothing is moving or the page is
+  // gone.
+  function followPlaylistImport(id, last, canEdit) {
+    setTimeout(async () => {
+      const panel = document.getElementById("playlistImportPanel");
+      if (!panel || panel.dataset.playlistId !== id) return;
+      let view;
+      try { view = await api("/api/v1/music/playlists/" + encodeURIComponent(id) + "/import"); } catch { return followPlaylistImport(id, last, canEdit); }
+      const current = document.getElementById("playlistImportPanel");
+      if (!current || current.dataset.playlistId !== id) return;
+      current.outerHTML = playlistImportPanel(view, isAdmin());
+      const joined = (v) => v.tracks.filter((track) => track.state === "in-library").length;
+      if (joined(view) !== joined(last) && !playlistTracksBulkEditId) {
+        try {
+          const page = await api("/api/v1/music/playlists/" + encodeURIComponent(id) + "/tracks");
+          const section = document.getElementById("playlistTracksSection");
+          const panelNow = document.getElementById("playlistImportPanel");
+          if (section && panelNow && panelNow.dataset.playlistId === id) {
+            section.innerHTML = '<div class="section-label">// tracks</div>' + playlistTrackList(id, (page && page.items) || [], canEdit, false);
+          }
+        } catch { /* the next pass re-reads it */ }
+      }
+      if (importOpen(view)) followPlaylistImport(id, view, canEdit);
+    }, 4000);
   }
 
   /* -------- AUDIOBOOKS -------- */
@@ -2430,11 +2477,13 @@ import { globalScanActionsHTML, libraryKindScanActionsHTML, libraryScanActionsHT
     main.innerHTML = '<section class="view">' +
       '<div class="view-head"><h1>SEARCH</h1><span class="crumb">// catalog query</span></div>' +
       '<div class="search-shell">' +
-        '<div class="search-form"><input type="text" id="searchInput" placeholder="// query: artist · album · track · book · podcast" value="' + escapeHTML(searchQuery) + '"></div>' +
-        '<div id="searchResults"></div>' +
+        '<div id="exploSongSearch"></div>' +
+        '<div id="librarySearch"><div class="search-form"><input type="text" id="searchInput" placeholder="// query: artist · album · track · book · podcast" value="' + escapeHTML(searchQuery) + '"></div>' +
+        '<div id="searchResults"></div></div>' +
       '</div>' +
     '</section>';
     const input = document.getElementById("searchInput");
+    mountExploSearch(document.getElementById("exploSongSearch"), document.getElementById("librarySearch"), input);
     input.focus();
     let debounce;
     input.addEventListener("input", (e) => {
@@ -2470,7 +2519,7 @@ import { globalScanActionsHTML, libraryKindScanActionsHTML, libraryScanActionsHT
       if (music && ((music.albums || []).length || (music.tracks || []).length)) {
         html += '<div class="search-group"><div class="search-group-head">// MUSIC</div>';
         if ((music.albums || []).length) html += albumGridFromList(music.albums.slice(0, 8));
-        if ((music.tracks || []).length) html += trackList(music.tracks.slice(0, 12));
+        if ((music.tracks || []).length) html += trackList(music.tracks.slice(0, 12), { thumbs: true });
         html += '</div>';
       }
       const contributors = (audiobooks && audiobooks.contributors) || [];
@@ -2877,9 +2926,10 @@ import { globalScanActionsHTML, libraryKindScanActionsHTML, libraryScanActionsHT
   }
 
   async function settingsExplo() {
-    const [me, config] = await Promise.all([
+    const [me, config, discovery] = await Promise.all([
       api("/api/v1/users/me").catch(() => ({ role: "user" })),
       api("/api/v1/explo/config").catch(() => null),
+      api("/api/v1/explo/discovery/status").catch(() => null),
     ]);
     const cfg = config || {};
     const isAdmin = me.role === "admin";
@@ -2893,6 +2943,10 @@ import { globalScanActionsHTML, libraryKindScanActionsHTML, libraryScanActionsHT
       ' · source: ' + sourceText +
       ' · AcoustID key: ' + (cfg.hasApiKey ? "set" : "MISSING") +
       ' · fpcalc: ' + (cfg.fpcalcReady ? "ready" : "MISSING") + '</div>';
+    if (isAdmin) {
+      html += '<div class="empty-state" style="margin-bottom:12px">// song search: ' +
+        (discovery && discovery.available ? 'CONNECTED — Search for new is available on the Search page.' : escapeHTML((discovery && discovery.reason) || 'Configure the Explo folder, then update and restart samo-explo. It connects song search automatically using its existing Samo login.')) + '</div>';
+    }
     if (!cfg.fpcalcReady) {
       html += '<div class="empty-state explo-warn" style="margin-bottom:12px">// fpcalc (chromaprint) is not bundled on this server, so the pipeline cannot run. Run <code>make bundle-chromaprint</code> before building the release, or install fpcalc on the host.</div>';
     }
@@ -2924,14 +2978,19 @@ import { globalScanActionsHTML, libraryKindScanActionsHTML, libraryScanActionsHT
     return html;
   }
 
+  async function viewUsers() {
+    renderLoading();
+    try { if (isAdmin()) await renderUsers(main); }
+    catch (err) { renderError(err.message); }
+  }
+
   async function settingsAccount() {
-    const [me, tokens, lastfmStatus, lastfmConfig, listenbrainzStatus, users] = await Promise.all([
+    const [me, tokens, lastfmStatus, lastfmConfig, listenbrainzStatus] = await Promise.all([
       api("/api/v1/users/me"),
       api("/api/v1/users/me/tokens").catch(() => ({ items: [] })),
       api("/api/v1/lastfm/status").catch(() => ({ enabled: false })),
       api("/api/v1/lastfm/config").catch(() => null),
       api("/api/v1/listenbrainz/status").catch(() => ({ enabled: false })),
-      api("/api/v1/users").catch(() => null),
     ]);
     let html = '<div class="account-layout">' +
       '<div class="account-row account-row-2">';
@@ -3043,28 +3102,6 @@ import { globalScanActionsHTML, libraryKindScanActionsHTML, libraryScanActionsHT
       html += '</div>';
     }
     html += '</div></div>';
-
-    if (users && Array.isArray(users.items)) {
-      html += '<div class="account-row account-row-2">';
-      html += '<form class="panel" id="userForm">' +
-        '<div class="panel-head"><span>// create user</span></div>' +
-        '<div class="form-grid">' +
-          fieldHTML("newUsername", "Username", "alex", "text", "") +
-          fieldHTML("newUserDisplay", "Display Name", "optional", "text", "") +
-          fieldHTML("newUserPassword", "Password", "8+ characters", "password", "") +
-          '<label class="field"><span class="field-label">Role</span><select id="newUserRole"><option value="user">User</option><option value="admin">Admin</option></select></label>' +
-        '</div>' +
-        '<div class="actions"><button class="btn primary" type="submit">CREATE USER</button></div>' +
-        '<div class="status-line" id="userMessage" hidden></div>' +
-      '</form>';
-      html += '<div class="panel"><div class="panel-head"><span>// users</span><span>' + users.items.length + '</span></div><div class="list">';
-      users.items.forEach((user, idx) => {
-        html += '<div class="list-row"><div class="num">' + String(idx + 1).padStart(2, "0") + '</div>' +
-          '<div class="main"><div class="name">' + escapeHTML(user.username) + '</div>' +
-          '<div class="meta">' + escapeHTML(user.displayName || "") + ' · ' + escapeHTML(user.role || "user").toUpperCase() + '</div></div></div>';
-      });
-      html += '</div></div></div>';
-    }
 
     html += '</div>';
     return html;
@@ -3296,6 +3333,17 @@ import { globalScanActionsHTML, libraryKindScanActionsHTML, libraryScanActionsHT
       const playlistName = document.getElementById("composerImportName").value.trim();
       const url = document.getElementById("composerImportURL").value.trim();
       const content = document.getElementById("composerImportContent").value.trim();
+      const withExplo = document.getElementById("composerImportExplo");
+      if (withExplo && withExplo.checked && url) {
+        composerMessage(name, "reading the playlist from YouTube Music…", false);
+        const result = await api("/api/v1/music/playlists/explo-import", {
+          method: "POST",
+          body: { url: url, name: playlistName, public: document.getElementById("composerImportPublic").checked },
+        });
+        composerClose(name);
+        navigateTo("music/playlist/" + encodeURIComponent(result.playlist.id));
+        return;
+      }
       if (!playlistName) return composerMessage(name, "playlist name is required", true);
       if (!url && !content) return composerMessage(name, "paste content or provide a url", true);
       const result = await api("/api/v1/music/playlists/import", {
@@ -3558,7 +3606,7 @@ import { globalScanActionsHTML, libraryKindScanActionsHTML, libraryScanActionsHT
         try {
           await api("/api/v1/users", { method: "POST", body: body });
           setMessage("userMessage", "user created", false);
-          await viewSettings();
+          await viewUsers();
         } catch (err) { setMessage("userMessage", err.message, true); }
       });
     }
@@ -3852,6 +3900,13 @@ import { globalScanActionsHTML, libraryKindScanActionsHTML, libraryScanActionsHT
       } else if (action === "open-playlist") {
         event.preventDefault();
         navigateTo("music/playlist/" + encodeURIComponent(el.dataset.id));
+      } else if (action === "playlist-import-retry") {
+        event.preventDefault();
+        el.disabled = true;
+        try {
+          await api("/api/v1/music/playlists/" + encodeURIComponent(el.dataset.id) + "/import/retry", { method: "POST" });
+          await openPlaylist(el.dataset.id);
+        } catch (err) { el.disabled = false; alert(err.message); }
       } else if (action === "open-author") {
         event.preventDefault();
         navigateTo("audiobooks/author/" + encodeURIComponent(el.dataset.id));
@@ -4690,6 +4745,7 @@ import { globalScanActionsHTML, libraryKindScanActionsHTML, libraryScanActionsHT
   }
 
   const views = {
+    users: viewUsers,
     home: viewHome,
     music: viewMusic,
     audiobooks: viewAudiobooks,
@@ -4779,6 +4835,7 @@ import { globalScanActionsHTML, libraryKindScanActionsHTML, libraryScanActionsHT
   (async function boot() {
     try {
       setCurrentUser(await api("/api/v1/users/me"));
+      if (!isAdmin()) { window.location.replace("/listen/"); return; }
       document.getElementById("authUser").textContent = (currentUser.username || "-").toUpperCase();
       await ensureStreamToken();
       // Refresh the stream token well before its TTL so audio/img URLs

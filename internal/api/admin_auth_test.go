@@ -39,6 +39,10 @@ func TestAdminOnlyRoutesRejectNormalUsers(t *testing.T) {
 		path   string
 		body   string
 	}{
+		{name: "register explo connection", method: http.MethodPost, path: "/api/v1/explo/connection", body: `{}`},
+		{name: "list users", method: http.MethodGet, path: "/api/v1/users"},
+		{name: "edit user", method: http.MethodPatch, path: "/api/v1/users/other", body: `{}`},
+		{name: "delete user", method: http.MethodDelete, path: "/api/v1/users/other"},
 		{name: "list libraries", method: http.MethodGet, path: "/api/v1/libraries"},
 		{name: "create library", method: http.MethodPost, path: "/api/v1/libraries", body: `{}`},
 		{name: "create podcast feed", method: http.MethodPost, path: "/api/v1/podcasts/feeds", body: `{}`},

@@ -52,6 +52,11 @@ services:
     environment:
       # Over the shared socket, not the network. Nothing here is a secret.
       SAMO_DB_DSN: postgres://samo@/samo?host=/var/run/postgresql
+      # Schedule rules are wall-clock local. Keep this aligned with the wall
+      # and with any downloader that uses the same calendar; otherwise a
+      # container's UTC default silently shifts every booked block.
+      SAMO_TIMEZONE: ${SAMO_TIMEZONE:-UTC}
+      TZ: ${TZ:-UTC}
       # Where samo keeps its own state. A named volume by default; set
       # SAMO_DATA_DIR to a host path to keep an existing data directory at the
       # absolute path it already has, which matters because covers, radio.json

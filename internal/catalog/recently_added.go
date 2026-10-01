@@ -77,7 +77,9 @@ func (s *Service) ListRecentlyAdded(page PageRequest) RecentlyAddedResults {
 }
 
 func recentlyAddedMusicAlbum(album MusicAlbum) (RecentlyAddedEntry, bool) {
-	if strings.TrimSpace(album.ID) == "" || album.HiddenFromRecentlyAdded {
+	// An album with no tracks has nothing to open or play; it only appears when
+	// its files were removed and the row outlived them.
+	if strings.TrimSpace(album.ID) == "" || album.HiddenFromRecentlyAdded || album.TrackCount == 0 {
 		return RecentlyAddedEntry{}, false
 	}
 	subtitle := strings.TrimSpace(album.DisplayArtist)

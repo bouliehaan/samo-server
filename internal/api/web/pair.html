@@ -1,0 +1,28 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>samo · connect your TV</title>
+  <link rel="icon" type="image/png" href="/favicon-dark.png">
+  __SAMO_STYLES__
+</head>
+<body>
+  <div class="grid-bg"></div>
+  <main class="login-main">
+    <section class="login-hero"><div class="samo-wm hero"><span class="word">samo</span><span class="word dim">TV</span></div></section>
+    <section class="card login-shell">
+      <div class="card-head">CONNECT YOUR TV</div>
+      <h1>Approve samo on your TV.</h1>
+      <p class="lede">Enter the code shown on your TV. Only approve if you started this request and the code matches your screen.</p>
+      <p id="account"></p>
+      <label class="field"><span class="field-label">TV CODE</span>
+        <input id="code" type="text" maxlength="12" autocomplete="off" autocapitalize="characters" spellcheck="false" placeholder="ABCD-EFGH">
+      </label>
+      <p class="lede">The TV gets its own device token. You can revoke it later under your account’s tokens.</p>
+      <div class="actions"><button class="btn primary" id="approve" disabled>APPROVE TV</button><button class="btn" id="deny" disabled>DECLINE</button></div>
+      <p id="message" role="status" aria-live="polite"></p>
+    </section>
+  </main>
+  __SAMO_SCRIPT__
+</body>
+</html>

@@ -17,6 +17,10 @@ type BootstrapResult struct {
 	GeneratedPassword  string
 	UpdatedPassword    bool
 	EnsuredServerToken bool
+	// RetiredServerToken is a start without SAMO_API_TOKEN deleting the shared
+	// token an earlier start was configured with, so its secret no longer
+	// authenticates.
+	RetiredServerToken bool
 }
 
 func bootstrap(ctx context.Context, db *sql.DB, service *Service, input BootstrapInput) (BootstrapResult, error) {
@@ -39,6 +43,12 @@ func bootstrap(ctx context.Context, db *sql.DB, service *Service, input Bootstra
 			return BootstrapResult{}, err
 		}
 		result.EnsuredServerToken = true
+	} else {
+		retired, err := retireServerToken(ctx, db)
+		if err != nil {
+			return BootstrapResult{}, err
+		}
+		result.RetiredServerToken = retired
 	}
 
 	username := normalizeUsername(input.AdminUsername)
@@ -130,6 +140,20 @@ func ensureReservedServerUser(ctx context.Context, db *sql.DB) error {
 	return err
 }
 
+// isServerToken reports whether a token row is the one ensureServerToken
+// keeps: the legacy SAMO_API_TOKEN, one secret shared by every client and
+// script of an older install. The row, not the configured secret, is what
+// identifies it, the same way ensureServerToken and retireServerToken find it.
+// Other tokens on the reserved account (samo-radio devices, someone signed in
+// as `server`) are ordinary tokens.
+func isServerToken(userID, label string) bool {
+	return userID == BootstrapUserID && label == serverTokenLabel
+}
+
+// ensureServerToken and retireServerToken keep the row in step with
+// SAMO_API_TOKEN at every start: written when it is first set, rewritten when
+// it changes (so a rotated secret stops working), and deleted when it is
+// removed.
 func ensureServerToken(ctx context.Context, db *sql.DB, tokenHash string) error {
 	var existing string
 	err := db.QueryRowContext(ctx, `
@@ -144,4 +168,25 @@ func ensureServerToken(ctx context.Context, db *sql.DB, tokenHash string) error 
 		return err
 	}
 	return insertToken(ctx, db, "token-server", BootstrapUserID, serverTokenLabel, tokenHash)
+}
+
+// retireServerToken deletes the shared token once SAMO_API_TOKEN is no longer
+// set. Taking the variable out of the environment is how an operator withdraws
+// the secret, and the row it left behind would otherwise go on authenticating
+// it with nothing in the configuration to show that it still works. Only that
+// row: the reserved account's other tokens, samo-radio devices among them, are
+// untouched.
+func retireServerToken(ctx context.Context, db *sql.DB) (bool, error) {
+	result, err := db.ExecContext(ctx, `
+		DELETE FROM user_tokens WHERE user_id = ? AND label = ?`,
+		BootstrapUserID, serverTokenLabel,
+	)
+	if err != nil {
+		return false, err
+	}
+	rows, err := result.RowsAffected()
+	if err != nil {
+		return false, err
+	}
+	return rows > 0, nil
 }

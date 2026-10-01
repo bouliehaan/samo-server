@@ -390,7 +390,9 @@ func (s *Server) servePodcastCover(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) serveCatalogImage(w http.ResponseWriter, r *http.Request, records []catalog.Image) {
 	if path := firstImagePath(records); path != "" {
-		w.Header().Set("Cache-Control", "public, max-age=31536000, immutable")
+		if w.Header().Get("Cache-Control") == "" {
+			w.Header().Set("Cache-Control", "public, max-age=31536000, immutable")
+		}
 		// `?width=` is a hint, never a requirement: anything that cannot be
 		// resized (an unreadable source, a format the standard library has no
 		// decoder for, art already smaller than the request) falls through to

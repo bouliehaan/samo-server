@@ -89,7 +89,7 @@ func (f keepFixture) service(ffmpegPath string) *Service {
 func (f keepFixture) keep(t *testing.T, s *Service) string {
 	t.Helper()
 	var res KeepResult
-	dest, err := s.keepOne(context.Background(), f.track.ID, f.root, []string{f.drop}, &res)
+	dest, err := s.keepOne(context.Background(), f.track.ID, f.root, []string{f.drop}, nil, &res)
 	if err != nil {
 		t.Fatalf("keep failed: %v", err)
 	}

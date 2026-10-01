@@ -125,8 +125,8 @@ func (s *Server) postExploReprocess(w http.ResponseWriter, r *http.Request) {
 
 // browseExploDirectories lets the admin folder-picker walk the server
 // filesystem. It reuses the setup wizard's browseDirectories logic but is
-// registered via handleAPI (so requireUser injects the principal into the
-// context that requireAdmin reads) - the setup route itself is a raw
+// registered via handleAPI (so the principal is already in the context that
+// requireAdmin reads) - the setup route itself is a raw
 // mux.HandleFunc with no auth middleware, so calling it post-setup returns 401
 // and the web UI treats that as a dead session and logs the admin out.
 func (s *Server) browseExploDirectories(w http.ResponseWriter, r *http.Request) {

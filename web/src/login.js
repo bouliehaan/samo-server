@@ -6,27 +6,19 @@
 // via an @import at the top of that stylesheet, which keeps it first in the
 // cascade — as a separate shared chunk its order would not be guaranteed.
 import "./login.css";
+import { loginDestination } from "./ui/destination.js";
 
   (function () {
     const tokenKey = "samo-token";
 
-    // Resolve where to land after sign-in. The /app shell appends
-    // ?next=<encoded path+hash> when it bounces a logged-out user here, so
-    // deep links like /app#audiobooks survive the round-trip.
-    function nextDestination() {
-      try {
-        const params = new URLSearchParams(window.location.search);
-        const next = params.get("next");
-        if (next && next.startsWith("/")) return next;
-      } catch { /* malformed ?next — fall through to the default */ }
-      return "/app";
+    function nextDestination(user) {
+      return loginDestination(user, new URLSearchParams(window.location.search).get("next"), window.location.origin);
     }
-    const destination = nextDestination();
 
     if (localStorage.getItem(tokenKey)) {
       // Confirm the stored token still works; if it does, skip the form.
       fetch("/api/v1/users/me", { headers: { "Authorization": "Bearer " + localStorage.getItem(tokenKey) } })
-        .then((res) => { if (res.ok) window.location.href = destination; })
+        .then(async (res) => { if (res.ok) window.location.href = nextDestination(await res.json()); })
         .catch(() => {});
     }
 
@@ -59,7 +51,7 @@ import "./login.css";
         const body = await res.json().catch(() => ({}));
         if (!res.ok) throw new Error(body.error || "sign in failed");
         localStorage.setItem(tokenKey, body.token);
-        window.location.href = destination;
+        window.location.href = nextDestination(body.user);
       } catch (err) {
         setError(err.message);
         button.disabled = false;

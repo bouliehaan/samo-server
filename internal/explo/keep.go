@@ -13,6 +13,7 @@ import (
 	"unicode"
 
 	"github.com/bouliehaan/samo-server/internal/catalog"
+	"github.com/bouliehaan/samo-server/internal/musicrelease"
 )
 
 // KeepResult is the per-track outcome of a keep request. Failures are reported
@@ -57,6 +58,35 @@ type KeepResult struct {
 // derived from tags and fall back to the file path only when tags are too thin
 // to be useful.
 func (s *Service) Keep(ctx context.Context, trackIDs []string) ([]KeepResult, error) {
+	return s.keep(ctx, trackIDs, nil)
+}
+
+// keepPlacement files a kept copy as a track of a particular album, rather
+// than wherever the drop's own metadata puts it: a track of an album someone
+// requested whole goes into that album, at its place on it, whatever record
+// the song first appeared on.
+type keepPlacement struct {
+	Title, Artist, ReleaseGroupID      string
+	TrackNumber, DiscNumber, DiscTotal int
+	Year                               int
+}
+
+// apply is the track as the copy is to be filed and tagged.
+func (p *keepPlacement) apply(track catalog.MusicTrack) catalog.MusicTrack {
+	if p == nil {
+		return track
+	}
+	if strings.TrimSpace(p.Artist) != "" {
+		track.AlbumArtistNames = []string{p.Artist}
+	}
+	track.TrackNumber, track.DiscNumber, track.TotalDiscs = p.TrackNumber, p.DiscNumber, p.DiscTotal
+	if p.Year > 0 {
+		track.ReleaseYear = p.Year
+	}
+	return track
+}
+
+func (s *Service) keep(ctx context.Context, trackIDs []string, placement *keepPlacement) ([]KeepResult, error) {
 	if s == nil || s.db == nil {
 		return nil, ErrDisabled
 	}
@@ -85,7 +115,7 @@ func (s *Service) Keep(ctx context.Context, trackIDs []string) ([]KeepResult, er
 
 	for _, id := range trackIDs {
 		res := KeepResult{TrackID: id}
-		dest, err := s.keepOne(ctx, id, root, dirs, &res)
+		dest, err := s.keepOne(ctx, id, root, dirs, placement, &res)
 		switch {
 		case err != nil:
 			res.Error = err.Error()
@@ -118,11 +148,12 @@ func (s *Service) Keep(ctx context.Context, trackIDs []string) ([]KeepResult, er
 	return results, nil
 }
 
-func (s *Service) keepOne(ctx context.Context, id, root string, dirs []string, res *KeepResult) (string, error) {
+func (s *Service) keepOne(ctx context.Context, id, root string, dirs []string, placement *keepPlacement, res *KeepResult) (string, error) {
 	track, err := s.trackByID(id)
 	if err != nil {
 		return "", fmt.Errorf("track not found")
 	}
+	track = placement.apply(track)
 	res.Title = track.Title
 
 	source := ""
@@ -153,7 +184,15 @@ func (s *Service) keepOne(ctx context.Context, id, root string, dirs []string, r
 	// apostrophes, one capital letter and a zero; Keep duplicated it. Asking
 	// the catalog what it already HAS, rather than asking the filesystem about
 	// one guessed path, is the check that actually means "already in library".
-	if twinID, twinPath := s.findLibraryTwin(ctx, track); twinID != "" {
+	//
+	// A placed copy only has a twin on its own album: someone asking for the
+	// whole album wants it complete, even when one of its songs is already
+	// in the library on a single or a hits collection.
+	onAlbum := ""
+	if placement != nil {
+		onAlbum = placement.Title
+	}
+	if twinID, twinPath := s.findLibraryTwin(ctx, track, onAlbum); twinID != "" {
 		res.AlreadyInLibrary = true
 		res.LibraryTrackID = twinID
 		res.Path = twinPath
@@ -161,6 +200,11 @@ func (s *Service) keepOne(ctx context.Context, id, root string, dirs []string, r
 	}
 
 	album, err := s.keepAlbum(ctx, id, track)
+	if placement != nil && strings.TrimSpace(placement.Title) != "" {
+		// Only an identified request is placed (advanceIdentifying), so the
+		// copy's identity is samo's, as for any identified drop.
+		album, err = keptAlbum{Title: placement.Title, ReleaseGroupID: placement.ReleaseGroupID, Identified: true}, nil
+	}
 	if err != nil {
 		return "", err
 	}
@@ -552,7 +596,12 @@ func keepDestination(root string, track catalog.MusicTrack, albumTitle, ext stri
 	artist := keptAlbumArtist(track)
 
 	name := safeComponent(track.Title, "Untitled")
-	if track.TrackNumber > 0 {
+	switch {
+	case track.TrackNumber > 0 && track.TotalDiscs > 1 && track.DiscNumber > 0:
+		// Every disc starts again at one: "1-01" and "2-01" keep two
+		// first tracks apart, and the folder in disc order.
+		name = fmt.Sprintf("%d-%02d - %s", track.DiscNumber, track.TrackNumber, name)
+	case track.TrackNumber > 0:
 		name = fmt.Sprintf("%02d - %s", track.TrackNumber, name)
 	}
 	return filepath.Join(
@@ -764,24 +813,37 @@ const keepDurationToleranceSeconds = 3
 // Explo drops are excluded (is_explo = 0): the drop folder is full of tracks
 // that ARE this track, and matching one of those would report every keep as
 // already done.
-func (s *Service) findLibraryTwin(ctx context.Context, track catalog.MusicTrack) (string, string) {
+//
+// album, when set, narrows both rungs to library tracks on an album of that
+// name (normalized like the titles): the twin of a track of a whole album
+// is the same song on the same album, not anywhere at all.
+func (s *Service) findLibraryTwin(ctx context.Context, track catalog.MusicTrack, album string) (string, string) {
 	if s.db == nil {
 		return "", ""
 	}
+	wantAlbum := normalizeKeepIdentity(album)
 	if recording := strings.TrimSpace(track.ExternalIDs.MusicBrainzRecordingID); recording != "" {
-		var id, path string
-		err := s.db.QueryRowContext(ctx, `
-			SELECT mt.id, COALESCE(mf.path, '')
+		rows, err := s.db.QueryContext(ctx, `
+			SELECT mt.id, COALESCE(mf.path, ''), mt.album_title
 			FROM music_tracks mt
 			LEFT JOIN media_files mf ON mf.track_id = mt.id
 			WHERE mt.is_explo = 0 AND mt.id <> ? AND mt.external_ids_json LIKE ?
-			LIMIT 1`,
-			track.ID, `%"musicBrainzRecordingId":"`+recording+`"%`).Scan(&id, &path)
-		if err == nil && strings.TrimSpace(id) != "" {
-			return id, path
-		}
-		if err != nil && err != sql.ErrNoRows {
+			ORDER BY mt.id`,
+			track.ID, `%"musicBrainzRecordingId":"`+recording+`"%`)
+		if err != nil {
 			s.logger("explo: keep: recording-id twin lookup failed for %s: %v", track.ID, err)
+		} else {
+			defer rows.Close()
+			for rows.Next() {
+				var id, path, albumTitle string
+				if err := rows.Scan(&id, &path, &albumTitle); err != nil {
+					break
+				}
+				if strings.TrimSpace(id) != "" && (wantAlbum == "" || normalizeKeepIdentity(albumTitle) == wantAlbum) {
+					return id, path
+				}
+			}
+			rows.Close()
 		}
 	}
 
@@ -795,7 +857,7 @@ func (s *Service) findLibraryTwin(ctx context.Context, track catalog.MusicTrack)
 	// both supported databases can express, and a duration window is a cheap,
 	// indexed-enough filter that leaves only a few hundred rows to walk.
 	rows, err := s.db.QueryContext(ctx, `
-		SELECT mt.id, mt.title, mt.display_artist, COALESCE(mf.path, '')
+		SELECT mt.id, mt.title, mt.display_artist, COALESCE(mf.path, ''), mt.album_title
 		FROM music_tracks mt
 		LEFT JOIN media_files mf ON mf.track_id = mt.id
 		WHERE mt.is_explo = 0 AND mt.id <> ? AND mt.duration_seconds BETWEEN ? AND ?`,
@@ -808,11 +870,14 @@ func (s *Service) findLibraryTwin(ctx context.Context, track catalog.MusicTrack)
 	}
 	defer rows.Close()
 	for rows.Next() {
-		var id, candidateTitle, candidateArtist, path string
-		if err := rows.Scan(&id, &candidateTitle, &candidateArtist, &path); err != nil {
+		var id, candidateTitle, candidateArtist, path, albumTitle string
+		if err := rows.Scan(&id, &candidateTitle, &candidateArtist, &path, &albumTitle); err != nil {
 			return "", ""
 		}
 		if normalizeKeepIdentity(candidateTitle) != title {
+			continue
+		}
+		if wantAlbum != "" && normalizeKeepIdentity(albumTitle) != wantAlbum {
 			continue
 		}
 		if !keepArtistsMatch(artist, normalizeKeepIdentity(candidateArtist)) {
@@ -914,6 +979,9 @@ func (s *Service) keepAlbum(ctx context.Context, trackID string, track catalog.M
 			album.Identified = true
 			album.ReleaseGroupID = strings.TrimSpace(releaseGroup)
 		}
+		if musicrelease.CompilationTitle(ledgerAlbum) {
+			return keptAlbum{}, fmt.Errorf("no original album identified for this track yet")
+		}
 		if title := strings.TrimSpace(ledgerAlbum); title != "" {
 			album.Title = title
 			return album, nil
@@ -921,7 +989,7 @@ func (s *Service) keepAlbum(ctx context.Context, trackID string, track catalog.M
 	}
 
 	fallback := strings.TrimSpace(track.AlbumTitle)
-	if fallback == "" || s.isDropFolderName(fallback) {
+	if fallback == "" || fallback == "Unknown Album" || musicrelease.CompilationTitle(fallback) || s.isDropFolderName(fallback) {
 		return keptAlbum{}, fmt.Errorf(
 			"no album identified for this track yet — keeping it now would file it under %q",
 			firstNonEmpty([]string{fallback, "Unknown Album"}))

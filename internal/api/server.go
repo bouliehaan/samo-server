@@ -64,12 +64,16 @@ type ServerOptions struct {
 	LastFM        *lastfm.Service
 	ListenBrainz  *listenbrainz.Service
 	Explo         *explo.Service
-	ArtistImages  *artistimages.Service
-	Events        *events.Hub
-	ArtistMeta    *artistmeta.Service
-	Users         *users.Service
-	Channels      *channels.Service
-	SamoRadio     *samoradio.Service
+	ExploRemote   *explo.Remote
+	// ExploArtClient fetches the covers beside Search for new results; the
+	// egress-aware artwork client in production.
+	ExploArtClient *http.Client
+	ArtistImages   *artistimages.Service
+	Events         *events.Hub
+	ArtistMeta     *artistmeta.Service
+	Users          *users.Service
+	Channels       *channels.Service
+	SamoRadio      *samoradio.Service
 	// Loudness levels items sent to a samo-radio device against each other,
 	// the same way the channel streamer levels its rotation.
 	Loudness *loudness.Service
@@ -120,6 +124,8 @@ type Server struct {
 	lastfm                           *lastfm.Service
 	listenbrainz                     *listenbrainz.Service
 	explo                            *explo.Service
+	exploRemote                      *explo.Remote
+	exploArt                         *exploArtCache
 	artistImages                     *artistimages.Service
 	artistMeta                       *artistmeta.Service
 	users                            *users.Service
@@ -135,6 +141,7 @@ type Server struct {
 	baseCtx                          context.Context
 	startedAt                        time.Time
 	loginLimiter                     *loginLimiter
+	devicePairings                   *devicePairings
 	healthProbe                      *healthProbe
 	serverIDMu                       sync.RWMutex
 	serverID                         string
@@ -223,6 +230,8 @@ func NewServer(options ServerOptions) http.Handler {
 		lastfm:                           options.LastFM,
 		listenbrainz:                     options.ListenBrainz,
 		explo:                            options.Explo,
+		exploRemote:                      options.ExploRemote,
+		exploArt:                         newExploArtCache(options.ExploArtClient),
 		artistImages:                     options.ArtistImages,
 		events:                           eventHub,
 		artistMeta:                       options.ArtistMeta,
@@ -238,6 +247,7 @@ func NewServer(options ServerOptions) http.Handler {
 		baseCtx:                          options.BaseContext,
 		startedAt:                        options.StartedAt,
 		loginLimiter:                     newLoginLimiter(),
+		devicePairings:                   newDevicePairings(),
 		healthProbe:                      &healthProbe{},
 	}
 	if server.startedAt.IsZero() {
@@ -256,6 +266,7 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) routes() {
 	s.mux.HandleFunc("GET /", s.home)
+	s.mux.Handle("GET /listen/", s.webClientHandler())
 	s.mux.HandleFunc("GET /app", s.appPage)
 	s.mux.HandleFunc("GET /app/", s.appPage)
 	s.mux.HandleFunc("GET /login", s.loginPage)
@@ -280,6 +291,10 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("GET /assets/fonts/officecodepro-bold.otf", serveFont(officeCodeProBold))
 
 	s.mux.HandleFunc("POST /api/v1/auth/login", s.loginUser)
+	s.mux.HandleFunc("GET /pair", s.devicePairingPage)
+	s.mux.HandleFunc("POST /api/v1/auth/device/start", s.startDevicePairing)
+	s.mux.HandleFunc("POST /api/v1/auth/device/poll", s.pollDevicePairing)
+	s.mux.HandleFunc("POST /api/v1/auth/device/approve", s.approveDevicePairing)
 	s.handleAPI("POST /api/v1/auth/stream-token", s.issueStreamToken)
 
 	// Setup routes intentionally bypass requireUser so a first-time admin
@@ -297,11 +312,15 @@ func (s *Server) routes() {
 	s.handleAPI("GET /api/v1/users/me/tokens", s.listUserTokens)
 	s.handleAPI("POST /api/v1/users/me/tokens", s.createUserToken)
 	s.handleAPI("DELETE /api/v1/users/me/tokens/{id}", s.revokeUserToken)
+	// More specific than {id}, so it wins; token ids are all "token-…".
+	s.handleAPI("DELETE /api/v1/users/me/tokens/current", s.revokeCurrentUserToken)
 	s.handleAPI("GET /api/v1/users/me/subsonic", s.getSubsonicCredential)
 	s.handleAPI("POST /api/v1/users/me/subsonic", s.createSubsonicCredential)
 	s.handleAPI("DELETE /api/v1/users/me/subsonic", s.deleteSubsonicCredential)
 	s.handleAPI("GET /api/v1/users", s.listUsers)
 	s.handleAPI("POST /api/v1/users", s.createUser)
+	s.handleAPI("PATCH /api/v1/users/{id}", s.updateUser)
+	s.handleAPI("DELETE /api/v1/users/{id}", s.deleteUser)
 
 	s.handleAPI("GET /api/v1/radio/stations", s.listStations)
 	s.handleAPI("GET /api/v1/radio/stations/{id}", s.getStation)
@@ -366,6 +385,16 @@ func (s *Server) routes() {
 	s.handleAPI("POST /api/v1/explo/keep", s.postExploKeep)
 	// User-level (auth-only, no admin): the Explo tab's gate and its ledger.
 	s.handleAPI("GET /api/v1/explo/status", s.getExploStatus)
+	s.handleAPI("GET /api/v1/explo/discovery/status", s.getExploDiscoveryStatus)
+	s.handleAPI("POST /api/v1/explo/connection", s.registerExploConnection)
+	s.handleAPI("GET /api/v1/explo/search", s.searchExploSongs)
+	s.handleAPI("POST /api/v1/explo/downloads", s.addExploSong)
+	s.handleAPI("GET /api/v1/explo/downloads/{id}", s.getExploDownload)
+	s.handleAPI("GET /api/v1/explo/albums", s.searchExploAlbums)
+	s.handleAPI("GET /api/v1/explo/albums/{id}", s.getExploAlbum)
+	s.handleAPI("POST /api/v1/explo/albums/{id}/downloads", s.addExploAlbum)
+	s.handleAPI("GET /api/v1/explo/albums/{id}/download", s.getExploAlbumDownload)
+	s.handleMedia("GET /api/v1/explo/art/{id}", s.serveExploArt)
 	s.handleAPI("GET /api/v1/explo/tracks", s.getExploTracks)
 	s.handleAPI("POST /api/v1/lastfm/queue/flush", s.flushLastFMQueue)
 	s.handleAPI("GET /api/v1/lastfm/queue", s.listLastFMQueue)
@@ -377,26 +406,28 @@ func (s *Server) routes() {
 
 	s.handleAPI("POST /api/v1/scrobble/events", s.postScrobbleEvent)
 
-	s.handleAPI("GET /api/v1/media/covers/{id}", s.getExtractedCover)
-	s.handleAPI("GET /api/v1/media/covers/{id}/image", s.serveExtractedCover)
-	s.handleAPI("GET /api/v1/media/images/{id}/image", s.serveMetadataImage)
+	// Media bytes: the routes a stream token opens (auth.go). Everything
+	// registered through handleAPI refuses one.
+	s.handleMedia("GET /api/v1/media/covers/{id}", s.getExtractedCover)
+	s.handleMedia("GET /api/v1/media/covers/{id}/image", s.serveExtractedCover)
+	s.handleMedia("GET /api/v1/media/images/{id}/image", s.serveMetadataImage)
 
 	s.handleAPI("GET /api/v1/media/files/{id}", s.getMediaFile)
-	s.handleAPI("GET /api/v1/media/files/{id}/stream", s.streamMediaFile)
-	s.handleAPI("GET /api/v1/music/tracks/{id}/stream", s.streamMusicTrack)
-	s.handleAPI("GET /api/v1/music/albums/{id}/cover", s.serveMusicAlbumCover)
-	s.handleAPI("GET /api/v1/audiobooks/{id}/stream", s.streamAudiobook)
-	s.handleAPI("GET /api/v1/audiobooks/{id}/cover", s.serveAudiobookCover)
+	s.handleMedia("GET /api/v1/media/files/{id}/stream", s.streamMediaFile)
+	s.handleMedia("GET /api/v1/music/tracks/{id}/stream", s.streamMusicTrack)
+	s.handleMedia("GET /api/v1/music/albums/{id}/cover", s.serveMusicAlbumCover)
+	s.handleMedia("GET /api/v1/audiobooks/{id}/stream", s.streamAudiobook)
+	s.handleMedia("GET /api/v1/audiobooks/{id}/cover", s.serveAudiobookCover)
 	// Note: /api/v1/podcasts/{id}/cover would clash with the
 	// /api/v1/podcasts/episodes/{id} routes — Go's ServeMux can't decide
 	// between `/podcasts/episodes/cover` matching either pattern. Cover
 	// + stream sit under /shows/ so each podcast verb has an unambiguous
 	// path.
-	s.handleAPI("GET /api/v1/podcasts/shows/{id}/cover", s.servePodcastCover)
+	s.handleMedia("GET /api/v1/podcasts/shows/{id}/cover", s.servePodcastCover)
 	s.handleAPI("POST /api/v1/podcasts/shows/{id}/cover", s.uploadPodcastCover)
 	s.handleAPI("DELETE /api/v1/podcasts/shows/{id}", s.deletePodcastShow)
 	s.handleAPI("GET /api/v1/podcasts/shows/{id}/episodes", s.listPodcastShowEpisodes)
-	s.handleAPI("GET /api/v1/podcasts/episodes/{id}/stream", s.streamPodcastEpisode)
+	s.handleMedia("GET /api/v1/podcasts/episodes/{id}/stream", s.streamPodcastEpisode)
 	s.handleAPI("GET /api/v1/podcasts/cache", s.getPodcastCacheSummary)
 	s.handleAPI("DELETE /api/v1/podcasts/cache", s.clearPodcastCache)
 	s.handleAPI("GET /api/v1/podcasts/prewarm", s.getPodcastPrewarm)
@@ -422,7 +453,7 @@ func (s *Server) routes() {
 	s.handleAPI("GET /api/v1/music/artists/{id}/albums", s.listMusicArtistAlbums)
 	s.handleAPI("GET /api/v1/music/artists/{id}/top-tracks", s.listMusicArtistTopTracks)
 	s.handleAPI("GET /api/v1/music/artists/{id}/appears-on", s.listMusicArtistAppearsOn)
-	s.handleAPI("GET /api/v1/music/artists/{id}/cover", s.serveMusicArtistCover)
+	s.handleMedia("GET /api/v1/music/artists/{id}/cover", s.serveMusicArtistCover)
 	s.handleAPI("POST /api/v1/music/artists/images/backfill", s.startArtistImageBackfill)
 	s.handleAPI("GET /api/v1/music/artists/images/backfill", s.getArtistImageBackfill)
 	s.handleAPI("POST /api/v1/music/artists/images/backfill/cancel", s.cancelArtistImageBackfill)
@@ -436,10 +467,13 @@ func (s *Server) routes() {
 	s.handleAPI("GET /api/v1/music/playlists", s.listMusicPlaylists)
 	s.handleAPI("GET /api/v1/music/playlists/{id}", s.getMusicPlaylist)
 	s.handleAPI("GET /api/v1/music/playlists/{id}/tracks", s.listMusicPlaylistTracks)
-	s.handleAPI("GET /api/v1/music/playlists/{id}/cover", s.serveMusicPlaylistCover)
+	s.handleMedia("GET /api/v1/music/playlists/{id}/cover", s.serveMusicPlaylistCover)
 	s.handleAPI("POST /api/v1/music/playlists/{id}/cover", s.uploadMusicPlaylistCover)
 	s.handleAPI("POST /api/v1/music/playlists", s.createMusicPlaylist)
 	s.handleAPI("POST /api/v1/music/playlists/import", s.importMusicPlaylist)
+	s.handleAPI("POST /api/v1/music/playlists/explo-import", s.importExploPlaylist)
+	s.handleAPI("GET /api/v1/music/playlists/{id}/import", s.getExploPlaylistImport)
+	s.handleAPI("POST /api/v1/music/playlists/{id}/import/retry", s.retryExploPlaylistImport)
 	s.handleAPI("PATCH /api/v1/music/playlists/{id}", s.updateMusicPlaylist)
 	s.handleAPI("DELETE /api/v1/music/playlists/{id}", s.deleteMusicPlaylist)
 	s.handleAPI("GET /api/v1/music/browse/favorites", s.browseMusicFavorites)
@@ -448,6 +482,7 @@ func (s *Server) routes() {
 	s.handleAPI("GET /api/v1/music/browse/recently-added", s.browseMusicRecentlyAdded)
 	s.handleAPI("GET /api/v1/music/browse/unplayed", s.browseMusicUnplayed)
 	s.handleAPI("GET /api/v1/music/browse/discovery", s.browseMusicDiscovery)
+	s.handleAPI("GET /api/v1/home/heroes", s.getHomeHeroes)
 	s.handleAPI("GET /api/v1/music/search", s.searchMusic)
 
 	// Audiobook domain. Music, audiobooks, podcasts, and radio are all
@@ -548,24 +583,23 @@ func (s *Server) routes() {
 	s.handleAPI("POST /api/v1/channels/{id}/skip", s.skipChannel)
 	s.handleAPI("POST /api/v1/channels/{id}/previous", s.previousChannel)
 	s.handleAPI("DELETE /api/v1/channels/{id}/skips", s.clearChannelSkips)
-	// Channel playlist and stream go through requireUser so a
-	// stream_token query param works for <audio src=...> in browsers
-	// without forcing every listener URL to carry a real Authorization
-	// header. Same pattern as /api/v1/music/tracks/{id}/stream.
-	s.mux.HandleFunc("GET /channels/{id}/playlist.m3u", s.requireUser(s.channelPlaylist))
-	s.mux.HandleFunc("GET /channels/{id}/stream", s.requireUser(s.channelStream))
+	// Channel playlist and stream are media routes, so a stream_token query
+	// param works for <audio src=...> in browsers without forcing every
+	// listener URL to carry a real Authorization header. Same pattern as
+	// /api/v1/music/tracks/{id}/stream.
+	s.handleMedia("GET /channels/{id}/playlist.m3u", s.channelPlaylist)
+	s.handleMedia("GET /channels/{id}/stream", s.channelStream)
 	// The same pipe under the API namespace, for Samo's own clients.
 	//
-	// Identical handler and identical auth — handleAPI IS requireUser. What
-	// differs is the prefix, and to a client that prefix is load-bearing: the
-	// desktop and phone both decide "is this a Samo stream URL I can re-home
+	// Identical handler and identical auth. What differs is the prefix, and to
+	// a client that prefix is load-bearing: the desktop and phone both decide "is this a Samo stream URL I can re-home
 	// and re-token" by looking for /api/v1/ in the path. A listener URL
 	// without it is one nobody can mint a fresh stream token for, so a channel
 	// left on for longer than a token lives dies on the next reconnect with no
 	// way back. Serving the audio from both places costs a route and makes a
 	// channel an ordinary Samo stream to every client that already knows how
 	// to hold one open.
-	s.handleAPI("GET /api/v1/channels/{id}/stream", s.channelStream)
+	s.handleMedia("GET /api/v1/channels/{id}/stream", s.channelStream)
 
 	// samo-radio: headless players wired into a physical audio output. Every
 	// client reaches a device through here rather than talking to it directly,
@@ -596,10 +630,6 @@ func (s *Server) routes() {
 	// carries its own auth (the protocol's own scheme) and reuses the native
 	// streaming and scrobble handlers, so nothing above changes.
 	s.registerSubsonic()
-}
-
-func (s *Server) handleAPI(pattern string, handler http.HandlerFunc) {
-	s.mux.HandleFunc(pattern, s.requireUser(handler))
 }
 
 type stationResponse struct {
@@ -741,18 +771,6 @@ func (s *Server) stream(w http.ResponseWriter, r *http.Request) {
 	err := s.radio.Stream(r.Context(), stationID, time.Now().UTC(), w)
 	if err != nil && !errors.Is(err, context.Canceled) {
 		log.Warnf("radio stream failed: %v", err)
-	}
-}
-
-func (s *Server) requireAPIAuth(next http.HandlerFunc) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		if s.apiToken == "" || tokenFromRequest(r) == s.apiToken {
-			next(w, r)
-			return
-		}
-
-		w.Header().Set("WWW-Authenticate", `Bearer realm="samo"`)
-		writeError(w, http.StatusUnauthorized, "missing or invalid API token")
 	}
 }
 

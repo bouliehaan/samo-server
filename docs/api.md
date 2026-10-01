@@ -4,7 +4,9 @@ Samo's first API is native to this server. Compatibility adapters can sit beside
 
 Authenticated `/api/v1/*` routes require a user token: `Authorization: Bearer <token>` or `X-Samo-Token: <token>`.
 
-Legacy installs can keep using `SAMO_API_TOKEN`; it maps to the bootstrap `server` user (`user-server`) so existing clients keep working.
+A stream token (`?stream_token=`) opens only the GET routes that serve audio or image bytes (streams, covers, images, the channel M3U; the list is `streamTokenRoutes` in `internal/api/route_auth_test.go`). Every other route answers `401` to it, including minting a new stream token.
+
+Legacy installs can keep using `SAMO_API_TOKEN`; it maps to the bootstrap `server` user (`user-server`) so existing clients keep working. Removing the variable retires the secret at the next start.
 
 ## Users
 
@@ -18,8 +20,11 @@ User accounts live in the database. Each user has their own playback state and c
 | `GET /api/v1/users/me/tokens` | list API tokens |
 | `POST /api/v1/users/me/tokens` | issue a new token |
 | `DELETE /api/v1/users/me/tokens/{id}` | revoke a token |
+| `DELETE /api/v1/users/me/tokens/current` | sign out: revoke the bearer token this request carries |
 | `GET /api/v1/users` | list users (admin) |
 | `POST /api/v1/users` | create user (admin) |
+
+Signing out is `DELETE /api/v1/users/me/tokens/current`, since a client holds its token's secret but never its id. Only a bearer (`Authorization` or `X-Samo-Token`) names the token to revoke: a request carrying only a stream token gets `401`. The shared `SAMO_API_TOKEN` answers `403` and stays valid, because every legacy client of the install uses that one secret. Servers without this route answer `404`, and nothing is revoked. samo clients call it when they disconnect from a server, and after a password login to retire the `login` token they used to mint their device token.
 
 Bootstrap env (first run):
 
@@ -28,7 +33,22 @@ Bootstrap env (first run):
 
 If the named admin already exists and `SAMO_BOOTSTRAP_PASSWORD` is set, startup updates that admin's password. This gives self-hosted installs a recovery path without carrying a known default password.
 
-Public routes (no user token): `GET /health`, `POST /api/v1/auth/login`, radio/internet-radio stream URLs.
+Public routes (no user token): `GET /health`, `POST /api/v1/auth/login`, `POST /api/v1/auth/device/start`, `POST /api/v1/auth/device/poll`, `GET /pair`, radio/internet-radio stream URLs.
+
+### Device pairing (TV sign-in)
+
+A TV signs in without a password typed on a remote: it shows a short code, and someone already signed in approves it from a phone or computer. This is the OAuth device authorization grant (RFC 8628) cut down to one server; the handlers are `internal/api/device_pairing.go`.
+
+| Route | Auth | Purpose |
+|-------|------|---------|
+| `POST /api/v1/auth/device/start` | none | issue a code pair: `device_code` (256-bit polling secret, only ever in POST bodies), `user_code` (`ABCD-EFGH`, for the screen), `verification_uri` (always the relative `/pair`), `expires_in` (600), `interval` (5) |
+| `GET /pair` | browser sign-in | the approval page; `/pair#code=ABCD-EFGH` prefills the code (the fragment never reaches the server) |
+| `POST /api/v1/auth/device/approve` | bearer (not a stream token) | `{"user_code", "approve": true\|false}` approves or declines for the signed-in account |
+| `POST /api/v1/auth/device/poll` | none | `{"device_code"}` → `{"status", "interval"}` while `authorization_pending` or `slow_down` (polled too early; the interval grows by 5s up to 30s), then `access_denied` or `expired_token`. On approval: exactly a login response (`token`, `user`, `tokenMeta`, `serverId`) plus `"status": "approved"`, issued once; any later poll is `expired_token` |
+
+- The TV's token is a new device token labelled `samo Android TV`, revocable like any other under `/api/v1/users/me/tokens`. Disconnecting the TV revokes it through `/api/v1/users/me/tokens/current`.
+- `start` answers `503` while first-run setup is unfinished (there may be no account to approve with) and `429` past 10 codes a minute per address or 100 overall; `approve` allows 20 attempts a minute per account. Pending codes are in memory: a restart expires them.
+- The server never tells the client where to approve: the client builds `<the address it chose>/pair` itself, so an unauthenticated response cannot send a person to another site.
 
 ## Catalog
 
@@ -258,6 +278,9 @@ Search returns candidate metadata only. It does not write catalog changes.
 - `GET /api/v1/music/playlists/{id}/tracks`
 - `POST /api/v1/music/playlists`
 - `POST /api/v1/music/playlists/import`
+- `POST /api/v1/music/playlists/explo-import`
+- `GET /api/v1/music/playlists/{id}/import`
+- `POST /api/v1/music/playlists/{id}/import/retry`
 - `PATCH /api/v1/music/playlists/{id}`
 - `DELETE /api/v1/music/playlists/{id}`
 - `GET /api/v1/music/browse/favorites`
@@ -271,6 +294,39 @@ from matching catalog tracks. It does not download remote media. Supported
 `sourceType` values are `auto`, `csv`, `m3u`, `plain`, `json`, and `youtube`.
 Admins may pass `url` for server-side metadata fetches; anyone may paste
 `content`.
+
+### YouTube Music playlists with Explo
+
+`POST /api/v1/music/playlists/explo-import` (admin) imports a public or
+unlisted YouTube Music playlist and downloads the songs the library lacks.
+It needs a connected samo-explo whose `/api/v1/explo/discovery/status`
+reports `"playlists": true`.
+
+```json
+{ "url": "https://music.youtube.com/playlist?list=PL…", "name": "", "public": false }
+```
+
+The playlist is created (or, imported again, refreshed) under `name`, or the
+YouTube Music playlist's own name when `name` is empty. Songs already in the
+library go in at once, matched the way Keep finds a library twin (same
+title and artist within 3 seconds; never an Explore drop). Every other song
+becomes a Search for new request with id `youtube-<video>`: Explo downloads
+it from the playlist's own video (a music video goes behind a search for the
+song's audio), and samo identifies, covers and keeps it like any request. A
+kept song joins the playlist after the nearest earlier song of the YouTube
+Music playlist that is in it, so the order holds whatever order downloads
+finish in. A song AcoustID cannot recognise is named from the listing only
+when YouTube Music lists it as a song (an art track); a video or an upload
+waits for identification. The response is `202` with `playlist` and
+`import`.
+
+`GET /api/v1/music/playlists/{id}/import` follows it: `tracks` in YouTube
+Music's order, each with `state` — `in-library`, `queued` (waiting for Explo
+to take it), the request's own `downloading` / `identifying` /
+`needs-review` / `failed`, or `unavailable` — and a `message`.
+`unavailable` at the top level counts tracks YouTube Music cannot play.
+`404` for a playlist not imported this way. `POST …/import/retry` (admin)
+hands failed and refused songs back to Explo.
 
 Playlists can be private or public. Private playlists are visible only to
 their owner. Public playlists are readable by other authenticated users, but
@@ -300,6 +356,50 @@ Music metadata is intentionally richer than a simple file browser:
 - album artists, track artists, release and original release dates, release type/status, label, catalog number, barcode, genres, styles, moods, tags, images, external IDs, playback state
 - track artists, album linkage, disc/track totals, release data, lyrics, BPM, key, comments, audio technical metadata, images, external IDs, playback state
 - audio file container, MIME type, codec/profile, bitrate, bit depth, sample rate, channels, duration, size, checksum, embedded tags
+
+## Home
+
+- `GET /api/v1/home/heroes`
+
+The cards a client's Home leads with, ranked best first — the answer to "what
+should I play right now" for the authenticated user. One card, one tap. Every
+card has to earn its place; a Home with nothing fresh returns the Explore drop
+alone, and a server with no drop returns an empty list.
+
+```json
+{
+  "items": [
+    {
+      "id": "explore:playlist_1f7a…:2026-09-19T15:54:15Z",
+      "kind": "explore",
+      "eyebrow": "Fresh drop · 53 new this week",
+      "title": "Explore",
+      "subtitle": "New music found for you — Lord Huron, MGMT, Joji and more",
+      "meta": "99 tracks · 6h 12m",
+      "sleeves": [{ "id": "cover_…", "url": "/api/v1/media/images/cover_…/image" }],
+      "target": { "type": "playlist", "id": "playlist_1f7a…" },
+      "action": "shuffle",
+      "score": 0.9,
+      "freshAt": "2026-09-19T15:54:15Z"
+    }
+  ]
+}
+```
+
+Kinds, and what earns each one a card:
+
+- `explore` — the weekly Explore drop. Always a candidate; it owns the top
+  while it holds arrivals newer than the user's last play of it.
+- `episode` — an unstarted episode published in the last week by a show the
+  user finishes (at least three episodes completed, at least half of those
+  started). One card per show, the newest episode.
+- `season` — the user's own playlist for the time of year, by name: anything
+  matching *christmas / xmas / holiday* from November 20 to December 26,
+  *halloween / spooky* from October 15 to 31.
+
+`sleeves` are the covers to fan across the card, in order; a samo-relative
+`url` is served by this server and takes the caller's bearer. `action` is what
+the card's primary control does with `target`.
 
 ## Audiobooks
 

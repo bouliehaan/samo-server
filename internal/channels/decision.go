@@ -100,6 +100,9 @@ type OwedSummary struct {
 	Source string  `json:"source,omitempty"`
 	Tier   string  `json:"tier"`
 	Credit float64 `json:"credit"`
+	// Started includes partial hearings below Heard's threshold. Untouched
+	// episodes precede both partial hearings and completed first hearings.
+	Started bool `json:"started,omitempty"`
 	// Heard is whether the listener has had this once already — what is owed
 	// on it is a second surfacing, which the queue puts behind everything
 	// nobody has heard yet, whatever the tiers say.
@@ -281,6 +284,7 @@ func (d *Decision) applyOwed(queue ObligationQueue, now time.Time, policy Freshn
 			Tier:    string(obligation.Tier),
 			Credit:  round2(obligation.Credit),
 			Heard:   obligation.Heard(),
+			Started: obligation.Started(),
 			AgeMins: int(now.Sub(obligation.PublishedAt).Minutes()),
 			Urgency: round2(obligation.Urgency(now, policy)),
 		}

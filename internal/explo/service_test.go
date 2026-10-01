@@ -82,10 +82,12 @@ func TestProcessNewTracksEndToEnd(t *testing.T) {
 	ctx := context.Background()
 	db, exploDir := setupExploTestDB(t)
 
-	// fpcalc: distinguish tracks by which file path it was asked about.
+	// fpcalc: distinguish tracks by which file path it was asked about
+	// (the last argument, after the options).
 	fpcalc := fakeFpcalc(t, `
-case "$1 $2" in
-  "-json "*"Two.mp3") echo '{"duration": 320.0, "fingerprint": "FP-MATCHED"}' ;;
+for file; do :; done
+case "$file" in
+  *"Two.mp3") echo '{"duration": 320.0, "fingerprint": "FP-MATCHED"}' ;;
   *) echo '{"duration": 200.0, "fingerprint": "FP-UNMATCHED"}' ;;
 esac`)
 

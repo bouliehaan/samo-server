@@ -35,18 +35,17 @@ func TestFetchRecordingReleaseRefsPrefersAlbumType(t *testing.T) {
 	if err != nil || refs.ReleaseGroupID != "rg-album" {
 		t.Fatalf("got (%q, %v), want (rg-album, nil)", refs.ReleaseGroupID, err)
 	}
-	// The chosen release group's own releases come first so the per-release
-	// CAA rung tries the real record's pressings before other appearances.
-	if len(refs.ReleaseIDs) != 2 || refs.ReleaseIDs[0] != "rel-2" || refs.ReleaseIDs[1] != "rel-1" {
-		t.Fatalf("release ids = %v, want [rel-2 rel-1] (chosen-group first)", refs.ReleaseIDs)
+	// Only the chosen release group's own releases can supply its artwork.
+	if len(refs.ReleaseIDs) != 1 || refs.ReleaseIDs[0] != "rel-2" {
+		t.Fatalf("release ids = %v, want [rel-2] (chosen-group only)", refs.ReleaseIDs)
 	}
 }
 
-func TestFetchRecordingReleaseRefsFallsBackToFirst(t *testing.T) {
+func TestFetchRecordingReleaseRefsRejectsCompilationOnly(t *testing.T) {
 	srv := withStubMusicBrainz(t, `{"releases":[{"id":"rel-9","release-group":{"id":"rg-comp","primary-type":"Compilation"}}]}`, 0)
 	refs, err := fetchRecordingReleaseRefs(context.Background(), srv.Client(), "rec-1")
-	if err != nil || refs.ReleaseGroupID != "rg-comp" {
-		t.Fatalf("got (%q, %v), want (rg-comp, nil)", refs.ReleaseGroupID, err)
+	if err != nil || refs.ReleaseGroupID != "" || len(refs.ReleaseIDs) != 0 {
+		t.Fatalf("got (%+v, %v), want no compilation metadata", refs, err)
 	}
 }
 

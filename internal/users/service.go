@@ -162,21 +162,20 @@ func (s *Service) Update(ctx context.Context, actor Principal, targetID string, 
 	if actor.User.ID != targetID && actor.User.Role != RoleAdmin {
 		return User{}, ErrForbidden
 	}
-	var passwordHash *string
-	if input.Password != nil {
-		if strings.TrimSpace(*input.Password) == "" {
-			return User{}, ErrInvalidPassword
+	if input.Username != nil || input.Role != nil {
+		if actor.User.Role != RoleAdmin {
+			return User{}, ErrForbidden
 		}
-		hash, err := hashPassword(*input.Password)
-		if err != nil {
-			return User{}, err
-		}
-		passwordHash = &hash
 	}
-	if err := updateUserRecord(ctx, s.db, targetID, input.DisplayName, passwordHash); err != nil {
-		return User{}, err
+	return s.manageUser(ctx, actor, targetID, input, false)
+}
+
+func (s *Service) Delete(ctx context.Context, actor Principal, targetID string) error {
+	if actor.User.Role != RoleAdmin {
+		return ErrForbidden
 	}
-	return loadUserByID(ctx, s.db, targetID)
+	_, err := s.manageUser(ctx, actor, strings.TrimSpace(targetID), UpdateUserInput{}, true)
+	return err
 }
 
 func (s *Service) Login(ctx context.Context, input LoginInput) (LoginResponse, error) {
@@ -232,6 +231,41 @@ func (s *Service) ListTokens(ctx context.Context, actor Principal) ([]Token, err
 
 func (s *Service) RevokeToken(ctx context.Context, actor Principal, tokenID string) error {
 	return deleteToken(ctx, s.db, actor.User.ID, strings.TrimSpace(tokenID))
+}
+
+// RevokePresentedToken is sign-out: it retires the token whose secret the
+// caller presents, which has to be one of the actor's own. A client holds its
+// token's secret and never its id, and the secret is all it takes to find the
+// row.
+//
+// The shared SAMO_API_TOKEN is refused. It is one secret for every legacy
+// client and script of an install at once, so one of them signing out must
+// not cut off the rest.
+func (s *Service) RevokePresentedToken(ctx context.Context, actor Principal, secret string) error {
+	if !s.Enabled() {
+		return ErrDisabled
+	}
+	secret = strings.TrimSpace(secret)
+	if secret == "" {
+		return ErrUnauthorized
+	}
+	if s.legacyAPIToken != "" && secret == s.legacyAPIToken {
+		return ErrSharedToken
+	}
+	tokenID, owner, label, err := loadTokenByHash(ctx, s.db, hashToken(secret))
+	if err == ErrInvalidToken {
+		return ErrUnauthorized
+	}
+	if err != nil {
+		return err
+	}
+	if isServerToken(owner, label) {
+		return ErrSharedToken
+	}
+	if owner != actor.User.ID {
+		return ErrForbidden
+	}
+	return deleteToken(ctx, s.db, owner, tokenID)
 }
 
 func validateCreateInput(input CreateUserInput) (User, error) {

@@ -134,3 +134,8 @@ release: release-amd64
 	@echo "  tar xzf $(BINARY)-linux-amd64.tar.gz"
 	@echo "  cd <extracted>"
 	@echo "  sudo ./install.sh"
+
+# Rebuild the desktop renderer served at /listen/. Install its dependencies first.
+.PHONY: ui-client
+ui-client:
+	node scripts/build-web-client.mjs $(SAMO_CLIENT_SOURCE)

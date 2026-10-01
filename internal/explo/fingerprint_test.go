@@ -64,3 +64,15 @@ func TestFingerprintFileRequiresPath(t *testing.T) {
 		t.Fatal("expected error for unconfigured fpcalc path")
 	}
 }
+
+// fpcalc 1.5.1 on a file whose last frame does not decode: a complete
+// fingerprint and exit 3, unless asked to ignore decoding errors.
+func TestFingerprintSurvivesAnUndecodableLastFrame(t *testing.T) {
+	fpcalc := fakeFpcalc(t, `echo 'ERROR: Error decoding audio frame (End of file)' >&2
+echo '{"duration": 102.58, "fingerprint": "AQADJ0siJlQSMWiqD1fy41l4"}'
+[ "$1" = "-ignore-errors" ] || exit 3`)
+	fp, err := fingerprintFile(context.Background(), fpcalc, "/music/explo/puer_aeternus-Quangou.mp3")
+	if err != nil || fp.Value != "AQADJ0siJlQSMWiqD1fy41l4" || fp.DurationSeconds != 103 {
+		t.Fatalf("fingerprint %+v, err %v", fp, err)
+	}
+}

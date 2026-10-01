@@ -9,6 +9,7 @@ import (
 	"strings"
 
 	"github.com/bouliehaan/samo-server/internal/catalog"
+	"github.com/bouliehaan/samo-server/internal/musicrelease"
 )
 
 const musicBrainzProviderName = "musicbrainz"
@@ -175,7 +176,7 @@ func (p *MusicBrainzProvider) recordingResults(items []musicBrainzRecording) []S
 				// releaseIsDerived flags a Compilation/Live/Remix/... release
 				// group, so consumers (e.g. the explo fallback) can decline
 				// to adopt a sampler's title as the track's album.
-				"releaseIsDerived": len(release.ReleaseGroup.SecondaryTypes) > 0,
+				"releaseIsDerived": rejectedRecordingRelease(release),
 			}
 			if release.ReleaseGroup.ID != "" {
 				result.ExternalIDs.MusicBrainzReleaseGroupID = release.ReleaseGroup.ID
@@ -289,34 +290,27 @@ func (s *flexibleScore) UnmarshalJSON(data []byte) error {
 	return nil
 }
 
-// bestRecordingRelease picks the release that best represents a recording's
-// own record: a clean (no secondary types) Album first, then a clean Single,
-// then a clean EP, then any other clean release group, and a derived one
-// (Compilation/Live/Remix/...) only when nothing better exists.
+// bestRecordingRelease prefers the song's own record. A rejected result is
+// retained for general metadata search, but explicitly flagged for Explo.
 func bestRecordingRelease(releases []musicBrainzRelease) musicBrainzRelease {
+	best := releases[0]
 	rankOf := func(release musicBrainzRelease) int {
-		if len(release.ReleaseGroup.SecondaryTypes) > 0 {
+		if rejectedRecordingRelease(release) {
 			return 4
 		}
-		switch strings.ToLower(strings.TrimSpace(release.ReleaseGroup.PrimaryType)) {
-		case "album":
-			return 0
-		case "single":
-			return 1
-		case "ep":
-			return 2
-		}
-		return 3
+		return musicrelease.Rank(release.ReleaseGroup.PrimaryType)
 	}
-	best := releases[0]
-	bestRank := rankOf(best)
 	for _, release := range releases[1:] {
-		if rank := rankOf(release); rank < bestRank {
+		if rankOf(release) < rankOf(best) {
 			best = release
-			bestRank = rank
 		}
 	}
 	return best
+}
+
+func rejectedRecordingRelease(release musicBrainzRelease) bool {
+	group := release.ReleaseGroup
+	return musicrelease.Rejected(group.Title, group.PrimaryType, group.SecondaryTypes) || musicrelease.CompilationTitle(release.Title)
 }
 
 func musicSearchType(request SearchRequest) MusicSearchType {

@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/bouliehaan/samo-server/internal/metadata"
+	"github.com/bouliehaan/samo-server/internal/musicrelease"
 )
 
 // musicbrainzMinInterval keeps the fallback search under MusicBrainz's
@@ -112,7 +113,12 @@ func (s *Service) identifyByTextSearch(ctx context.Context, path, tagTitle, tagA
 			Artist:                    resultArtist,
 		}
 		derived, _ := result.Raw["releaseIsDerived"].(bool)
-		if releaseTitle, ok := result.Raw["releaseTitle"].(string); ok && !derived {
+		releaseTitle, _ := result.Raw["releaseTitle"].(string)
+		derived = derived || musicrelease.CompilationTitle(releaseTitle)
+		if derived {
+			match.MusicBrainzReleaseGroupID = ""
+		}
+		if !derived {
 			// A derived release's title is a sampler's name, not this
 			// track's album, so it is not taken. Leaving Album blank is not
 			// "keep the scanner's tag" any more: resolveAlbumTitle then asks
@@ -121,7 +127,7 @@ func (s *Service) identifyByTextSearch(ctx context.Context, path, tagTitle, tagA
 			// sharer typed — usually the very compilation being rejected here.
 			match.Album = strings.TrimSpace(releaseTitle)
 		}
-		if !derived {
+		if !derived && match.Album != "" {
 			return match, true, nil
 		}
 		if !fallbackFound {

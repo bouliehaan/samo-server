@@ -161,19 +161,31 @@ Each source carries a tier, `S` down to `F` (`C` by default). The queue is
 ordered by:
 
 ```
-urgency = unheardLift (if nobody has heard it)  +  tierSpread × tier  +  recency  +  expiryUrgency
+urgency = progressLift + tierSpread × tier + recency + expiryUrgency
+progressLift = 2 × unheardLift if untouched, unheardLift if partly played, 0 if heard
 ```
 
-**An episode nobody has heard goes before any episode somebody has, across
-every tier.** A brand-new A-tier episode goes before the second surfacing of an
-S-tier one; everything owed a second hearing waits until nothing unheard can
-air. This is an order and not a weight: `unheardLift` is computed from the
+**Untouched episodes go first across every tier**, followed by partial hearings
+with up to half a credit, then episodes already heard for more than half.
+A brand-new B-tier episode goes before either a partial hearing or a second
+surfacing of an S-tier one. Within each group the existing tier order applies.
+This is an order and not a weight: each `unheardLift` is computed from the
 policy's own weights as more than every tier step, the whole recency range and
 the whole expiry lift put together, plus a tier step of margin, so no
-combination of tier, age and deadline carries a heard episode past an unheard
-one — under the default weights or under a plan that has stretched them. The
-record shows the two classes as `heard: true` on the owed list; compare
-urgencies within a class, not across.
+combination of tier, age and deadline can reverse the groups. Decision records
+show `started: true` for any credited playback and `heard: true` for more than
+half a credit. S/A targets remain two surfacings when configured that way;
+sorting does not settle or discard their remaining credit.
+
+On 2026-09-21, WAN replayed at 10:42 on Jake Channel ahead of untouched A- and
+C-tier episodes. It had aired 64m52s of 151m18s on Saturday, earning 0.43 credit.
+The old half-credit cutoff still classified it with untouched episodes, where
+its S tier won. Separating untouched from partial hearings closes that gap.
+
+If the chosen episode has no playable source, the scheduler applies this same
+order to the remaining candidates. A failed first choice does not let a repeat
+jump ahead of another fresh episode. Each failed resolution is recorded as
+`unplayable` in the decision.
 
 Within a class, one tier step is worth more than the entire recency range, so
 **an S-tier show from six hours ago goes before a B-tier one from ten minutes

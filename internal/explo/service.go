@@ -25,6 +25,7 @@ import (
 
 	"github.com/bouliehaan/samo-server/internal/catalog"
 	"github.com/bouliehaan/samo-server/internal/metadata"
+	"github.com/bouliehaan/samo-server/internal/musicrelease"
 	"github.com/bouliehaan/samo-server/internal/playlists"
 	"github.com/bouliehaan/samo-server/internal/storage"
 	"github.com/bouliehaan/samo-server/internal/users"
@@ -68,6 +69,10 @@ type ServiceOptions struct {
 	// batch of overrides/playlist changes lands. Same callback main.go wires
 	// into the HTTP handlers after a manual metadata apply.
 	ReloadCatalog func(context.Context) error
+	// ApplyPlaylist installs one changed playlist into the live projection,
+	// as the playlist handlers do. Optional: without it a playlist import
+	// reloads the catalog instead (see playlist_imports.go).
+	ApplyPlaylist func(catalog.MusicPlaylist)
 	PlaylistName  string
 	Logger        func(string, ...any)
 	// FFmpegPath, TrackByID and ScanSubpaths exist for Keep (see keep.go),
@@ -90,6 +95,7 @@ type Service struct {
 	metadata      *metadata.Service
 	playlists     *playlists.Service
 	reloadCatalog func(context.Context) error
+	applyPlaylist func(catalog.MusicPlaylist)
 	playlistName  string
 	logger        func(string, ...any)
 
@@ -119,6 +125,13 @@ type Service struct {
 	// without this a second run could pick the same not-yet-recorded tracks
 	// and waste rate-limited AcoustID calls identifying them twice.
 	processMu sync.Mutex
+
+	// requestsMu serializes AdvanceRequests, which runs around every identify
+	// pass and must not keep the same request twice.
+	requestsMu sync.Mutex
+	// importsMu serializes the playlist imports' feeding and placing, which
+	// both the import handler and AdvanceRequests start.
+	importsMu sync.Mutex
 
 	// backfillMu serializes cover-backfill runs. Kept separate from processMu
 	// so a slow, network-bound backfill doesn't block scan-triggered processing.
@@ -173,6 +186,7 @@ func NewService(options ServiceOptions) *Service {
 		playlists:     options.Playlists,
 		covers:        options.Covers,
 		reloadCatalog: options.ReloadCatalog,
+		applyPlaylist: options.ApplyPlaylist,
 		playlistName:  playlistName,
 		logger:        logger,
 		// Effective config starts at the environment values; LoadConfig may
@@ -300,6 +314,7 @@ func (s *Service) ProcessNewTracks(ctx context.Context) (Result, error) {
 		}
 
 		result.Matched++
+		match = candidate.pinRequestedAlbum(match)
 		if err := s.applyMatch(ctx, candidate.trackID, candidate.albumID, match); err != nil {
 			s.logger("explo: apply metadata failed for %s: %v", candidate.trackID, err)
 		}
@@ -452,9 +467,10 @@ func exploPathClause(dirs []string) (string, []any) {
 //     scan — the day explo fetched the file, not the day anyone chose it — so
 //     a fresh keep sorted into Recently Added at that week's position rather
 //     than the top, and the shelf never showed what had just been kept.
-//   - Nothing of it is under an explo folder any more: the folder was narrowed
-//     or cleared, or its drops were pruned. Those are library albums that were
-//     wrongly hidden, and their added_at is right as it stands. (A keep whose
+//   - Nothing of it is under an explo folder any more, and it still has files
+//     elsewhere: the folder was narrowed or cleared. Those are library albums
+//     that were wrongly hidden, and their added_at is right as it stands. An
+//     album with no files at all stays hidden. (A keep whose
 //     drop rotates out before any reconcile sees the copy lands here too and
 //     keeps its old date — a window of seconds, once a week.)
 //
@@ -492,11 +508,16 @@ func (s *Service) reconcileHiddenAlbums(ctx context.Context, dirs []string) (hid
 	if err != nil {
 		return hidden, 0, fmt.Errorf("explo unhide kept albums: %w", err)
 	}
+	// outsideFolder, not just NOT underFolder: an album with no file-backed
+	// track at all is not under the folder either, and un-hiding it put every
+	// emptied explo album on the Home shelf as a blank tile with nothing to
+	// play. Only an album with a real file outside the folder is library.
 	gone, err := s.execCount(ctx, `
 		UPDATE music_albums
 		SET hidden_from_recently_added = 0, updated_at = CURRENT_TIMESTAMP
 		WHERE hidden_from_recently_added = 1
-		  AND NOT `+underFolder, args...)
+		  AND NOT `+underFolder+`
+		  AND `+outsideFolder, repeatArgs(args, 2)...)
 	if err != nil {
 		return hidden, kept, fmt.Errorf("explo unhide albums: %w", err)
 	}
@@ -554,11 +575,13 @@ func (s *Service) reconcileExploTracks(ctx context.Context, dirs []string) (flag
 	if err != nil {
 		return flagged, 0, fmt.Errorf("explo unflag kept tracks: %w", err)
 	}
+	// A track with no file left is not library either; see the album case.
 	gone, err := s.execCount(ctx, `
 		UPDATE music_tracks
 		SET is_explo = 0, updated_at = CURRENT_TIMESTAMP
 		WHERE is_explo = 1
-		  AND NOT `+underFolder, args...)
+		  AND NOT `+underFolder+`
+		  AND `+outsideFolder, repeatArgs(args, 2)...)
 	if err != nil {
 		return flagged, kept, fmt.Errorf("explo unflag tracks: %w", err)
 	}
@@ -604,24 +627,37 @@ func repeatArgs(args []any, n int) []any {
 // file os.Stat has just confirmed is ErrNotExist — a present file, or any
 // ambiguous stat error (permission, I/O, mount hiccup), is left untouched, so it
 // can never delete a real or merely-unreachable track. Returns how many it pruned.
+//
+// A missing FOLDER is the same doubt one level up, and it is only checked
+// there. When the disk holding the folder is not mounted, every file under it
+// stats as ErrNotExist — not an ambiguous error — so the per-file check alone
+// reads an unmounted disk as "the whole week rotated out". That is what
+// happened on 2026-10-01: samo was started once without its media mount, and
+// its first pass deleted every explo track, emptied the Explore playlist, and
+// orphaned the albums. Rotation deletes files, never the folder itself, so a
+// folder that is not there means samo cannot see it.
 func (s *Service) pruneVanishedFiles(ctx context.Context, dirs []string) (int, error) {
-	if len(dirs) == 0 {
+	reachable := s.reachableDirs(dirs)
+	if len(reachable) == 0 {
 		return 0, nil
 	}
-	clause, args := exploPathClause(dirs)
+	clause, args := exploPathClause(reachable)
+	// The library-copy check below asks whether a file sits outside EVERY
+	// configured folder, reachable or not, so it keeps the full set.
+	allClause, allArgs := exploPathClause(dirs)
 	rows, err := s.db.QueryContext(ctx, fmt.Sprintf(`
-		SELECT mt.id, mf.path
+		SELECT mt.id, COALESCE(mt.album_id, ''), mf.path
 		FROM music_tracks mt
 		JOIN media_files mf ON mf.track_id = mt.id
 		WHERE %s`, clause), args...)
 	if err != nil {
 		return 0, fmt.Errorf("explo prune-vanished query: %w", err)
 	}
-	type candidate struct{ trackID, path string }
+	type candidate struct{ trackID, albumID, path string }
 	var candidates []candidate
 	for rows.Next() {
 		var c candidate
-		if err := rows.Scan(&c.trackID, &c.path); err != nil {
+		if err := rows.Scan(&c.trackID, &c.albumID, &c.path); err != nil {
 			rows.Close()
 			return 0, err
 		}
@@ -633,6 +669,7 @@ func (s *Service) pruneVanishedFiles(ctx context.Context, dirs []string) (int, e
 	}
 
 	pruned := 0
+	emptied := map[string]struct{}{}
 	for _, c := range candidates {
 		select {
 		case <-ctx.Done():
@@ -652,8 +689,8 @@ func (s *Service) pruneVanishedFiles(ctx context.Context, dirs []string) (int, e
 		var kept int
 		if err := s.db.QueryRowContext(ctx, fmt.Sprintf(`
 			SELECT COUNT(1) FROM media_files mf
-			WHERE mf.track_id = ? AND NOT %s`, clause),
-			append([]any{c.trackID}, args...)...).Scan(&kept); err != nil {
+			WHERE mf.track_id = ? AND NOT %s`, allClause),
+			append([]any{c.trackID}, allArgs...)...).Scan(&kept); err != nil {
 			s.logger("explo: prune vanished track %s: library-copy lookup failed: %v", c.trackID, err)
 			continue
 		}
@@ -670,12 +707,66 @@ func (s *Service) pruneVanishedFiles(ctx context.Context, dirs []string) (int, e
 			s.logger("explo: prune vanished track %s failed: %v", c.trackID, err)
 			continue
 		}
+		if kept == 0 && c.albumID != "" {
+			emptied[c.albumID] = struct{}{}
+		}
 		pruned++
 	}
+	s.dropEmptiedAlbums(ctx, emptied)
 	if pruned > 0 {
 		s.logger("explo: pruned %d file(s) rotated out of the drop folder", pruned)
 	}
 	return pruned, nil
+}
+
+// reachableDirs is the subset of dirs that exist as directories right now.
+// Anything else is logged and left out, so its tracks are not mistaken for
+// rotated-out files (see pruneVanishedFiles).
+func (s *Service) reachableDirs(dirs []string) []string {
+	reachable := make([]string, 0, len(dirs))
+	for _, dir := range dirs {
+		info, err := os.Stat(dir)
+		if err != nil || !info.IsDir() {
+			if err == nil {
+				err = fmt.Errorf("not a directory")
+			}
+			s.logger("explo: folder %q is not reachable (%v) — leaving its tracks alone; check that the disk holding it is mounted", dir, err)
+			continue
+		}
+		reachable = append(reachable, dir)
+	}
+	return reachable
+}
+
+// dropEmptiedAlbums deletes the albums a prune left with no tracks, and the
+// artists left with nothing at all, the same cleanup a library scan does after
+// removing files. Without it the albums outlive their only tracks as empty
+// rows, and an empty album is not under the explo folder any more, so nothing
+// keeps it hidden from the library.
+func (s *Service) dropEmptiedAlbums(ctx context.Context, albums map[string]struct{}) {
+	if len(albums) == 0 {
+		return
+	}
+	for albumID := range albums {
+		if err := storage.Retry(ctx, exploWriteAttempts, func() error {
+			_, err := s.db.ExecContext(ctx, `
+				DELETE FROM music_albums
+				WHERE id = ? AND NOT EXISTS (SELECT 1 FROM music_tracks WHERE album_id = ?)`,
+				albumID, albumID)
+			return err
+		}); err != nil {
+			s.logger("explo: drop emptied album %s failed: %v", albumID, err)
+		}
+	}
+	if err := storage.Retry(ctx, exploWriteAttempts, func() error {
+		_, err := s.db.ExecContext(ctx, `
+			DELETE FROM music_artists
+			WHERE id NOT IN (SELECT artist_id FROM music_track_artists)
+			  AND id NOT IN (SELECT artist_id FROM music_album_artists)`)
+		return err
+	}); err != nil {
+		s.logger("explo: drop orphaned artists failed: %v", err)
+	}
 }
 
 // pruneExploLedger drops explo_tracks rows for any track no longer under a
@@ -712,10 +803,21 @@ func (s *Service) reconcileExploPlaylist(ctx context.Context) (bool, error) {
 	// The ledger is already pruned to the configured folders, and the join
 	// drops rows whose track has left the catalog, so `want` is exactly the
 	// membership the playlist should hold, in arrival order.
+	//
+	// Except what someone asked for through Search for new. It downloads into
+	// the same drop folder, but it is not discovery: it is on its way into
+	// the library, and once kept it shares its track with the library copy,
+	// so it would sit in Explore until the weekly rotation took the file. A
+	// request that stopped at needs-review stays: its message sends whoever
+	// asked to Explore, to listen and Keep it by hand.
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT et.track_id FROM explo_tracks et
 		JOIN music_tracks mt ON mt.id = et.track_id
-		ORDER BY et.processed_at, et.track_id`)
+		WHERE NOT EXISTS (
+		  SELECT 1 FROM explo_requests er
+		  WHERE (er.track_id = et.track_id OR er.library_track_id = et.track_id)
+		    AND er.state <> ?)
+		ORDER BY et.processed_at, et.track_id`, RequestNeedsReview)
 	if err != nil {
 		return false, fmt.Errorf("explo playlist ledger query: %w", err)
 	}
@@ -946,7 +1048,7 @@ func (s *Service) identifyWithFallback(ctx context.Context, candidate candidateT
 			s.logger("explo: identified %q as %s / %s [%s], which disagrees with its own tags (%s / %s [%s])",
 				candidate.path, match.Artist, match.Title, match.Album, candidate.artist, candidate.title, candidate.album)
 		}
-		return s.resolveAlbumTitle(ctx, match), true, nil
+		return s.resolveIdentifiedAlbum(ctx, match, candidate.durationSeconds), true, nil
 	}
 
 	fallback, fallbackMatched, fallbackErr := s.identifyByTextSearch(ctx, candidate.path, candidate.title, candidate.artist, candidate.durationSeconds)
@@ -956,26 +1058,47 @@ func (s *Service) identifyWithFallback(ctx context.Context, candidate candidateT
 	if fallbackMatched {
 		return s.resolveAlbumTitle(ctx, fallback), true, nil
 	}
+
+	// A requested download whose own tags did not find it: search for the song
+	// that was asked for, still behind the same duration gate.
+	if candidate.requestTitle != "" && (candidate.requestTitle != candidate.title || candidate.requestArtist != candidate.artist) {
+		requested, requestedMatched, requestErr := s.identifyByTextSearch(ctx, "", candidate.requestTitle, candidate.requestArtist, candidate.durationSeconds)
+		if requestErr != nil {
+			s.logger("explo: requested-song search failed for %q: %v", candidate.path, requestErr)
+		}
+		if requestedMatched {
+			return s.resolveAlbumTitle(ctx, requested), true, nil
+		}
+	}
 	return identifiedTrack{}, false, err
 }
 
-// resolveAlbumTitle fills in an album name the identifiers left blank.
-//
-// Both paths leave it blank routinely: AcoustID reports no release groups for
-// plenty of recordings, and the text-search fallback deliberately discards a
-// DERIVED release's title rather than call a disco sampler the track's album.
-// Blank used to mean "keep whatever the scanner read off the file", and for an
-// explo drop that is the worst available answer — the file was tagged by
-// whoever shared it (Soulseek rips are overwhelmingly ripped from hits
-// compilations), and an untagged drop falls back to the drop FOLDER's name, so
-// tracks landed in the library under "Weekly-Exploration". A match that knows
-// the recording knows the record: ask MusicBrainz for the release group and
-// use its title.
-//
-// Every failure leaves the match untouched rather than clearing it — a
-// MusicBrainz hiccup should cost an album name, never replace a good one with
-// nothing.
+// resolveIdentifiedAlbum can recover the original album from a duplicate
+// recording when the fingerprint's recording exists only on compilations.
+func (s *Service) resolveIdentifiedAlbum(ctx context.Context, match identifiedTrack, duration int) identifiedTrack {
+	match = s.resolveAlbumTitle(ctx, match)
+	if match.Album != "" {
+		return match
+	}
+	other, ok, err := s.identifyByTextSearch(ctx, "", match.Title, match.Artist, duration)
+	if err != nil {
+		s.logger("explo: album search failed for %s / %s: %v", match.Artist, match.Title, err)
+		return match
+	}
+	if ok && other.Album != "" && tokenAgreement(match.Artist, other.Artist) == 2 && tokenAgreement(match.Title, other.Title) == 2 {
+		match.Album, match.MusicBrainzReleaseGroupID = other.Album, other.MusicBrainzReleaseGroupID
+	}
+	return match
+}
+
+// resolveAlbumTitle fills missing album metadata from eligible releases only.
+// A rejected group must lose both its title and ID, or the title lookup and
+// artwork pipeline can revive the same compilation. Provider failures leave
+// an unresolved album for the pipeline's later backfill.
 func (s *Service) resolveAlbumTitle(ctx context.Context, match identifiedTrack) identifiedTrack {
+	if musicrelease.CompilationTitle(match.Album) {
+		match.Album, match.MusicBrainzReleaseGroupID = "", ""
+	}
 	if strings.TrimSpace(match.Album) != "" {
 		return match
 	}
@@ -989,8 +1112,11 @@ func (s *Service) resolveAlbumTitle(ctx context.Context, match identifiedTrack) 
 			s.logger("explo: release group title lookup failed for %s: %v", group, err)
 			return match
 		}
-		match.Album = title
-		return match
+		if title != "" {
+			match.Album = title
+			return match
+		}
+		match.MusicBrainzReleaseGroupID = ""
 	}
 	recording := strings.TrimSpace(match.MusicBrainzRecordingID)
 	if recording == "" {
@@ -1067,19 +1193,15 @@ func (s *Service) applyMatch(ctx context.Context, trackID, albumID string, match
 	albumCandidate := metadata.SearchResult{
 		Provider:  match.Source,
 		MediaType: "album",
-		Title:     match.Album,
-		// ID keeps the apply-layer validation satisfied when the match has an
-		// artist but no release-group title; only the fields listed below are
-		// ever applied.
+		Title:     firstNonEmpty([]string{match.Album, "Unknown Album"}),
+		// Unresolved metadata must replace stale sampler overrides and file
+		// tags. The ledger stays blank so the album backfill can retry.
 		ID: albumID,
 	}
 	if match.Artist != "" {
 		albumCandidate.Authors = []catalog.ContributorRef{{Name: match.Artist}}
 	}
-	fields := []string{"displayArtist"}
-	if strings.TrimSpace(match.Album) != "" {
-		fields = append(fields, "title")
-	}
+	fields := []string{"displayArtist", "title"}
 	if err := storage.Retry(ctx, exploWriteAttempts, func() error {
 		_, err := s.metadataApply.Apply(ctx, metadata.MetadataApplyRequest{
 			TargetKind:         string(metadata.ApplyTargetMusicAlbum),
@@ -1171,7 +1293,7 @@ const albumTitleBackfillBatch = 100
 func (s *Service) backfillAlbumTitles(ctx context.Context) int {
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT et.track_id, et.status, et.musicbrainz_recording_id, et.musicbrainz_release_group_id,
-		       et.matched_title, et.matched_artist, mt.album_id
+		       et.matched_title, et.matched_artist, mt.album_id, mt.duration_seconds
 		FROM explo_tracks et
 		JOIN music_tracks mt ON mt.id = et.track_id
 		WHERE et.status IN ('matched', 'matched-fallback')
@@ -1186,13 +1308,14 @@ func (s *Service) backfillAlbumTitles(ctx context.Context) int {
 	type owed struct {
 		trackID, albumID string
 		match            identifiedTrack
+		duration         int
 	}
 	var due []owed
 	for rows.Next() {
 		var item owed
 		var status string
 		if err := rows.Scan(&item.trackID, &status, &item.match.MusicBrainzRecordingID,
-			&item.match.MusicBrainzReleaseGroupID, &item.match.Title, &item.match.Artist, &item.albumID); err != nil {
+			&item.match.MusicBrainzReleaseGroupID, &item.match.Title, &item.match.Artist, &item.albumID, &item.duration); err != nil {
 			rows.Close()
 			s.logger("explo: album title backfill scan failed: %v", err)
 			return 0
@@ -1216,7 +1339,7 @@ func (s *Service) backfillAlbumTitles(ctx context.Context) int {
 			return resolved
 		default:
 		}
-		match := s.resolveAlbumTitle(ctx, item.match)
+		match := s.resolveIdentifiedAlbum(ctx, item.match, item.duration)
 		if strings.TrimSpace(match.Album) == "" {
 			continue
 		}
@@ -1231,7 +1354,7 @@ func (s *Service) backfillAlbumTitles(ctx context.Context) int {
 			s.logger("explo: album title backfill write failed for %s: %v", item.trackID, err)
 			continue
 		}
-		if s.overriddenAlbumTitle(ctx, item.albumID) == "" {
+		if title := s.overriddenAlbumTitle(ctx, item.albumID); title == "" || title == "Unknown Album" {
 			if err := s.applyAlbumTitle(ctx, item.albumID, match); err != nil {
 				s.logger("explo: apply album title failed for %s: %v", item.trackID, err)
 			}
@@ -1362,8 +1485,42 @@ type candidateTrack struct {
 	// musicBrainzRecordingID is the recording id embedded in the file's own
 	// tags, when the sharer's rip carried one (about half of a weekly drop
 	// does). It never identifies the file on its own; it breaks ties between
-	// the recordings AcoustID lists for its fingerprint.
+	// the recordings AcoustID lists for its fingerprint. For a song requested
+	// through Search for new it is the recording that was asked for.
 	musicBrainzRecordingID string
+	// requestTitle/requestArtist name the song a Search for new request asked
+	// for, when this drop is that request's download. They seed one last text
+	// search when neither the fingerprint nor the file's own tags identify it.
+	requestTitle  string
+	requestArtist string
+	// requestRecording is the recording the request asked for, and
+	// requestAlbumID/requestAlbum the album it was asked for as part of,
+	// when it was asked for with a whole album (see pinRequestedAlbum).
+	requestRecording string
+	requestAlbumID   string
+	requestAlbum     string
+}
+
+// pinRequestedAlbum credits a track of a whole-album request to that album.
+// Identification gives each recording its own best album — the studio album
+// over a soundtrack it also appears on — which is right for a weekly drop and
+// wrong for a track someone asked for as part of the soundtrack: the album
+// would land split across every record its songs first came out on, with
+// every one of those covers. Only when the audio is the song that was asked
+// for; a wrong download keeps its real identity, and the request stops for
+// review on it.
+func (c candidateTrack) pinRequestedAlbum(match identifiedTrack) identifiedTrack {
+	if c.requestAlbumID == "" || strings.TrimSpace(c.requestAlbum) == "" {
+		return match
+	}
+	asked := songRequestRow{recordingID: c.requestRecording, title: c.requestTitle, artist: c.requestArtist}
+	if !requestMatches(asked, match.MusicBrainzRecordingID, match.Title, match.Artist) {
+		return match
+	}
+	// A Deezer album has no release group: the cover pass finds its art by
+	// name instead.
+	match.Album, match.MusicBrainzReleaseGroupID = c.requestAlbum, musicBrainzOnly(c.requestAlbumID)
+	return match
 }
 
 // evidence is what identification may hold the fingerprint's candidates up
@@ -1469,10 +1626,13 @@ func (s *Service) findCandidateTracks(ctx context.Context) ([]candidateTrack, er
 	}
 	query := fmt.Sprintf(`
 		SELECT mt.id, COALESCE(mt.album_id, ''), mf.path, COALESCE(mt.title, ''), COALESCE(mt.display_artist, ''), mt.duration_seconds,
-		       COALESCE(mt.external_ids_json, ''), COALESCE(mt.album_title, '')
+		       COALESCE(mt.external_ids_json, ''), COALESCE(mt.album_title, ''),
+		       COALESCE(er.recording_id, ''), COALESCE(er.title, ''), COALESCE(er.artist, ''),
+		       COALESCE(er.album_id, ''), COALESCE(er.album, '')
 		FROM music_tracks mt
 		JOIN media_files mf ON mf.track_id = mt.id
 		LEFT JOIN explo_tracks et ON et.track_id = mt.id
+		LEFT JOIN explo_requests er ON er.track_id = mt.id AND er.state = 'identifying'
 		WHERE (
 		  et.track_id IS NULL
 		  OR (
@@ -1481,11 +1641,13 @@ func (s *Service) findCandidateTracks(ctx context.Context) ([]candidateTrack, er
 		    AND %s
 		  )
 		) AND (%s)
-		ORDER BY mt.added_at, mt.id`,
+		ORDER BY (er.recording_id IS NULL), mt.added_at, mt.id`,
 		exploMaxIdentifyAttempts,
 		exploEligibilityCheckExpr("et.processed_at"),
 		strings.Join(clauses, " OR "))
 
+	// Requested songs first: someone is waiting on them, and a full drop takes
+	// many minutes to identify (all of it, after a rescan re-adds the week).
 	rows, err := s.db.QueryContext(ctx, query, args...)
 	if err != nil {
 		return nil, err
@@ -1495,11 +1657,19 @@ func (s *Service) findCandidateTracks(ctx context.Context) ([]candidateTrack, er
 	var out []candidateTrack
 	for rows.Next() {
 		var candidate candidateTrack
-		var externalIDs string
-		if err := rows.Scan(&candidate.trackID, &candidate.albumID, &candidate.path, &candidate.title, &candidate.artist, &candidate.durationSeconds, &externalIDs, &candidate.album); err != nil {
+		var externalIDs, requestedRecording string
+		if err := rows.Scan(&candidate.trackID, &candidate.albumID, &candidate.path, &candidate.title, &candidate.artist, &candidate.durationSeconds, &externalIDs, &candidate.album,
+			&requestedRecording, &candidate.requestTitle, &candidate.requestArtist,
+			&candidate.requestAlbumID, &candidate.requestAlbum); err != nil {
 			return nil, err
 		}
+		candidate.requestRecording = requestedRecording
 		candidate.musicBrainzRecordingID = embeddedRecordingID(externalIDs)
+		if MusicBrainzID(requestedRecording) {
+			// The song someone asked for outranks whatever recording the
+			// sharer's tags name.
+			candidate.musicBrainzRecordingID = requestedRecording
+		}
 		if s.isDropFolderName(candidate.album) {
 			candidate.album = ""
 		}

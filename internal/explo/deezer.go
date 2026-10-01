@@ -9,39 +9,33 @@ import (
 	"net/url"
 	"strings"
 	"time"
+
+	"github.com/bouliehaan/samo-server/internal/musicrelease"
 )
 
 // deezerSearchURL is a var so tests can point it at an httptest server.
 var deezerSearchURL = "https://api.deezer.com/search/album"
 
-// deezerTrackSearchURL is the song-level search endpoint (see
-// lookupDeezerTrackCover), separately overridable in tests.
 var deezerTrackSearchURL = "https://api.deezer.com/search/track"
 
-// deezerMinInterval keeps the cover fallback far under Deezer's published 50
-// requests / 5 seconds quota. Last rung of the chain, so volume is minimal.
 const deezerMinInterval = 500 * time.Millisecond
 
-// lookupDeezerAlbumCover searches Deezer's public album search for a cover.
-// Same contract as the iTunes rung: both names must loosely match or it
-// returns nothing, "" means a definitive miss, an error means retry later.
+// lookupDeezerAlbumCover searches for artwork matching the identified album.
 func lookupDeezerAlbumCover(ctx context.Context, client *http.Client, artist, album string) (string, error) {
 	artist = strings.TrimSpace(artist)
 	album = strings.TrimSpace(album)
-	if artist == "" || album == "" {
+	if artist == "" || album == "" || musicrelease.CompilationTitle(album) {
 		return "", nil
 	}
 	query := fmt.Sprintf(`artist:"%s" album:"%s"`, artist, album)
 	return deezerAlbumCoverForQuery(ctx, client, deezerSearchURL, query, artist, album)
 }
 
-// lookupDeezerTrackCover searches Deezer at the SONG level and returns the
-// matched track's album artwork — the compilation-proof rung for classic
-// hits, mirroring lookupITunesTrackCover.
-func lookupDeezerTrackCover(ctx context.Context, client *http.Client, artist, title string) (string, error) {
+// lookupDeezerTrackCover requires the song and its album to match.
+func lookupDeezerTrackCover(ctx context.Context, client *http.Client, artist, title, album string) (string, error) {
 	artist = strings.TrimSpace(artist)
 	title = strings.TrimSpace(title)
-	if artist == "" || title == "" {
+	if artist == "" || title == "" || strings.TrimSpace(album) == "" || musicrelease.CompilationTitle(album) {
 		return "", nil
 	}
 	query := fmt.Sprintf(`artist:"%s" track:"%s"`, artist, title)
@@ -72,6 +66,7 @@ func lookupDeezerTrackCover(ctx context.Context, client *http.Client, artist, ti
 				Name string `json:"name"`
 			} `json:"artist"`
 			Album struct {
+				Title    string `json:"title"`
 				CoverXL  string `json:"cover_xl"`
 				CoverBig string `json:"cover_big"`
 			} `json:"album"`
@@ -88,7 +83,7 @@ func lookupDeezerTrackCover(ctx context.Context, client *http.Client, artist, ti
 		if cover == "" {
 			continue
 		}
-		if !coverNamesMatch(result.Artist.Name, artist) || !coverNamesMatch(result.Title, title) {
+		if !coverNamesMatch(result.Artist.Name, artist) || !coverNamesMatch(result.Title, title) || !coverNamesMatch(result.Album.Title, album) || musicrelease.CompilationTitle(result.Album.Title) {
 			continue
 		}
 		return cover, nil
@@ -138,7 +133,7 @@ func deezerAlbumCoverForQuery(ctx context.Context, client *http.Client, endpoint
 		if cover == "" {
 			continue
 		}
-		if !coverNamesMatch(result.Artist.Name, artist) || !coverNamesMatch(result.Title, album) {
+		if !coverNamesMatch(result.Artist.Name, artist) || !coverNamesMatch(result.Title, album) || musicrelease.CompilationTitle(result.Title) {
 			continue
 		}
 		return cover, nil

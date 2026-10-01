@@ -107,6 +107,13 @@ type Obligation struct {
 	// and nowhere near the front of the running order. Anything that reads
 	// the queue as "what plays next" needs to know which.
 	Held *Hold `json:"held,omitempty"`
+	// ExpectedAt is when the station expects to air this next: its first
+	// airing in the air-order forecast, which runs the real engine forward
+	// from the live station (forecast.go). THIS is the running order; the
+	// queue's is urgency. Derived on read and never stored, like Held; absent
+	// until a forecast has been made, and for anything the forecast did not
+	// reach -- an episode that expires first, or waits past the horizon.
+	ExpectedAt *time.Time `json:"expectedAt,omitempty"`
 }
 
 // Hold is a rule standing between something owed and the air.
@@ -167,16 +174,19 @@ const heardThreshold = 0.5
 // whether what the station still owes on it is a SECOND surfacing.
 func (o Obligation) Heard() bool { return o.Credit > heardThreshold }
 
+// Started reports any credited listening, including an incomplete airing.
+// A partly played episode is still owed, but must wait behind untouched ones.
+// Airings with zero exposure and discarded false starts do not earn credit.
+func (o Obligation) Started() bool { return o.Credit > 0 }
+
 // Urgency is how much the station wants to surface this right now.
 //
-// Four terms, and the relationship between them is the whole design:
+// Listening progress comes before tier, recency and expiry:
 //
-//   - NEVER HEARD comes first, across every tier. An episode nobody has had
-//     yet outranks any episode somebody has, so a brand-new A-tier episode
-//     goes before the second surfacing of an S-tier one, and everything owed
-//     a second hearing waits until nothing unheard can air. A second surfacing
-//     is a lower class of claim, not a smaller one: see unheardLift for why
-//     this is an order and not a weight.
+//   - UNTOUCHED comes first, then partly played, then heard (over half).
+//     An hour of a long episode must not count as untouched just because it
+//     is less than half. Each class gets a full unheardLift over the next,
+//     so no tier, age or deadline can reverse their order.
 //   - TIER dominates within a class. One tier step is worth more than the
 //     entire recency range, so an S-tier show published six hours ago beats a
 //     B-tier show published ten minutes ago. Anything else means the loudest
@@ -189,6 +199,9 @@ func (o Obligation) Heard() bool { return o.Credit > heardThreshold }
 func (o Obligation) Urgency(now time.Time, policy FreshnessPolicy) float64 {
 	value := policy.tierSpread() * o.Tier.Value()
 	if !o.Heard() {
+		value += policy.unheardLift()
+	}
+	if !o.Started() {
 		value += policy.unheardLift()
 	}
 	window := o.ExpiresAt.Sub(o.PublishedAt)

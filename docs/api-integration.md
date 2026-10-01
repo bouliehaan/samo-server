@@ -132,6 +132,11 @@ Stream tokens authenticate the same user the bearer that minted them
 belongs to. They're stored only in memory on the server — restart wipes
 them and clients should re-mint.
 
+A stream token opens media bytes and nothing else: streams, covers and
+images. Every other route, including `POST /api/v1/auth/stream-token`
+itself, answers `401` to a request whose only credential is a stream
+token. Mint with the bearer, and send the bearer for everything else.
+
 If you can attach headers to your stream requests (native mobile HTTP
 stack, custom audio engine), you can skip stream tokens entirely and
 send `Authorization: Bearer <token>` on the stream URLs directly.

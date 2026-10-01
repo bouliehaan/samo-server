@@ -34,6 +34,9 @@ import (
 // mutation — the failure mode of guessing wrong is silent stale data on every
 // other device, which nobody will report as a bug for weeks.
 var nonCatalogMutations = map[string]string{
+	"registerExploConnection": "persists acquisition transport configuration, not catalog content",
+	"addExploSong":            "queues an external download; the later library scan commits imported tracks",
+	"addExploAlbum":           "queues external downloads, one per track; the later library scans commit them",
 	// Per-user playback state. Never part of the shared catalog projection, and
 	// the clients own their own copy.
 	"patchPlayback":     "per-user playback position",
@@ -46,10 +49,14 @@ var nonCatalogMutations = map[string]string{
 	"deleteUser":               "account, not catalog",
 	"createUserToken":          "credential, not catalog",
 	"revokeUserToken":          "credential, not catalog",
+	"revokeCurrentUserToken":   "sign-out; the caller's own credential, not catalog",
 	"createSubsonicCredential": "credential, not catalog",
 	"deleteSubsonicCredential": "credential, not catalog",
 	"issueStreamToken":         "ephemeral credential",
 	"loginUser":                "session, not catalog",
+	"startDevicePairing":       "ephemeral device authorization challenge",
+	"approveDevicePairing":     "device authorization decision, not catalog",
+	"pollDevicePairing":        "device credential issuance, not catalog",
 	"createSetupAdmin":         "first-run account creation",
 	"completeSetup":            "first-run marker",
 
@@ -347,11 +354,10 @@ func handlerName(expr ast.Expr) string {
 	case *ast.SelectorExpr:
 		return node.Sel.Name
 	case *ast.CallExpr:
-		// s.requireUser(s.foo) wraps; look inside for the real handler.
-		if name := selectorName(node.Fun); name == "requireUser" || name == "requireAPIAuth" {
-			if len(node.Args) > 0 {
-				return handlerName(node.Args[0])
-			}
+		// s.requireCredential(streamTokenAllowed, s.foo) wraps; look inside for
+		// the real handler.
+		if selectorName(node.Fun) == "requireCredential" && len(node.Args) > 0 {
+			return handlerName(node.Args[len(node.Args)-1])
 		}
 		return selectorName(node.Fun)
 	}

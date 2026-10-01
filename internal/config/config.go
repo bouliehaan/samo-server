@@ -57,6 +57,8 @@ type Config struct {
 	ScannerExternal        bool
 	ScanFFprobe            bool
 	ExploDirs              []string
+	ExploURL               string
+	ExploToken             string
 	AcoustIDAPIKey         string
 
 	// EgressProxyURL routes a named few hosts through an outbound CONNECT proxy
@@ -139,6 +141,8 @@ func LoadEnv() (Config, error) {
 		ScannerExternal:        envBool("SAMO_SCANNER_EXTERNAL", false),
 		ScanFFprobe:            envBool("SAMO_SCAN_FFPROBE", false),
 		ExploDirs:              envPathList("SAMO_EXPLO_DIRS"),
+		ExploURL:               strings.TrimSpace(os.Getenv("SAMO_EXPLO_URL")),
+		ExploToken:             strings.TrimSpace(os.Getenv("SAMO_EXPLO_TOKEN")),
 		AcoustIDAPIKey:         strings.TrimSpace(os.Getenv("SAMO_ACOUSTID_API_KEY")),
 		EgressProxyURL:         strings.TrimSpace(os.Getenv("SAMO_EGRESS_PROXY_URL")),
 		EgressProxyHosts:       strings.TrimSpace(os.Getenv("SAMO_EGRESS_PROXY_HOSTS")),

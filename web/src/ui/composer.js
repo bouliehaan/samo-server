@@ -112,10 +112,16 @@ export function composerPlaylistEdit(playlist) {
     "// rename, set description, and upload a cover from the artwork slot above");
 }
 
-export function composerPlaylistImport() {
+// explo: the connected Explo can read YouTube Music playlists and download
+// the songs the library lacks (admins only; the downloads join the library).
+export function composerPlaylistImport(explo) {
+  const exploRow = explo ?
+    '<div class="composer-row">' +
+      '<label class="field checkbox full"><input id="composerImportExplo" type="checkbox" checked><span>Download missing songs with Explo (YouTube Music links)</span></label>' +
+    '</div>' : "";
   const body =
     '<div class="composer-row">' +
-      fieldHTML("composerImportName", "Playlist Name", "Imported mix", "text", "") +
+      fieldHTML("composerImportName", "Playlist Name", explo ? "Leave empty to use the YouTube Music name" : "Imported mix", "text", "") +
       '<label class="field"><span class="field-label">Format</span><select id="composerImportSource">' +
         '<option value="auto">Auto-detect</option>' +
         '<option value="csv">CSV</option>' +
@@ -130,11 +136,13 @@ export function composerPlaylistImport() {
       fieldHTML("composerImportURL", "URL", "https://music.youtube.com/playlist?list=...", "url", "", "full") +
       textAreaHTML("composerImportContent", "Pasted Content", "CSV rows, #EXTM3U content, JSON, or plain Artist - Title lines", "", "full") +
     '</div>' +
+    exploRow +
     '<div class="composer-actions">' +
       '<button class="btn primary" data-action="composer-submit" data-composer="playlist-import">IMPORT</button>' +
       '<button class="btn ghost" data-action="composer-toggle" data-composer="playlist-import">CANCEL</button>' +
     '</div>';
-  return composerHTML("playlist-import", "IMPORT PLAYLIST", body,
+  return composerHTML("playlist-import", "IMPORT PLAYLIST", body, explo ?
+    "// With Explo, a YouTube Music playlist keeps its name and order: songs you have go in now, the rest download, get identified and join as they land." :
     "// Samo matches imported metadata to your local music. It does not download remote tracks.");
 }
 

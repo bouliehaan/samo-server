@@ -570,3 +570,47 @@ func TestReconcileAdoptsAndRenamesOldDefaultPlaylist(t *testing.T) {
 		t.Fatal("renamed playlist must reconcile as a no-op on the next pass")
 	}
 }
+
+// "Anything I add with Search for new ends up in my Explore playlist." A
+// requested download sits in the drop folder like any weekly drop, but it is
+// on its way into the library, not discovery — kept, it even shares its track
+// with the library copy until rotation takes the file. Only a request that
+// stopped at needs-review stays, because its message sends you to Explore to
+// Keep it by hand.
+func TestExplorePlaylistLeavesOutRequestedSongs(t *testing.T) {
+	ctx := context.Background()
+	db, _ := setupExploTestDB(t)
+	mustExec(t, db, `
+		INSERT INTO music_tracks (id, title, album_id) VALUES ('track-review', 'Wrong Song', 'album-explo');
+		INSERT INTO explo_tracks (track_id, status, processed_at) VALUES
+		  ('track-matched', 'matched', '2026-10-01T10:00:00Z'),
+		  ('track-unmatched', 'matched-fallback', '2026-10-01T11:00:00Z'),
+		  ('track-review', 'matched', '2026-10-01T12:00:00Z');
+		INSERT INTO explo_requests (recording_id, state, track_id, library_track_id) VALUES
+		  ('deezer-1', 'in-library', 'track-unmatched', 'track-unmatched'),
+		  ('deezer-2', 'needs-review', 'track-review', '');
+	`)
+	svc := newConfigTestService(t, db, []string{"/music/explo"}, "env-key")
+	if _, err := svc.reconcileExploPlaylist(ctx); err != nil {
+		t.Fatal(err)
+	}
+	var trackIDsJSON string
+	if err := db.QueryRowContext(ctx, `SELECT track_ids_json FROM music_playlists WHERE system = 1`).Scan(&trackIDsJSON); err != nil {
+		t.Fatal(err)
+	}
+	if trackIDsJSON != `["track-matched","track-review"]` {
+		t.Fatalf("Explore = %s; want the weekly drop and the request waiting for review, not the kept request", trackIDsJSON)
+	}
+
+	// A request that becomes one later leaves on the next pass.
+	mustExec(t, db, `INSERT INTO explo_requests (recording_id, state, track_id) VALUES ('deezer-3', 'identifying', 'track-matched')`)
+	if _, err := svc.reconcileExploPlaylist(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.QueryRowContext(ctx, `SELECT track_ids_json FROM music_playlists WHERE system = 1`).Scan(&trackIDsJSON); err != nil {
+		t.Fatal(err)
+	}
+	if trackIDsJSON != `["track-review"]` {
+		t.Fatalf("Explore after a new request = %s", trackIDsJSON)
+	}
+}

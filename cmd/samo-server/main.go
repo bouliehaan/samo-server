@@ -316,6 +316,9 @@ func main() {
 	if bootstrapResult.EnsuredServerToken {
 		log.Infof("legacy SAMO_API_TOKEN mapped to bootstrap server user")
 	}
+	if bootstrapResult.RetiredServerToken {
+		log.Infof("SAMO_API_TOKEN is no longer set: retired the shared token it configured, which no longer authenticates")
+	}
 	setupHintNeeded := false
 	if !bootstrapResult.CreatedAdmin && !bootstrapResult.UpdatedPassword {
 		if existingUsers, err := userService.List(ctx); err == nil {
@@ -398,6 +401,11 @@ func main() {
 		searchService.DeleteMusicPlaylist(id)
 	}
 
+	// One hub, shared by the services that report progress and the SSE
+	// endpoint that fans it out. Wired here rather than inside NewServer so
+	// the publishers and the subscriber are demonstrably the same hub.
+	eventHub := events.NewHub()
+
 	exploService := explo.NewService(explo.ServiceOptions{
 		DB:             db,
 		Dirs:           cfg.ExploDirs,
@@ -415,8 +423,16 @@ func main() {
 		// stays off.
 		Covers:        coverService,
 		ReloadCatalog: reloadCatalog,
-		PlaylistName:  cfg.ExploPlaylistName,
-		Logger:        log.Printf,
+		// A song of an imported YouTube Music playlist joins it whenever its
+		// download lands, long after the import request: installed and
+		// announced the way commitPlaylist does for a handler's change.
+		ApplyPlaylist: func(playlist catalog.MusicPlaylist) {
+			applyCatalogPlaylist(playlist)
+			eventHub.Publish(events.Event{Type: events.TypeCatalogChanged,
+				Data: events.CatalogChange{Scope: "playlist", Action: "updated", ID: playlist.ID}})
+		},
+		PlaylistName: cfg.ExploPlaylistName,
+		Logger:       log.Printf,
 		// Keep (copy a drop into the library with its identified metadata
 		// written into the file) needs ffmpeg to remux, the catalog to read
 		// the effective — override-aware — metadata, and a scan to make the
@@ -453,6 +469,20 @@ func main() {
 			log.Infof("explo: folder configured but the feature is disabled - %s", reason)
 		}
 	}
+	// Search for new: Explo's song-search API, by an explicit URL/token when one
+	// is set, otherwise by the connection Explo registered itself. Requests
+	// advance around every identify pass: before it, so a staged download is
+	// linked to its track and identified as the song that was asked for; after
+	// the cover pass, so an identified one is kept into the library with its art.
+	exploRemote := explo.NewRemote(cfg.ExploURL, cfg.ExploToken)
+	advanceSongRequests := func(ctx context.Context) {
+		remote := exploRemote
+		if remote == nil {
+			remote, _ = explo.RegisteredRemote(ctx, db)
+		}
+		exploService.AdvanceRequests(ctx, remote)
+	}
+
 	// One-shot cleanup at boot: re-sync explo's hidden flags / ledger / playlist
 	// to the currently-configured folder. Unconditional (not gated on Enabled)
 	// so that narrowing or clearing the folder recovers Recently Added on the
@@ -474,6 +504,7 @@ func main() {
 		// yet). Without it, retries only ran when a scan happened to fire.
 		// No-op when nothing is due, so it's free on ordinary boots.
 		if exploService.Enabled() {
+			advanceSongRequests(ctx)
 			if _, err := exploService.ProcessNewTracks(ctx); err != nil {
 				log.Warnf("explo: startup identify pass failed: %v", err)
 			}
@@ -483,6 +514,9 @@ func main() {
 		// reconcile's critical path.
 		if err := exploService.BackfillCovers(ctx); err != nil {
 			log.Warnf("explo: startup cover backfill failed: %v", err)
+		}
+		if exploService.Enabled() {
+			advanceSongRequests(ctx)
 		}
 	})
 
@@ -507,12 +541,16 @@ func main() {
 				log.Infof("explo: periodic pass pruned %d rotated-out file(s)", pruned)
 			}
 			if exploService.Enabled() {
+				advanceSongRequests(ctx)
 				if _, err := exploService.ProcessNewTracks(ctx); err != nil {
 					log.Warnf("explo: periodic identify pass failed: %v", err)
 				}
 			}
 			if err := exploService.BackfillCovers(ctx); err != nil {
 				log.Warnf("explo: periodic cover pass failed: %v", err)
+			}
+			if exploService.Enabled() {
+				advanceSongRequests(ctx)
 			}
 		}
 	})
@@ -551,12 +589,14 @@ func main() {
 				} else if pruned > 0 {
 					log.Infof("explo: pruned %d rotated-out file(s) after scan %s", pruned, job.ID)
 				}
+				advanceSongRequests(ctx)
 				if _, err := exploService.ProcessNewTracks(ctx); err != nil {
 					log.Warnf("explo: process new tracks after scan %s failed: %v", job.ID, err)
 				}
 				if err := exploService.BackfillCovers(ctx); err != nil {
 					log.Warnf("explo: cover backfill after scan %s failed: %v", job.ID, err)
 				}
+				advanceSongRequests(ctx)
 			})
 		}
 		if !cfg.ArtistImagesOnScan || !artistImageService.Enabled() {
@@ -663,10 +703,6 @@ func main() {
 		Tokens: api.SamoRadioTokenMinter{Users: userService},
 	})
 
-	// One hub, shared by the services that report progress and the SSE
-	// endpoint that fans it out. Wired here rather than inside NewServer so
-	// the publishers and the subscriber are demonstrably the same hub.
-	eventHub := events.NewHub()
 	libraryService.SetEventHub(eventHub)
 	artistImageService.SetEventHub(eventHub)
 
@@ -691,6 +727,8 @@ func main() {
 		LastFM:         lastfmService,
 		ListenBrainz:   listenbrainzService,
 		Explo:          exploService,
+		ExploRemote:    exploRemote,
+		ExploArtClient: egress.Client(egressRouter, &http.Client{Timeout: 15 * time.Second}),
 		ArtistImages:   artistImageService,
 		Events:         eventHub,
 		ArtistMeta:     artistMetaService,

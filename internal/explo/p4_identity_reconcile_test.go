@@ -116,7 +116,8 @@ func seedMisidentifiedCreep(t *testing.T, ctx context.Context, db *sql.DB, explo
 func newCreepService(t *testing.T, db *sql.DB, exploDir string, stubURL string, client *http.Client, trackByID func(string) (catalog.MusicTrack, error)) *Service {
 	t.Helper()
 	fpcalc := fakeFpcalc(t, `
-case "$2" in
+for file; do :; done
+case "$file" in
   *"Creep.flac") echo '{"duration": 235.0, "fingerprint": "FP-CREEP"}' ;;
   *"Other Song.flac") echo '{"duration": 200.0, "fingerprint": "FP-JUNK"}' ;;
   *) echo '{"duration": 100.0, "fingerprint": "FP-NOTHING"}' ;;

@@ -259,14 +259,20 @@ func TestPruneVanishedFilesKeepsLibraryCopy(t *testing.T) {
 		Playlists:     playlists.New(db),
 	})
 
-	// track-matched was kept; track-unmatched was not. Neither seeded path
-	// exists on disk, so both drops read as rotated out.
+	// track-matched was kept; track-unmatched was not. The drop folder is
+	// there (a missing folder is an unmounted disk, not a rotation), but
+	// neither drop file is, so both read as rotated out.
 	mustExec(t, db, `
 		INSERT INTO media_files (id, library_id, track_id, path, relative_path, file_name, duration_seconds)
 		VALUES ('file-kept', 'lib-1', 'track-matched', '/music/Artist/Album/02 Track Two.mp3', 'Artist/Album/02 Track Two.mp3', '02 Track Two.mp3', 320);
 	`)
+	rotated := t.TempDir()
+	if _, err := db.ExecContext(ctx, `UPDATE media_files SET path = REPLACE(path, ?, ?) WHERE path LIKE ?`,
+		exploDir, rotated, exploDir+"/%"); err != nil {
+		t.Fatal(err)
+	}
 
-	if _, err := svc.pruneVanishedFiles(ctx, []string{exploDir}); err != nil {
+	if _, err := svc.pruneVanishedFiles(ctx, []string{rotated}); err != nil {
 		t.Fatal(err)
 	}
 
