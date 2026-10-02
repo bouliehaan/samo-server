@@ -172,9 +172,10 @@ func TestPlaylistImportKeepsYouTubeMusicOrderAsDownloadsLand(t *testing.T) {
 		t.Fatalf("request = %+v", request)
 	}
 	var requestedBy string
-	_ = f.db.QueryRow(`SELECT requested_by FROM explo_requests WHERE recording_id = 'youtube-ccccccccccc'`).Scan(&requestedBy)
-	if requestedBy != f.owner {
-		t.Fatalf("requested by %q", requestedBy)
+	var forPlaylist bool
+	_ = f.db.QueryRow(`SELECT requested_by, for_playlist FROM explo_requests WHERE recording_id = 'youtube-ccccccccccc'`).Scan(&requestedBy, &forPlaylist)
+	if requestedBy != f.owner || !forPlaylist {
+		t.Fatalf("requested by %q, for the playlist %v", requestedBy, forPlaylist)
 	}
 
 	// Track 3 finishes first: it goes after track 2, not at the end.
@@ -371,5 +372,51 @@ func TestYouTubeVideoIsNotNamedByItsListing(t *testing.T) {
 	got, _, _ := f.service.Request(ctx, job.ID)
 	if status == "matched-fallback" || got.State != RequestIdentifying || strings.Contains(got.Message, "listing") {
 		t.Fatalf("video adopted its listing: ledger %q, request %+v", status, got)
+	}
+}
+
+// YouTube Music's "Live" is MusicBrainz's "Lïve", with a typographic
+// apostrophe in the title: the same song, not one for review.
+func TestRequestMatchesFoldsAccents(t *testing.T) {
+	asked := songRequestRow{recordingID: "youtube-uSvtFd74Nlo", title: "The Dolphin's Cry", artist: "Live"}
+	if !requestMatches(asked, "a-recording", "The Dolphin’s Cry", "Lïve") {
+		t.Fatal("Live / Lïve taken for different songs")
+	}
+	if requestMatches(asked, "a-recording", "Lightning Crashes", "Lïve") {
+		t.Fatal("a different song by the band taken for the one asked for")
+	}
+}
+
+// A song that stopped for review is kept by hand as the request: settled,
+// recorded as the copy Keep made, and so ready to join a waiting playlist.
+func TestKeepingAReviewedRequestSettlesIt(t *testing.T) {
+	ctx := context.Background()
+	f := newRequestFixture(t, `{"status": "ok", "results": [{"id": "acoustid-2", "score": 0.95, "recordings": [{
+		"id": "11111111-2222-3333-4444-555555555555", "title": "My Funny Valentine", "artists": [{"name": "Miles Davis"}],
+		"releasegroups": [{"id": "rg-cookin", "title": "Cookin'", "type": "Album"}]
+	}]}]}`)
+	staged := requestedJob("staged")
+	staged.File = "You_Don_t_Know_What_Love_Is-Chet_Baker.mp3"
+	if err := f.service.RecordRequest(ctx, staged, "user-owner"); err != nil {
+		t.Fatal(err)
+	}
+	f.service.AdvanceRequests(ctx, nil)
+	if _, err := f.service.ProcessNewTracks(ctx); err != nil {
+		t.Fatal(err)
+	}
+	f.settleCover(t)
+	f.service.AdvanceRequests(ctx, nil)
+	if got := f.request(t); got.State != RequestNeedsReview {
+		t.Fatalf("request = %+v", got)
+	}
+	results, err := f.service.Keep(ctx, []string{"track-drop"})
+	if err != nil || len(results) != 1 || results[0].Error != "" {
+		t.Fatalf("keep: %+v %v", results, err)
+	}
+	got := f.request(t)
+	var copied bool
+	_ = f.db.QueryRow(`SELECT library_copy FROM explo_requests WHERE recording_id = ?`, requestedRecording).Scan(&copied)
+	if got.State != RequestInLibrary || got.LibraryTrackID == "" || got.LibraryTrackID != results[0].LibraryTrackID || !copied {
+		t.Fatalf("kept request = %+v copied=%v", got, copied)
 	}
 }

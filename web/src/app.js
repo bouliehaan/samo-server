@@ -3900,6 +3900,17 @@ import { globalScanActionsHTML, libraryKindScanActionsHTML, libraryScanActionsHT
       } else if (action === "open-playlist") {
         event.preventDefault();
         navigateTo("music/playlist/" + encodeURIComponent(el.dataset.id));
+      } else if (action === "playlist-import-keep") {
+        // A song that stopped for review: keep the downloaded copy as the
+        // song asked for, and it joins the playlist.
+        event.preventDefault();
+        el.disabled = true;
+        try {
+          const kept = await api("/api/v1/explo/keep", { method: "POST", body: { trackIds: [el.dataset.trackId] } });
+          const failed = ((kept && kept.results) || []).find((result) => result.error);
+          if (failed) throw new Error(failed.error);
+          setTimeout(() => openPlaylist(el.dataset.id), 1500);
+        } catch (err) { el.disabled = false; alert(err.message); }
       } else if (action === "playlist-import-retry") {
         event.preventDefault();
         el.disabled = true;

@@ -2151,3 +2151,15 @@ main.app-main {
   .explo-album-tracks { padding-left: 0; }
   .explo-track-row { padding-left: 12px; }
 }
+
+/* A playlist import track's state: a label, not a control. */
+.import-state {
+  flex: none;
+  padding: 0.2rem 0.55rem;
+  border: 1px solid var(--line);
+  font-size: 0.7rem;
+  letter-spacing: 0.08em;
+  color: var(--text-dim);
+  white-space: nowrap;
+}
+

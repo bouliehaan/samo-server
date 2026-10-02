@@ -9,7 +9,7 @@ const view = {
     {position: 1, title: 'Almost Blue', artist: 'Chet Baker', album: "Let's Get Lost", durationMs: 300000, state: 'downloading', message: 'Waiting for an available download slot.'},
     {position: 2, title: 'My <Funny> Valentine', artist: 'Chet Baker', state: 'failed', message: 'YouTube (yt-dlp): found nothing for this song.'},
     {position: 3, title: 'Gone', artist: 'Chet Baker', state: 'unavailable'},
-    {position: 4, title: 'Wrong Song', artist: 'Chet Baker', state: 'needs-review'},
+    {position: 4, title: 'Wrong Song', artist: 'Chet Baker', state: 'needs-review', reviewTrackId: 'track_drop1'},
   ],
 };
 
@@ -28,3 +28,11 @@ test('the panel lists only songs not yet in the playlist, escaped, with retry fo
   assert.match(html, /data-playlist-id="playlist_1"/);
   assert.doesNotMatch(playlistImportPanel(view, false), /RETRY/);
 });
+
+test('a song for review offers Keep to admins, and states are labels not buttons', () => {
+  const html = playlistImportPanel(view, true);
+  assert.match(html, /data-action="playlist-import-keep"[^>]*data-track-id="track_drop1"[^>]*>KEEP IT</);
+  assert.match(html, /<span class="import-state">NEEDS REVIEW<\/span>/);
+  assert.doesNotMatch(playlistImportPanel(view, false), /KEEP IT/);
+});
+

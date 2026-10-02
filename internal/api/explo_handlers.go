@@ -169,6 +169,9 @@ func (s *Server) postExploKeep(w http.ResponseWriter, r *http.Request) {
 		writeExploError(w, err)
 		return
 	}
+	// A kept song an imported playlist was waiting for joins it now rather
+	// than on the next pass.
+	go service.AdvancePlaylistImports(s.baseCtx, nil)
 	kept, alreadyInLibrary, failed := 0, 0, 0
 	for _, res := range results {
 		switch {

@@ -139,7 +139,13 @@ func loadMusicAlbums(ctx context.Context, db *sql.DB) ([]catalog.MusicAlbum, err
 		SELECT id, title, sort_title, version, display_artist, release_date, original_release_date, release_year,
 		       release_type, release_status, compilation, record_label, catalog_number, barcode, genres_json, styles_json,
 		       moods_json, tags_json, disc_count, track_count, duration_seconds, images_json, external_ids_json,
-		       playback_json, added_at, updated_at, hidden_from_recently_added
+		       playback_json, added_at, updated_at, hidden_from_recently_added,
+		       -- Every library track a copy a playlist import downloaded:
+		       -- the playlist's songs, not the library's (migration 0033).
+		       (EXISTS (SELECT 1 FROM music_tracks mt WHERE mt.album_id = music_albums.id AND mt.is_explo = 0)
+		        AND NOT EXISTS (SELECT 1 FROM music_tracks mt WHERE mt.album_id = music_albums.id AND mt.is_explo = 0
+		          AND NOT EXISTS (SELECT 1 FROM explo_requests er
+		            WHERE er.library_track_id = mt.id AND er.for_playlist AND er.library_copy))) AS playlist_only
 		FROM music_albums`)
 	if err != nil {
 		return nil, fmt.Errorf("load music albums: %w", err)
@@ -150,19 +156,24 @@ func loadMusicAlbums(ctx context.Context, db *sql.DB) ([]catalog.MusicAlbum, err
 	for rows.Next() {
 		var item catalog.MusicAlbum
 		var compilation, hiddenFromRecentlyAdded int
+		var playlistOnly bool
 		var genresJSON, stylesJSON, moodsJSON, tagsJSON, imagesJSON, externalJSON, playbackJSON string
 		var addedAt, updatedAt sql.NullString
 		if err := rows.Scan(&item.ID, &item.Title, &item.SortTitle, &item.Version, &item.DisplayArtist, &item.ReleaseDate,
 			&item.OriginalReleaseDate, &item.ReleaseYear, &item.ReleaseType, &item.ReleaseStatus,
 			&compilation, &item.RecordLabel, &item.CatalogNumber, &item.Barcode, &genresJSON, &stylesJSON, &moodsJSON,
 			&tagsJSON, &item.DiscCount, &item.TrackCount, &item.DurationSeconds, &imagesJSON, &externalJSON,
-			&playbackJSON, &addedAt, &updatedAt, &hiddenFromRecentlyAdded); err != nil {
+			&playbackJSON, &addedAt, &updatedAt, &hiddenFromRecentlyAdded, &playlistOnly); err != nil {
 			return nil, fmt.Errorf("scan music album: %w", err)
 		}
 		item.Compilation = compilation != 0
-		item.HiddenFromRecentlyAdded = hiddenFromRecentlyAdded != 0
-		// Same fact, go-forward name: only the explo reconciler ever sets the
-		// hidden flag, and it sets it exactly when the album is fully explo.
+		// An album a playlist import brought is in the library — browse,
+		// search, the playlist itself — but not on Recently Added, which is
+		// for what someone added by hand. Clients read the shelf exclusion
+		// from this flag; IsExplo stays the silo's alone.
+		item.HiddenFromRecentlyAdded = hiddenFromRecentlyAdded != 0 || playlistOnly
+		// Only the explo reconciler ever sets the stored flag, and it sets it
+		// exactly when the album is fully explo.
 		item.IsExplo = hiddenFromRecentlyAdded != 0
 		decodeJSON(genresJSON, &item.Genres)
 		decodeJSON(stylesJSON, &item.Styles)

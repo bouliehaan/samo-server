@@ -7,6 +7,11 @@ import (
 	"fmt"
 	"strings"
 	"time"
+	"unicode"
+
+	"golang.org/x/text/runes"
+	"golang.org/x/text/transform"
+	"golang.org/x/text/unicode/norm"
 
 	"github.com/bouliehaan/samo-server/internal/storage"
 )
@@ -375,8 +380,8 @@ func (s *Service) advanceIdentifying(ctx context.Context, row songRequestRow) {
 		message = "Already in your library."
 	}
 	if err := s.updateRequest(ctx, row.recordingID,
-		`state = ?, message = ?, library_track_id = ?, library_path = ?`,
-		RequestInLibrary, message, result.LibraryTrackID, result.Path); err != nil {
+		`state = ?, message = ?, library_track_id = ?, library_path = ?, library_copy = ?`,
+		RequestInLibrary, message, result.LibraryTrackID, result.Path, !result.AlreadyInLibrary); err != nil {
 		s.logger("explo: settle song request %s failed: %v", row.recordingID, err)
 		return
 	}
@@ -556,14 +561,31 @@ func (s *Service) pinLedgerAlbum(ctx context.Context, row songRequestRow) error 
 // "Song (Remastered)", "Artist" against "Artist & Guest"). Without this a
 // wrong YouTube upload — a cover, a different song with the same title — would
 // be filed into the library under its real identity, unasked.
+//
+// Accents are folded away here: the catalog a song was asked for from and
+// MusicBrainz spell names their own ways — YouTube Music's "Live" is
+// MusicBrainz's "Lïve" — and a diaeresis is no evidence of a different song.
 func requestMatches(row songRequestRow, recordingID, title, artist string) bool {
 	if recordingID != "" && strings.EqualFold(recordingID, row.recordingID) {
 		return true
 	}
-	titleAgrees := tokenAgreement(row.title, title) > 0
-	artistAgrees := tokenAgreement(row.artist, artist) > 0 ||
-		keepArtistsMatch(normalizeKeepIdentity(row.artist), normalizeKeepIdentity(artist))
+	askedTitle, askedArtist := foldAccents(row.title), foldAccents(row.artist)
+	title, artist = foldAccents(title), foldAccents(artist)
+	titleAgrees := tokenAgreement(askedTitle, title) > 0
+	artistAgrees := tokenAgreement(askedArtist, artist) > 0 ||
+		keepArtistsMatch(normalizeKeepIdentity(askedArtist), normalizeKeepIdentity(artist))
 	return titleAgrees && artistAgrees
+}
+
+var accentFolder = transform.Chain(norm.NFD, runes.Remove(runes.In(unicode.Mn)), norm.NFC)
+
+// foldAccents is value without its accents and diaereses: "Lïve" is "Live".
+func foldAccents(value string) string {
+	folded, _, err := transform.String(accentFolder, value)
+	if err != nil {
+		return value
+	}
+	return folded
 }
 
 // locateRequestedTrack finds the drop a request downloaded: first by the file

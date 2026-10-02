@@ -50,7 +50,9 @@ export function playlistImportPanel(view, canRetry) {
         '<div class="meta">' + escapeHTML(meta) + '</div>' +
         (track.message ? '<div class="meta" role="status">' + escapeHTML(track.message) + '</div>' : "") +
       '</div>' +
-      '<span class="pill">' + (STATE_LABEL[track.state] || escapeHTML(String(track.state).toUpperCase())) + '</span>' +
+      (canRetry && track.reviewTrackId ?
+        '<button class="btn primary btn-mini" data-action="playlist-import-keep" data-id="' + attr(view.playlistId) + '" data-track-id="' + attr(track.reviewTrackId) + '">KEEP IT</button>' : "") +
+      '<span class="import-state">' + (STATE_LABEL[track.state] || escapeHTML(String(track.state).toUpperCase())) + '</span>' +
     '</div>';
   }).join("");
   const retry = canRetry && c.failed ?

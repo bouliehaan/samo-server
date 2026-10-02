@@ -4,12 +4,12 @@
     "src": "_login-C7wCMi9S.css"
   },
   "src/app.js": {
-    "file": "app-60hMfyno.js",
+    "file": "app-D0XhMf4g.js",
     "name": "app",
     "src": "src/app.js",
     "isEntry": true,
     "css": [
-      "app-DGNwbGSh.css"
+      "app-BasBwAqp.css"
     ]
   },
   "src/login.js": {

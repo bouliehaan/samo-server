@@ -142,26 +142,35 @@ func insertToken(ctx context.Context, db *sql.DB, id, userID, label, tokenHash s
 	return err
 }
 
-func loadUserByTokenHash(ctx context.Context, db *sql.DB, tokenHash string) (User, string, error) {
+// loadUserByTokenHash resolves a token secret's hash to its user, the token's
+// id, and when it was last used. It only reads — authentication runs on the
+// read-only pool — so recording this use is the caller's job (touchToken, on
+// the write pool).
+func loadUserByTokenHash(ctx context.Context, db *sql.DB, tokenHash string) (User, string, time.Time, error) {
 	var userID, tokenID string
+	var lastUsed sql.NullString
 	err := db.QueryRowContext(ctx, `
-		SELECT user_id, id FROM user_tokens WHERE token_hash = ?`, tokenHash).Scan(&userID, &tokenID)
+		SELECT user_id, id, last_used_at FROM user_tokens WHERE token_hash = ?`, tokenHash).Scan(&userID, &tokenID, &lastUsed)
 	if err == sql.ErrNoRows {
-		return User{}, "", ErrInvalidToken
+		return User{}, "", time.Time{}, ErrInvalidToken
 	}
 	if err != nil {
-		return User{}, "", err
+		return User{}, "", time.Time{}, err
 	}
 	user, err := loadUserByID(ctx, db, userID)
 	if err != nil {
-		return User{}, "", err
+		return User{}, "", time.Time{}, err
 	}
-	_, _ = db.ExecContext(ctx, `UPDATE user_tokens SET last_used_at = ? WHERE id = ?`, time.Now().UTC().Format(time.RFC3339), tokenID)
-	return user, tokenID, nil
+	return user, tokenID, parseStoredTime(lastUsed.String), nil
+}
+
+func touchToken(ctx context.Context, db *sql.DB, tokenID string, at time.Time) error {
+	_, err := db.ExecContext(ctx, `UPDATE user_tokens SET last_used_at = ? WHERE id = ?`, at.UTC().Format(time.RFC3339), tokenID)
+	return err
 }
 
 // loadTokenByHash names the token a secret belongs to. Unlike
-// loadUserByTokenHash it is not a use of the token, so it leaves last_used_at
+// AuthenticateToken it is not a use of the token, so it leaves last_used_at
 // alone.
 func loadTokenByHash(ctx context.Context, db *sql.DB, tokenHash string) (id, userID, label string, err error) {
 	err = db.QueryRowContext(ctx, `

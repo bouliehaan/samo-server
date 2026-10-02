@@ -54,6 +54,9 @@ type PlaylistImportTrack struct {
 	State          string `json:"state"`
 	Message        string `json:"message,omitempty"`
 	LibraryTrackID string `json:"libraryTrackId,omitempty"`
+	// ReviewTrackID is the downloaded copy in Explore of a track that needs
+	// review: Keep it and it joins the playlist.
+	ReviewTrackID string `json:"reviewTrackId,omitempty"`
 }
 
 type playlistImportRow struct {
@@ -199,15 +202,18 @@ func (s *Service) AdvancePlaylistImports(ctx context.Context, remote *Remote) {
 		s.logger("explo: load landed playlist tracks failed: %v", err)
 		return
 	}
-	for _, row := range landed {
+	trackIDs := make([]string, len(landed))
+	for i, row := range landed {
+		_ = s.db.QueryRowContext(ctx, `SELECT library_track_id FROM explo_requests WHERE recording_id = ?`, row.recordingID).Scan(&trackIDs[i])
+	}
+	s.quietLandedAlbums(ctx, trackIDs)
+	for i, row := range landed {
 		if ctx.Err() != nil {
 			return
 		}
-		var trackID string
-		if err := s.db.QueryRowContext(ctx, `SELECT library_track_id FROM explo_requests WHERE recording_id = ?`, row.recordingID).Scan(&trackID); err != nil {
-			continue
+		if trackIDs[i] != "" {
+			s.placeImportTrack(ctx, row, trackIDs[i])
 		}
-		s.placeImportTrack(ctx, row, trackID)
 	}
 
 	queued, err := s.queryImportTracks(ctx, `t.state = ?`, importTrackQueued)
@@ -249,7 +255,39 @@ func (s *Service) AdvancePlaylistImports(ctx context.Context, remote *Remote) {
 		if err := s.RecordRequest(ctx, job, imported.requestedBy); err != nil {
 			s.logger("explo: record playlist track request %s failed: %v", row.recordingID, err)
 		}
+		// The playlist's song, not one added by hand: its album stays off
+		// Recently Added (migration 0033).
+		if err := s.updateRequest(ctx, row.recordingID, `for_playlist = TRUE`); err != nil {
+			s.logger("explo: mark playlist track request %s failed: %v", row.recordingID, err)
+		}
 		s.setImportTrack(ctx, row, importTrackRequested, "", "")
+	}
+}
+
+// quietLandedAlbums makes the albums of a playlist's newly kept songs leave
+// Recently Added before the songs are announced in the playlist: the catalog
+// derives that from the requests (catalogstore/load_seed.go), so it is
+// reloaded, and the albums are touched so clients that sync by updated_at
+// fetch them again.
+func (s *Service) quietLandedAlbums(ctx context.Context, trackIDs []string) {
+	touched := int64(0)
+	for _, id := range trackIDs {
+		if id == "" {
+			continue
+		}
+		n, err := s.execCount(ctx, `
+			UPDATE music_albums SET updated_at = CURRENT_TIMESTAMP
+			WHERE id = (SELECT mt.album_id FROM music_tracks mt JOIN explo_requests er ON er.library_track_id = mt.id
+			            WHERE mt.id = ? AND er.for_playlist AND er.library_copy LIMIT 1)`, id)
+		if err != nil {
+			s.logger("explo: touch album of playlist track %s failed: %v", id, err)
+		}
+		touched += n
+	}
+	if touched > 0 && s.reloadCatalog != nil {
+		if err := s.reloadCatalog(ctx); err != nil {
+			s.logger("explo: catalog reload after playlist songs landed failed: %v", err)
+		}
 	}
 }
 
@@ -373,7 +411,7 @@ func (s *Service) PlaylistImport(ctx context.Context, playlistID string) (Playli
 	}
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT t.position, t.recording_id, t.title, t.artist, t.album, t.duration_ms, t.state, t.library_track_id,
-		       t.message, COALESCE(er.state, ''), COALESCE(er.message, ''), COALESCE(er.library_track_id, '')
+		       t.message, COALESCE(er.state, ''), COALESCE(er.message, ''), COALESCE(er.track_id, '')
 		FROM explo_playlist_import_tracks t
 		LEFT JOIN explo_requests er ON er.recording_id = t.recording_id
 		WHERE t.playlist_id = ? ORDER BY t.position`, playlistID)
@@ -383,9 +421,9 @@ func (s *Service) PlaylistImport(ctx context.Context, playlistID string) (Playli
 	defer rows.Close()
 	for rows.Next() {
 		var track PlaylistImportTrack
-		var state, message, requestState, requestMessage, requestTrack string
+		var state, message, requestState, requestMessage, dropTrack string
 		if err := rows.Scan(&track.Position, &track.RecordingID, &track.Title, &track.Artist, &track.Album,
-			&track.DurationMS, &state, &track.LibraryTrackID, &message, &requestState, &requestMessage, &requestTrack); err != nil {
+			&track.DurationMS, &state, &track.LibraryTrackID, &message, &requestState, &requestMessage, &dropTrack); err != nil {
 			return PlaylistImport{}, false, err
 		}
 		switch {
@@ -393,8 +431,11 @@ func (s *Service) PlaylistImport(ctx context.Context, playlistID string) (Playli
 			track.State = RequestInLibrary
 		case state == importTrackRequested && requestState != "":
 			track.State, track.Message = requestState, requestMessage
-			if requestState == RequestInLibrary {
+			switch requestState {
+			case RequestInLibrary:
 				track.Message = "In your library. It joins the playlist on samo's next pass."
+			case RequestNeedsReview:
+				track.ReviewTrackID = dropTrack
 			}
 		case state == importTrackUnavailable:
 			track.State, track.Message = importTrackUnavailable, message

@@ -4,7 +4,10 @@ import (
 	"context"
 	"database/sql"
 	"strings"
+	"sync"
 	"time"
+
+	"github.com/bouliehaan/samo-server/internal/log"
 )
 
 type Service struct {
@@ -13,6 +16,10 @@ type Service struct {
 	legacyAPIToken  string
 	legacyTokenHash string
 	streamTokens    *streamTokenStore
+
+	touchMu   sync.Mutex
+	touchedAt map[string]time.Time // token id → when its last write was dispatched
+	touches   sync.WaitGroup       // in-flight last_used_at writes
 }
 
 type ServiceOptions struct {
@@ -105,11 +112,59 @@ func (s *Service) AuthenticateToken(ctx context.Context, token string) (Principa
 		}
 		return Principal{User: user}, nil
 	}
-	user, _, err := loadUserByTokenHash(ctx, s.dbForRead(), hashToken(token))
+	user, tokenID, lastUsed, err := loadUserByTokenHash(ctx, s.dbForRead(), hashToken(token))
 	if err != nil {
 		return Principal{}, ErrUnauthorized
 	}
+	s.noteTokenUse(tokenID, lastUsed)
 	return Principal{User: user}, nil
+}
+
+// tokenTouchInterval is how stale a token's last_used_at may get before a use
+// rewrites it. The column answers "is this token still in use?", which a
+// minute's resolution answers fine, and clients authenticate on every progress
+// PATCH and stream open — writing each one would make reads cost writes.
+const tokenTouchInterval = time.Minute
+
+// tokenTouchTimeout bounds one background last_used_at write.
+const tokenTouchTimeout = 30 * time.Second
+
+// noteTokenUse records a use of tokenID in last_used_at once it has gone
+// tokenTouchInterval stale. Authentication reads through the read-only pool
+// and must not wait on the write pool — that pool is the one a scan saturates,
+// which is why reads have their own — so the write runs in the background.
+// touchedAt holds back a second write for the same token within the interval
+// while the first one is still queued, which the stored value alone can't.
+func (s *Service) noteTokenUse(tokenID string, lastUsed time.Time) {
+	now := time.Now().UTC()
+	if now.Sub(lastUsed) < tokenTouchInterval {
+		return
+	}
+	s.touchMu.Lock()
+	if now.Sub(s.touchedAt[tokenID]) < tokenTouchInterval {
+		s.touchMu.Unlock()
+		return
+	}
+	if s.touchedAt == nil {
+		s.touchedAt = make(map[string]time.Time)
+	}
+	for id, at := range s.touchedAt {
+		if now.Sub(at) >= tokenTouchInterval {
+			delete(s.touchedAt, id)
+		}
+	}
+	s.touchedAt[tokenID] = now
+	s.touchMu.Unlock()
+
+	s.touches.Add(1)
+	go func() {
+		defer s.touches.Done()
+		ctx, cancel := context.WithTimeout(context.Background(), tokenTouchTimeout)
+		defer cancel()
+		if err := touchToken(ctx, s.db, tokenID, now); err != nil {
+			log.Warnf("users: record use of token %s: %v", tokenID, err)
+		}
+	}()
 }
 
 func (s *Service) AuthenticateCredentials(ctx context.Context, username, password string) (Principal, error) {

@@ -57,8 +57,53 @@ type KeepResult struct {
 // player, and it also pins samo's own identity for the new file: track IDs are
 // derived from tags and fall back to the file path only when tags are too thin
 // to be useful.
+//
+// A drop that is a Search for new request stopped for review is kept as that
+// request — into its album, when it was asked for with one — and keeping it
+// settles the request, so a playlist waiting for the song gets it.
 func (s *Service) Keep(ctx context.Context, trackIDs []string) ([]KeepResult, error) {
-	return s.keep(ctx, trackIDs, nil)
+	if s == nil || s.db == nil {
+		return nil, ErrDisabled
+	}
+	var plain []string
+	var results []KeepResult
+	for _, id := range trackIDs {
+		reviewed, err := s.queryRequests(ctx, `track_id = ? AND state = ?`, id, RequestNeedsReview)
+		if err != nil || len(reviewed) == 0 {
+			plain = append(plain, id)
+			continue
+		}
+		kept, err := s.keep(ctx, []string{id}, reviewed[0].placement())
+		if err != nil {
+			return nil, err
+		}
+		for _, row := range reviewed {
+			s.settleKeptRequest(ctx, row, kept)
+		}
+		results = append(results, kept...)
+	}
+	if len(plain) > 0 {
+		kept, err := s.keep(ctx, plain, nil)
+		if err != nil {
+			return nil, err
+		}
+		results = append(results, kept...)
+	}
+	return results, nil
+}
+
+// settleKeptRequest records that a request stopped for review was kept by
+// hand: it is in the library, as the copy Keep made.
+func (s *Service) settleKeptRequest(ctx context.Context, row songRequestRow, kept []KeepResult) {
+	for _, result := range kept {
+		if result.TrackID != row.trackID || result.Error != "" {
+			continue
+		}
+		if err := s.updateRequest(ctx, row.recordingID, `state = ?, message = ?, library_track_id = ?, library_path = ?, library_copy = ?`,
+			RequestInLibrary, "Kept from review.", result.LibraryTrackID, result.Path, !result.AlreadyInLibrary); err != nil {
+			s.logger("explo: settle kept song request %s failed: %v", row.recordingID, err)
+		}
+	}
 }
 
 // keepPlacement files a kept copy as a track of a particular album, rather
