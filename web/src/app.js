@@ -45,7 +45,7 @@ import { globalScanActionsHTML, libraryKindScanActionsHTML, libraryScanActionsHT
   }
 
   async function deleteCatalogItem(path, name, kindLabel, afterDelete) {
-    if (!confirm("Remove " + kindLabel + " \"" + name + "\" from Samo and try to delete its files from disk? If file deletion fails (e.g. read-only mount), the item is still removed from your library.")) return;
+    if (!confirm("Remove " + kindLabel + " \"" + name + "\" from samo and try to delete its files from disk? If file deletion fails (e.g. read-only mount), the item is still removed from your library.")) return;
     const result = await api(path, { method: "DELETE", body: { deleteFiles: true } });
     if (result && result.fileErrors && result.fileErrors.length > 0) {
       setStatus("REMOVED FROM LIBRARY · " + result.fileErrors.length + " file(s) could not be deleted. Check mount permissions or delete them manually.");
@@ -2847,7 +2847,7 @@ import { globalScanActionsHTML, libraryKindScanActionsHTML, libraryScanActionsHT
     let html = '<div class="panel-grid">';
     html += '<div class="panel panel-wide">' +
       '<div class="panel-head"><span>// enclosure cache</span></div>' +
-      '<div class="empty-state" style="margin-bottom:12px">// Samo stores downloaded RSS audio on disk before streaming. Clear this if episodes play silence or wrong audio after a server upgrade.</div>';
+      '<div class="empty-state" style="margin-bottom:12px">// samo stores downloaded RSS audio on disk before streaming. Clear this if episodes play silence or wrong audio after a server upgrade.</div>';
     if (!cacheData || !cacheData.enabled) {
       html += '<div class="empty-state">// podcast enclosure cache is disabled on this server</div>';
     } else {
@@ -2938,14 +2938,14 @@ import { globalScanActionsHTML, libraryKindScanActionsHTML, libraryScanActionsHT
     let html = '<div class="panel-grid">';
     html += '<div class="panel panel-wide">' +
       '<div class="panel-head"><span>// explo folder</span><span>' + statusText + '</span></div>' +
-      '<div class="empty-state" style="margin-bottom:12px">// Point Samo at the folder your weekly &ldquo;explo&rdquo; exporter drops untagged tracks into. Samo fingerprints them (AcoustID, with a MusicBrainz fallback), fixes their metadata, gathers them into the &ldquo;Explo&rdquo; playlist on your apps, and keeps them out of Recently Added. Files on disk are never modified. The folder must sit inside a library Samo already scans.</div>';
+      '<div class="empty-state" style="margin-bottom:12px">// Point samo at the folder your weekly &ldquo;explo&rdquo; exporter drops untagged tracks into. samo fingerprints them (AcoustID, with a MusicBrainz fallback), fixes their metadata, gathers them into the &ldquo;Explo&rdquo; playlist on your apps, and keeps them out of Recently Added. Files on disk are never modified. The folder must sit inside a library samo already scans.</div>';
     html += '<div class="empty-state" style="margin-bottom:12px">// folder: ' + (cfg.folder ? escapeHTML(cfg.folder) : "&lt;none set&gt;") +
       ' · source: ' + sourceText +
       ' · AcoustID key: ' + (cfg.hasApiKey ? "set" : "MISSING") +
       ' · fpcalc: ' + (cfg.fpcalcReady ? "ready" : "MISSING") + '</div>';
     if (isAdmin) {
       html += '<div class="empty-state" style="margin-bottom:12px">// song search: ' +
-        (discovery && discovery.available ? 'CONNECTED — Search for new is available on the Search page.' : escapeHTML((discovery && discovery.reason) || 'Configure the Explo folder, then update and restart samo-explo. It connects song search automatically using its existing Samo login.')) + '</div>';
+        (discovery && discovery.available ? 'CONNECTED — Search for new is available on the Search page.' : escapeHTML((discovery && discovery.reason) || 'Configure the Explo folder, then update and restart samo-explo. It connects song search automatically using its existing samo login.')) + '</div>';
     }
     if (!cfg.fpcalcReady) {
       html += '<div class="empty-state explo-warn" style="margin-bottom:12px">// fpcalc (chromaprint) is not bundled on this server, so the pipeline cannot run. Run <code>make bundle-chromaprint</code> before building the release, or install fpcalc on the host.</div>';
@@ -3040,7 +3040,7 @@ import { globalScanActionsHTML, libraryKindScanActionsHTML, libraryScanActionsHT
     }
     html += '<div class="lastfm-utility-section">' +
       '<div class="lastfm-utility-label">' + accountStatus + '</div>' +
-      '<div class="panel-sub">' + (lastfmStatus.connected ? 'Connected as ' + escapeHTML(lastfmStatus.username || "") + ' · queue ' + (lastfmStatus.queueSize || 0) : (lastfmStatus.enabled ? 'Connect this Samo user to a Last.fm account for scrobbling.' : 'Save credentials here first, then connect this user.')) + '</div>' +
+      '<div class="panel-sub">' + (lastfmStatus.connected ? 'Connected as ' + escapeHTML(lastfmStatus.username || "") + ' · queue ' + (lastfmStatus.queueSize || 0) : (lastfmStatus.enabled ? 'Connect this samo user to a Last.fm account for scrobbling.' : 'Save credentials here first, then connect this user.')) + '</div>' +
       '<div class="actions">' +
         (lastfmStatus.enabled && !lastfmStatus.connected ? '<button class="btn primary" type="button" data-action="lastfm-begin">CONNECT LAST.FM</button><button class="btn ghost" type="button" data-action="lastfm-complete">COMPLETE LINK</button>' : '') +
         (lastfmStatus.enabled && lastfmStatus.connected ? '<button class="btn ghost" type="button" data-action="lastfm-flush">FLUSH QUEUE</button><button class="btn danger" type="button" data-action="lastfm-disconnect">DISCONNECT</button>' : '') +
@@ -4067,7 +4067,7 @@ import { globalScanActionsHTML, libraryKindScanActionsHTML, libraryScanActionsHT
         samoRadioDevices = [];
         await viewRadio();
       } else if (action === "samoradio-delete") {
-        if (!confirm("Remove " + (el.dataset.name || "this device") + "? Its Samo token is revoked.")) return;
+        if (!confirm("Remove " + (el.dataset.name || "this device") + "? Its samo token is revoked.")) return;
         await api("/api/v1/samo-radio/devices/" + encodeURIComponent(el.dataset.id), { method: "DELETE" });
         samoRadioDevices = [];
         if (samoRadioExpandedID === el.dataset.id) samoRadioExpandedID = "";
@@ -4693,7 +4693,7 @@ import { globalScanActionsHTML, libraryKindScanActionsHTML, libraryScanActionsHT
     if (!data || !data.configured) {
       main.innerHTML = '<section class="view">' +
         '<div class="view-head"><h1>EXPLO</h1><span class="crumb">// weekly discovery silo</span></div>' +
-        '<div class="empty-state">// explo is not configured — an admin can point Samo at the weekly drop folder under SETTINGS &rarr; EXPLO</div>' +
+        '<div class="empty-state">// explo is not configured — an admin can point samo at the weekly drop folder under SETTINGS &rarr; EXPLO</div>' +
       '</section>';
       return;
     }

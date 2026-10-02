@@ -4,8 +4,11 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strings"
+
+	"github.com/dhowden/tag"
 )
 
 // scanMixedLibrary walks a "mixed" root and routes each subfolder bundle
@@ -86,11 +89,12 @@ func splitMixedGroups(root string, files []string) mixedGroups {
 			out.music = append(out.music, folderFiles...)
 			continue
 		}
+		tags := &folderTags{files: folderFiles}
 		switch {
-		case classifyFolderAsAudiobook(folder, folderFiles):
+		case classifyMixedFolderAsAudiobook(folder, folderFiles, tags):
 			bookRoot := audiobookGroupRootFromDir(rootAbs, folder)
 			out.audiobooks = mergeGroup(out.audiobooks, bookRoot, folderFiles)
-		case classifyFolderAsPodcast(folder, folderFiles):
+		case classifyMixedFolderAsPodcast(folder, folderFiles, tags):
 			showRoot := audiobookGroupRootFromDir(rootAbs, folder)
 			out.podcasts = mergeGroup(out.podcasts, showRoot, folderFiles)
 		default:
@@ -126,14 +130,21 @@ func mergeGroup(groups []groupedAudio, root string, files []string) []groupedAud
 
 // classifyFolderAsPodcast picks out the podcast-shaped folders inside a
 // mixed library. Signals (any one wins):
-//   - filename pattern "Show Name - <Date or NN>" repeated across files
 //   - .opml / podcasts.json sidecar
-//   - large episode counts (>=8) with short-ish (< 90 min) per-file durations
-//     are NOT used here because we don't probe in classification — too slow
-//     for a synchronous scan. Instead we lean on filename/sidecar signals
-//     and accept that a borderline mixed-library show may need its parent
-//     folder configured as a real podcast library.
+//   - a "podcast" genre tag
+//   - episode naming ("Episode 12", "Ep. 3", "S02E05") on at least half the files
+//   - "Show Name - ..." repeated across files, when the tags carry no album
+//     evidence and the shared prefix is not simply the files' artist
+//   - a large bundle (>= 8) that is neither track-numbered nor tagged as an album
+//
+// Durations are NOT used because we don't probe in classification — too slow
+// for a synchronous scan — so a borderline show may need its parent folder
+// configured as a real podcast library.
 func classifyFolderAsPodcast(folder string, files []string) bool {
+	return classifyMixedFolderAsPodcast(folder, files, &folderTags{files: files})
+}
+
+func classifyMixedFolderAsPodcast(folder string, files []string, tags *folderTags) bool {
 	if len(files) < 3 {
 		return false
 	}
@@ -142,8 +153,20 @@ func classifyFolderAsPodcast(folder string, files []string) bool {
 			return true
 		}
 	}
-	// Heuristic: at least half the files share the same "Show Name -" prefix
-	// (which is the most common episode naming convention).
+	if majorityMatch(files, episodeFilenamePattern) {
+		return true
+	}
+	if tags.load().podcast {
+		return true
+	}
+	if tags.album {
+		// Album and track number on the files themselves: this is music
+		// whatever the filenames look like.
+		return false
+	}
+	// "Show Name - Episode Title" is the most common episode naming
+	// convention. "Artist - Title" looks identical, so a prefix that is just
+	// the files' own artist tag is music.
 	prefix := ""
 	matched := 0
 	for _, file := range files {
@@ -162,12 +185,13 @@ func classifyFolderAsPodcast(folder string, files []string) bool {
 			matched++
 		}
 	}
-	if prefix != "" && matched*2 >= len(files) {
+	if prefix != "" && matched*2 >= len(files) && !strings.EqualFold(prefix, tags.artist) {
 		return true
 	}
 	// Old-time radio and serial podcast folders often have many episodes
 	// with inconsistent filenames — treat large episode bundles as shows.
-	if len(files) >= 8 {
+	// An album is a large bundle too, so track-numbered files are not.
+	if len(files) >= 8 && !majorityMatch(files, numberedTrackFilenamePattern) {
 		return true
 	}
 	return false
@@ -175,10 +199,18 @@ func classifyFolderAsPodcast(folder string, files []string) bool {
 
 // classifyFolderAsAudiobook decides whether a single folder's contents look
 // like an audiobook bundle rather than music tracks. It is intentionally
-// conservative: only strong audiobook signals (sidecars, .m4b containers, or
-// one-file long-form audio) trigger the audiobook path. Everything else falls
-// back to music.
+// conservative: only strong audiobook signals (a path hint, sidecars, .m4b
+// containers, chapter naming, a spoken-word genre tag, or one-file long-form
+// audio) trigger the audiobook path. Everything else falls back to music.
+//
+// "01 - Title.flac" is NOT a chapter signal here. It is how almost every
+// ripper and tagger names album tracks, and treating it as one turned every
+// album in a mixed library into an audiobook.
 func classifyFolderAsAudiobook(folder string, files []string) bool {
+	return classifyMixedFolderAsAudiobook(folder, files, &folderTags{files: files})
+}
+
+func classifyMixedFolderAsAudiobook(folder string, files []string, tags *folderTags) bool {
 	if len(files) == 0 {
 		return false
 	}
@@ -201,12 +233,21 @@ func classifyFolderAsAudiobook(folder string, files []string) bool {
 			return true
 		}
 	}
-	// Multi-file chapter audiobooks: several MP3/M4A parts in one folder.
-	if len(files) >= 3 && looksLikeChapterBundle(files) && !looksLikeMusicAlbum(files) {
+	// Multi-file audiobooks named for what they are: "Chapter One",
+	// "Part 03", "ch12".
+	if len(files) >= 3 && majorityMatch(files, chapterWordFilenamePattern) {
+		return true
+	}
+	if tags.load().spoken {
+		return true
+	}
+	// A long run of numbered parts with no album tags is a book split into
+	// files; albums with more than 30 tracks in one folder are rare enough.
+	if len(files) > 30 && !tags.album && looksLikeChapterBundle(files) {
 		return true
 	}
 	// Single-file audiobooks, including ones smaller than legacy 50MB cutoff.
-	if len(files) == 1 {
+	if len(files) == 1 && !tags.album {
 		info, err := os.Stat(files[0])
 		if err != nil {
 			return false
@@ -222,6 +263,81 @@ func classifyFolderAsAudiobook(folder string, files []string) bool {
 		}
 	}
 	return false
+}
+
+var (
+	// "Chapter One", "chapter_03", "Part 2", "Pt. 4", "ch12". Explicitly
+	// named parts of a book; a bare "01 - Title" is deliberately absent.
+	chapterWordFilenamePattern = regexp.MustCompile(`(?i)\b(?:chapter|chapitre|kapitel)\b|\b(?:ch|part|pt)(?:\.|[\s_-])*\d+`)
+	// "Episode 12", "ep-3", "S02E05".
+	episodeFilenamePattern = regexp.MustCompile(`(?i)\b(?:episode|ep)(?:\.|[\s_-])*\d+|\bs\d{1,2}e\d{1,3}\b`)
+	// "01", "01 Title", "01 - Title", "1. Title", "01-title": how albums are named.
+	numberedTrackFilenamePattern = regexp.MustCompile(`^\d{1,3}(?:$|[\s._-])`)
+)
+
+// majorityMatch reports whether at least half of the files' names (without
+// extension) match pattern.
+func majorityMatch(files []string, pattern *regexp.Regexp) bool {
+	if len(files) == 0 {
+		return false
+	}
+	matched := 0
+	for _, file := range files {
+		if pattern.MatchString(strings.TrimSuffix(filepath.Base(file), filepath.Ext(file))) {
+			matched++
+		}
+	}
+	return matched*2 >= len(files)
+}
+
+// folderTags is what a folder's own tags say about it, read from the first
+// file that has any — headers only, never ffprobe — and only when the cheaper
+// filename and sidecar signals have not already decided.
+type folderTags struct {
+	files []string
+	read  bool
+
+	spoken  bool   // an audiobook / spoken-word genre
+	podcast bool   // a podcast genre
+	album   bool   // an album tag and a track number: music
+	artist  string // the first file's artist, to tell "Artist - Title" from "Show - Episode"
+}
+
+func (t *folderTags) load() *folderTags {
+	if t.read {
+		return t
+	}
+	t.read = true
+	for index, path := range t.files {
+		if index >= 3 {
+			break
+		}
+		var meta tag.Metadata
+		err := recoverToError("tag sniff of "+path, func() error {
+			file, err := os.Open(path)
+			if err != nil {
+				return err
+			}
+			defer file.Close()
+			meta, err = tag.ReadFrom(file)
+			return err
+		})
+		if err != nil || meta == nil {
+			continue
+		}
+		genre := strings.ToLower(meta.Genre())
+		for _, word := range []string{"audiobook", "audio book", "hörbuch", "horbuch", "livre audio", "audiolibro", "spoken", "speech"} {
+			if strings.Contains(genre, word) {
+				t.spoken = true
+			}
+		}
+		t.podcast = strings.Contains(genre, "podcast")
+		track, _ := meta.Track()
+		t.album = strings.TrimSpace(meta.Album()) != "" && track > 0 && !t.spoken && !t.podcast
+		t.artist = strings.TrimSpace(meta.Artist())
+		return t
+	}
+	return t
 }
 
 func audiobookPathHint(folder string) bool {

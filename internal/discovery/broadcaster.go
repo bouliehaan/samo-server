@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"github.com/bouliehaan/samo-server/internal/log"
 	"net"
+	"os"
 	"strings"
 	"time"
 )
@@ -67,7 +68,7 @@ func NewBroadcaster(serverPort int, serverID string) *Broadcaster {
 	return &Broadcaster{
 		Port:       7360, // Custom port to avoid Jellyfin
 		ServerPort: serverPort,
-		ServerName: "Samo Server",
+		ServerName: advertisedName(),
 		ServerID:   serverID,
 	}
 }
@@ -196,4 +197,18 @@ func (b *Broadcaster) getOutboundIP(remoteIP net.IP) string {
 
 	localAddr := conn.LocalAddr().(*net.UDPAddr)
 	return localAddr.IP.String()
+}
+
+// advertisedName is what a client's server picker shows. The machine's name
+// tells two servers apart -- every server used to answer "Samo Server", so a
+// house with two showed two identical rows -- and samo is lowercase wherever a
+// person reads it. The published compose uses host networking, which shares the
+// host's UTS namespace, so this is the host's own name there too.
+func advertisedName() string {
+	if host, err := os.Hostname(); err == nil {
+		if host = strings.TrimSpace(host); host != "" && host != "localhost" {
+			return "samo on " + host
+		}
+	}
+	return "samo server"
 }

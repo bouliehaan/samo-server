@@ -108,7 +108,14 @@ func TestSetupDirectoryBrowserRootEntries(t *testing.T) {
 		Users:     users.New(users.ServiceOptions{DB: db}),
 	})
 
+	// Browsing the server's folders takes the admin token from step 1, like
+	// every other setup step.
 	rec := doRequest(handler, http.MethodGet, "/api/v1/setup/directories", "", "")
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("anonymous directories status = %d, want 401 body=%s", rec.Code, rec.Body.String())
+	}
+	token := setupAdminToken(t, handler)
+	rec = doRequest(handler, http.MethodGet, "/api/v1/setup/directories", "", token)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("directories status = %d body=%s", rec.Code, rec.Body.String())
 	}
@@ -128,7 +135,7 @@ func TestSetupRejectsSystemPaths(t *testing.T) {
 		Users:     users.New(users.ServiceOptions{DB: db}),
 	})
 
-	rec := doRequest(handler, http.MethodGet, "/api/v1/setup/directories?path=/proc", "", "")
+	rec := doRequest(handler, http.MethodGet, "/api/v1/setup/directories?path=/proc", "", setupAdminToken(t, handler))
 	if rec.Code != http.StatusBadRequest {
 		t.Fatalf("status for /proc = %d body=%s", rec.Code, rec.Body.String())
 	}
@@ -189,4 +196,38 @@ func doRequest(handler http.Handler, method, path, body, token string) *httptest
 	rec := httptest.NewRecorder()
 	handler.ServeHTTP(rec, req)
 	return rec
+}
+
+// Coming back to /setup after it is finished -- the scan step says you can --
+// has to work for the admin. These routes are not behind handleAPI, so the
+// admin used to be refused as "unauthorized".
+func TestSetupDirectoryBrowserAfterSetupForAdmin(t *testing.T) {
+	db := storagetest.Open(t)
+	handler := NewServer(ServerOptions{
+		Libraries: libraries.New(db, scanner.New(db)),
+		Users:     users.New(users.ServiceOptions{DB: db}),
+	})
+	token := setupAdminToken(t, handler)
+	if rec := doRequest(handler, http.MethodPost, "/api/v1/setup/complete", "", token); rec.Code >= 300 {
+		t.Fatalf("complete status = %d body=%s", rec.Code, rec.Body.String())
+	}
+	if rec := doRequest(handler, http.MethodGet, "/api/v1/setup/directories", "", token); rec.Code != http.StatusOK {
+		t.Fatalf("admin directories after setup = %d body=%s", rec.Code, rec.Body.String())
+	}
+	if rec := doRequest(handler, http.MethodGet, "/api/v1/setup/directories", "", ""); rec.Code != http.StatusUnauthorized {
+		t.Fatalf("anonymous directories after setup = %d, want 401", rec.Code)
+	}
+}
+
+func setupAdminToken(t *testing.T, handler http.Handler) string {
+	t.Helper()
+	rec := doRequest(handler, http.MethodPost, "/api/v1/setup/admin", `{"username": "admin", "password": "samo-rocks-12345"}`, "")
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("create admin status = %d body=%s", rec.Code, rec.Body.String())
+	}
+	var login users.LoginResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &login); err != nil {
+		t.Fatal(err)
+	}
+	return login.Token
 }

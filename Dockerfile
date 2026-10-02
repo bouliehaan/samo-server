@@ -61,10 +61,23 @@ RUN apt-get update \
 
 COPY --from=build /out/samo-server /usr/local/bin/samo-server
 
+# Debian's /etc/localtime is a symlink to Etc/UTC, and Docker resolves a bind
+# target through symlinks: the compose file's host-clock mount landed on
+# /usr/share/zoneinfo/Etc/UTC instead, so "Etc/UTC" inside the container meant
+# the host's zone. With no file here the mount gets a plain target, and a
+# container run without it is UTC, as before.
+RUN rm -f /etc/localtime
+
 # Run as an unprivileged user; /data is the single persisted directory.
+#
+# 1777, like /tmp: the published compose runs the server as the person's own
+# uid (PUID, default 1000) so that Keep in Library can write into their music
+# folder, and a fresh named volume is initialised from this directory -- so it
+# has to be writable by whichever uid that turns out to be.
 RUN useradd --system --uid 10001 --create-home --home-dir /home/samo samo \
     && mkdir -p /data \
-    && chown -R samo:samo /data
+    && chown -R samo:samo /data \
+    && chmod 1777 /data
 
 ENV SAMO_DATA_DIR=/data \
     SAMO_ADDR=:6969 \

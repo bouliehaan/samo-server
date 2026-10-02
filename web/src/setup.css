@@ -237,3 +237,7 @@
       line-height: 1.5;
     }
   
+
+/* The name is lowercase wherever a person reads it, so a heading that carries
+   it opts out of the uppercase treatment. See samo/docs/NAMING.md. */
+.step-card .keep-case, .keep-case { text-transform: none; }

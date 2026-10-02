@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 
 	"github.com/bouliehaan/samo-server/internal/libraries"
@@ -107,15 +108,10 @@ func (s *Server) createSetupAdmin(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) browseSetupDirectories(w http.ResponseWriter, r *http.Request) {
-	status, err := s.computeSetupStatus(r.Context())
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, err.Error())
+	// The same gate as every other setup step. It used to let anyone list the
+	// server's folders until setup finished, and nobody at all afterwards.
+	if !s.allowSetupOrAdmin(w, r) {
 		return
-	}
-	if !status.NeedsSetup {
-		if _, ok := s.requireAdmin(w, r); !ok {
-			return
-		}
 	}
 	requested := strings.TrimSpace(r.URL.Query().Get("path"))
 	entries, err := browseDirectories(requested)
@@ -241,8 +237,19 @@ func (s *Server) allowSetupOrAdmin(w http.ResponseWriter, r *http.Request) bool 
 		}
 		return true
 	}
-	_, ok := s.requireAdmin(w, r)
-	return ok
+	// These routes are not behind handleAPI, so nothing has put a principal in
+	// the request context: requireAdmin here refused every admin, and coming
+	// back to /setup to attach a folder after setup failed with "unauthorized".
+	principal, ok := s.authenticateBearer(r)
+	if !ok {
+		writeError(w, http.StatusUnauthorized, "unauthorized")
+		return false
+	}
+	if principal.User.Role != users.RoleAdmin {
+		writeError(w, http.StatusForbidden, "admin required")
+		return false
+	}
+	return true
 }
 
 type setupAdminInput struct {
@@ -337,19 +344,18 @@ func browseDirectories(requested string) (setupDirectoryListing, error) {
 	return listing, nil
 }
 
+// defaultRootEntries is where the folder picker starts. Folders mounted into
+// this container come first: in the published compose that is the media folder
+// the person named on the install line, and it is almost always the answer.
+// Generic roots follow for a server running outside a container. samo's own
+// data directory and the process's home are never suggested -- they are samo's,
+// not the person's, and in a container they are meaningless to them.
 func defaultRootEntries() []setupDirectoryEntry {
-	candidates := []string{
-		"/home",
-		"/srv",
-		"/mnt",
-		"/media",
-		"/opt",
-		"/var/lib",
-		"/data",
-	}
-	home, err := os.UserHomeDir()
-	if err == nil && home != "" {
-		candidates = append([]string{home}, candidates...)
+	candidates := mountedMediaDirs("/proc/self/mountinfo")
+	candidates = append(candidates, "/home", "/srv", "/mnt", "/media", "/opt")
+	skip := map[string]struct{}{}
+	if dataDir := strings.TrimSpace(os.Getenv("SAMO_DATA_DIR")); dataDir != "" {
+		skip[filepath.Clean(dataDir)] = struct{}{}
 	}
 	seen := map[string]struct{}{}
 	entries := make([]setupDirectoryEntry, 0, len(candidates))
@@ -358,19 +364,77 @@ func defaultRootEntries() []setupDirectoryEntry {
 		if _, ok := seen[clean]; ok {
 			continue
 		}
+		if _, ok := skip[clean]; ok {
+			continue
+		}
 		info, err := os.Stat(clean)
 		if err != nil || !info.IsDir() {
 			continue
 		}
 		seen[clean] = struct{}{}
+		count := 0
+		if children, err := os.ReadDir(clean); err == nil {
+			count = len(children)
+		}
 		entries = append(entries, setupDirectoryEntry{
-			Name:   clean,
-			Path:   clean,
-			IsDir:  true,
-			IsRoot: true,
+			Name:      clean,
+			Path:      clean,
+			IsDir:     true,
+			IsRoot:    true,
+			ItemCount: count,
 		})
 	}
 	return entries
+}
+
+// mountedMediaDirs lists the directories bind-mounted into this process's mount
+// namespace from somewhere else -- in a container, the host folders compose was
+// told about. Read from mountinfo, where field 4 is the root of the mount within
+// its filesystem ("/" for a whole filesystem) and field 5 is where it is
+// mounted. System and samo-internal mount points are left out.
+func mountedMediaDirs(mountinfo string) []string {
+	raw, err := os.ReadFile(mountinfo)
+	if err != nil {
+		return nil
+	}
+	var dirs []string
+	for _, line := range strings.Split(string(raw), "\n") {
+		fields := strings.Fields(line)
+		if len(fields) < 5 {
+			continue
+		}
+		root, point := fields[3], unescapeMountinfo(fields[4])
+		if root == "/" || point == "/" || isSystemPath(point) {
+			continue
+		}
+		if strings.HasPrefix(point, "/etc/") || point == "/tmp" ||
+			point == "/var/run/postgresql" || strings.HasPrefix(point, "/usr/") {
+			continue
+		}
+		dirs = append(dirs, point)
+	}
+	sort.Strings(dirs)
+	return dirs
+}
+
+// unescapeMountinfo undoes mountinfo's octal escaping of spaces, tabs,
+// newlines and backslashes in paths ("Music\040Library").
+func unescapeMountinfo(field string) string {
+	if !strings.Contains(field, "\\") {
+		return field
+	}
+	var out strings.Builder
+	for i := 0; i < len(field); i++ {
+		if field[i] == '\\' && i+3 < len(field) {
+			if value, err := strconv.ParseUint(field[i+1:i+4], 8, 8); err == nil {
+				out.WriteByte(byte(value))
+				i += 3
+				continue
+			}
+		}
+		out.WriteByte(field[i])
+	}
+	return out.String()
 }
 
 func isSystemPath(path string) bool {

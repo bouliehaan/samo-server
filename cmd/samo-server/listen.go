@@ -102,3 +102,41 @@ func isAddressInUse(err error) bool {
 	return strings.Contains(err.Error(), "address already in use") ||
 		strings.Contains(err.Error(), "bind: only one usage")
 }
+
+// lanURLs are the addresses another machine on the network could open: one per
+// IPv4 address on an interface that is up, not loopback, not link-local, and
+// not a container or VM bridge (docker0's 172.17.0.1 means nothing from a
+// laptop). Falls back to localhost on a box with no network yet.
+func lanURLs(port, path string) []string {
+	var urls []string
+	interfaces, _ := net.Interfaces()
+	for _, iface := range interfaces {
+		if iface.Flags&net.FlagUp == 0 || iface.Flags&net.FlagLoopback != 0 || virtualInterface(iface.Name) {
+			continue
+		}
+		addrs, err := iface.Addrs()
+		if err != nil {
+			continue
+		}
+		for _, addr := range addrs {
+			ipnet, ok := addr.(*net.IPNet)
+			if !ok || ipnet.IP.To4() == nil || ipnet.IP.IsLoopback() || ipnet.IP.IsLinkLocalUnicast() {
+				continue
+			}
+			urls = append(urls, "http://"+ipnet.IP.To4().String()+port+path)
+		}
+	}
+	if len(urls) == 0 {
+		return []string{"http://localhost" + port + path}
+	}
+	return urls
+}
+
+func virtualInterface(name string) bool {
+	for _, prefix := range []string{"docker", "br-", "veth", "virbr", "cni", "podman", "lxc", "lxd", "flannel", "cali", "vxlan"} {
+		if strings.HasPrefix(name, prefix) {
+			return true
+		}
+	}
+	return false
+}

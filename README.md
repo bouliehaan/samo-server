@@ -10,30 +10,59 @@ Android and desktop.
 
 ## Install
 
-One command. Nothing to download, nothing to edit.
+On the machine your music is on — Ubuntu, Debian or Raspberry Pi OS, 64-bit.
+Two lines, and you only need the first one once.
+
+**Docker**, if `docker --version` says it is not installed:
 
 ```bash
-docker compose -f oci://ghcr.io/bouliehaan/samo-server:compose up -d
+curl -fsSL https://get.docker.com | sudo sh
 ```
 
-Then open `http://<this machine>:6969/setup` and the wizard takes it from there
-— admin account, library folders, first scan.
+That is Docker's own installer. Use it rather than the `snap install docker`
+Ubuntu suggests: the snap is sandboxed away from most of your folders.
 
-If your media is not at `/mnt/media`, say so on the same line; compose reads it
-from your shell, so there is still no file:
+**samo**, told where your music is:
 
 ```bash
-SAMO_MEDIA_DIR=/srv/media SAMO_MUSIC_DIR=/srv/media/music \
-  docker compose -f oci://ghcr.io/bouliehaan/samo-server:compose up -d
+sudo SAMO_MEDIA_DIR=/home/you/Music docker compose -f oci://ghcr.io/bouliehaan/samo-server:compose up -d -y
 ```
 
-Your media is mounted read-only so a scanner bug cannot eat a library, with
-`SAMO_MUSIC_DIR` writable on top of it because **Keep in Library** copies into
-it. Point both at the same place if you want the whole thing writable.
+Then open `http://<this machine>:6969/setup` from any computer on your network
+and the wizard takes it from there — admin account, library folders, first
+scan. Your music folder is the first one it suggests. If you do not know this
+machine's address, `docker logs samo-server` prints the setup link, and
+`hostname -I` prints the address on its own.
 
-Updating is the same command with `pull` first. The compose artifact lives in
-the same registry as the image and pins it by digest, so a given tag always
-brings up exactly the build it was published with.
+`SAMO_MEDIA_DIR` can be any folder: your home's Music folder, an external drive
+under `/media`, a disk under `/mnt`. Left out, it is `/mnt/media`. samo runs as
+the machine's first user account (uid 1000) so it can write into that folder —
+**Keep in Library** copies into it; if your files belong to a different
+account, add `PUID=$(id -u) PGID=$(id -g)` before `docker compose`.
+
+To keep the rest of the drive read-only, so a scanner bug cannot eat a library,
+also name the one folder samo may write to, inside it:
+
+```bash
+sudo SAMO_MEDIA_DIR=/srv/media SAMO_MUSIC_DIR=/srv/media/music \
+  docker compose -f oci://ghcr.io/bouliehaan/samo-server:compose up -d -y
+```
+
+**Updating** is the line you installed with, with `--pull always` on the end.
+Keep the same settings: an update without `SAMO_MEDIA_DIR` brings samo up
+looking at `/mnt/media`, and your library shows as missing — nothing is
+deleted — until you run it again with them. The compose artifact lives in the
+same registry as the image and pins it by digest, so a given tag always brings
+up exactly the build it was published with.
+
+Installed before 1.4.0? The stack was named after whatever folder the command
+ran in, and so were its volumes. `sudo docker compose ls` shows that name; put
+`-p <name>` after `docker compose` on your update line and samo keeps the data
+it already has.
+
+Radio schedules follow this machine's clock. If `timedatectl` shows UTC and
+you are not, `sudo timedatectl set-timezone America/Denver` (your zone), or set
+`SAMO_TIMEZONE` on the install line.
 
 ### Ports, and the one that gets forgotten
 
@@ -60,8 +89,7 @@ Postgres runs alongside it with **no password and no TCP listener at all** —
 volume. There is nothing on the network to authenticate to, so there is no
 credential to set, leak, or bake into a published compose file.
 
-Optional integrations are passed through from your shell the same way as the
-media path: `SAMO_LASTFM_API_KEY`, `SAMO_LASTFM_SHARED_SECRET`,
+Optional integrations go on the install line the same way as the media path: `SAMO_LASTFM_API_KEY`, `SAMO_LASTFM_SHARED_SECRET`,
 `SAMO_ACOUSTID_API_KEY`, `SAMO_EGRESS_PROXY_URL`.
 
 ## What it does

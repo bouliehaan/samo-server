@@ -625,9 +625,9 @@ func main() {
 		}
 	}
 	// Where a channel's schedule is read, unless the channel names its own.
-	// SAMO_TIMEZONE first, then the process zone — which in a container is
-	// UTC, so anyone outside UTC has to set one for schedules to mean
-	// anything.
+	// SAMO_TIMEZONE first, then the process zone — which the published compose
+	// takes from the host by mounting its /etc/localtime, so schedules follow
+	// the machine's own clock without anyone setting a zone.
 	scheduleLocation := time.Local
 	if zone := strings.TrimSpace(os.Getenv("SAMO_TIMEZONE")); zone != "" {
 		if loc, err := time.LoadLocation(zone); err == nil {
@@ -636,7 +636,15 @@ func main() {
 			log.Warnf("SAMO_TIMEZONE %q is not a known zone; channel schedules fall back to %s", zone, scheduleLocation)
 		}
 	}
-	log.Infof("channel schedules are read in %s", scheduleLocation)
+	if scheduleLocation == time.Local {
+		// time.Local loaded from /etc/localtime is called "Local", which says
+		// nothing about whether the host's clock is the one anybody meant.
+		abbrev, offset := time.Now().In(scheduleLocation).Zone()
+		log.Infof("channel schedules are read in this machine's local time (%s, UTC%+03d:%02d); set SAMO_TIMEZONE to change it",
+			abbrev, offset/3600, (offset%3600+3600)%3600/60)
+	} else {
+		log.Infof("channel schedules are read in %s", scheduleLocation)
+	}
 
 	// Loudness levelling, shared by the channel streamer and the samo-radio
 	// queue resolver so both sides of the radio agree on how loud things are.
@@ -848,7 +856,11 @@ func main() {
 	}
 	log.Infof("samo-server listening on %s", actualAddr)
 	if setupHintNeeded {
-		log.Infof("no admin user configured; open http://localhost%s/setup in a browser to finish first-run setup", normalizedDisplayPort(actualAddr))
+		// From another machine: the box this runs on is usually headless, and
+		// "localhost" there means the laptop the person is sitting at.
+		for _, url := range lanURLs(normalizedDisplayPort(actualAddr), "/setup") {
+			log.Infof("no admin user configured; open %s in a browser to finish first-run setup", url)
+		}
 	}
 	log.Infof("ffmpeg: %s", tools.FFmpeg)
 	log.Infof("ffprobe: %s", tools.FFprobe)

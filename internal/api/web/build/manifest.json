@@ -4,7 +4,7 @@
     "src": "_login-C7wCMi9S.css"
   },
   "src/app.js": {
-    "file": "app-D0XhMf4g.js",
+    "file": "app-5I6TSPUu.js",
     "name": "app",
     "src": "src/app.js",
     "isEntry": true,
@@ -31,12 +31,12 @@
     ]
   },
   "src/setup.js": {
-    "file": "setup-CC4k8_dF.js",
+    "file": "setup-zJsb3Q6s.js",
     "name": "setup",
     "src": "src/setup.js",
     "isEntry": true,
     "css": [
-      "setup-DOgV6ZGb.css"
+      "setup-BBjrvj2T.css"
     ]
   }
 }

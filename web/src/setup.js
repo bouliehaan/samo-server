@@ -68,7 +68,7 @@ import "./setup.css";
       card.innerHTML = `
         <div class="card-head"><span class="caret">&gt;</span> CREATE YOUR ACCOUNT</div>
         <h2>Pick a username and password.</h2>
-        <p class="lede">This is how you'll sign in. Nothing leaves your machine — Samo stores credentials locally.</p>
+        <p class="lede">This is how you'll sign in. Nothing leaves your machine — samo stores credentials locally.</p>
         <div class="form-row-split">
           <label class="field">
             <span class="field-label">USERNAME</span>
@@ -206,7 +206,7 @@ import "./setup.css";
       const wrap = document.querySelector(".libs-attached-body");
       if (!wrap) return;
       if (attachedLibraries.length === 0) {
-        wrap.innerHTML = "<div class=\"libs-empty\">// no folders attached yet · pick one below and Samo will index it on the next step</div>";
+        wrap.innerHTML = "<div class=\"libs-empty\">// no folders attached yet · pick one below and samo will index it on the next step</div>";
         return;
       }
       wrap.innerHTML = "";
@@ -398,7 +398,7 @@ import "./setup.css";
       card.innerHTML = `
         <div class="card-head"><span class="caret">&gt;</span> INDEX YOUR MEDIA</div>
         <h2>One last thing — let's build the catalog.</h2>
-        <p class="lede">Samo reads each file once to learn what it has. Large libraries take a few minutes. You can skip and come back to this later from settings.</p>
+        <p class="lede">samo reads each file once to learn what it has. Large libraries take a few minutes. You can skip and come back to this later from settings.</p>
         <div class="actions">
           <button class="btn primary" id="scanRun">RUN INITIAL SCAN</button>
           <button class="btn ghost" id="finishLater">SKIP FOR NOW</button>
@@ -468,7 +468,7 @@ import "./setup.css";
     function renderDoneStep() {
       card.innerHTML = `
         <div class="card-head"><span class="caret">&gt;</span> READY</div>
-        <h2>Samo is live.</h2>
+        <h2 class="keep-case">samo is live.</h2>
         <p class="lede">Catalog seeded. Your token is stored in this browser — clear site data to sign out. Open the dashboard to start listening.</p>
         <div class="actions">
           <a class="btn primary" href="/">OPEN DASHBOARD &rarr;</a>

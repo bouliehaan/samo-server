@@ -1,14 +1,19 @@
-# samo-server. One command, nothing to edit:
+# samo-server. One command, nothing to edit, pointed at your music:
 #
-#   docker compose -f oci://ghcr.io/bouliehaan/samo-server:compose up -d
+#   sudo SAMO_MEDIA_DIR=/home/you/Music docker compose -f oci://ghcr.io/bouliehaan/samo-server:compose up -d -y
 #
-# Point SAMO_MEDIA_DIR at your library if it is not /mnt/media; compose reads it
-# from your shell, so there is still no file to edit:
-#
-#   SAMO_MEDIA_DIR=/srv/music docker compose -f oci://... up -d
+# Compose reads SAMO_MEDIA_DIR from the command line, so there is still no file
+# to edit. Updating is the same line with --pull always on the end.
 #
 # Everything else — libraries, admin account, integrations — is configured in
 # the web UI at http://<this machine>:6969/setup.
+
+# Fixed, so the stack is the same project whichever directory the command is
+# run from. Left to Compose it is the current directory's name: run from / it
+# fails outright ("project name must not be empty"), run from ~ every samo
+# stack lands in one project, and an update run from somewhere else comes up
+# on new, empty volumes.
+name: samo-server
 
 services:
   db:
@@ -38,25 +43,52 @@ services:
       timeout: 5s
       retries: 12
 
+  # One-shot, before the server: hands samo's data directory to the uid the
+  # server runs as. Releases before 1.4.0 ran it as the image's own uid 10001,
+  # so an existing install's volume belongs to 10001 and a server running as
+  # PUID could read it but not write a cover or a podcast episode into it. Root
+  # for exactly one chown, and nothing at all once the owner is already right.
+  data-owner:
+    image: ghcr.io/bouliehaan/samo-server:latest
+    user: "0:0"
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - '[ "$$(stat -c %u:%g "$$DIR")" = "$$OWNER" ] || chown -R "$$OWNER" "$$DIR"'
+    environment:
+      DIR: ${SAMO_DATA_DIR:-/data}
+      OWNER: ${PUID:-1000}:${PGID:-1000}
+    volumes:
+      - ${SAMO_DATA_DIR:-samodata}:${SAMO_DATA_DIR:-/data}
+    healthcheck:
+      disable: true
+
   server:
     image: ghcr.io/bouliehaan/samo-server:latest
+    # A name you can type: `docker logs samo-server` prints the setup address.
+    container_name: samo-server
     restart: unless-stopped
     # Share the host's network stack: HTTP on :6969 and UDP autodiscovery on
     # :7360 bind to the host directly, so LAN broadcasts reach the server and it
     # advertises an address clients can actually use. Docker's default bridge
     # drops those broadcasts and would advertise a container-internal address.
     network_mode: host
+    # The person's own uid, so what samo writes into their music folder (Keep
+    # in Library) is theirs and is allowed in the first place. 1000 is the
+    # first account on Ubuntu, Debian and Raspberry Pi OS; PUID/PGID for
+    # anyone else. The image's own user, 10001, owns nothing on the host.
+    user: "${PUID:-1000}:${PGID:-1000}"
     depends_on:
       db:
         condition: service_healthy
+      data-owner:
+        condition: service_completed_successfully
     environment:
       # Over the shared socket, not the network. Nothing here is a secret.
       SAMO_DB_DSN: postgres://samo@/samo?host=/var/run/postgresql
-      # Schedule rules are wall-clock local. Keep this aligned with the wall
-      # and with any downloader that uses the same calendar; otherwise a
-      # container's UTC default silently shifts every booked block.
-      SAMO_TIMEZONE: ${SAMO_TIMEZONE:-UTC}
-      TZ: ${TZ:-UTC}
+      # Schedule rules are wall-clock local. Left empty, they follow this
+      # machine's own clock (mounted below), which is what the person means by
+      # "8am". Set it only to schedule in a zone other than the host's.
+      SAMO_TIMEZONE: ${SAMO_TIMEZONE:-}
       # Where samo keeps its own state. A named volume by default; set
       # SAMO_DATA_DIR to a host path to keep an existing data directory at the
       # absolute path it already has, which matters because covers, radio.json
@@ -81,6 +113,15 @@ services:
       start_period: 60s
     volumes:
       - pgsocket:/var/run/postgresql
+      # The host's clock, so schedules, logs and "today" agree with the wall.
+      # Long form so a host without the file is an error rather than Docker
+      # creating an empty directory at /etc/localtime.
+      - type: bind
+        source: /etc/localtime
+        target: /etc/localtime
+        read_only: true
+        bind:
+          create_host_path: false
       # samo's own state: extracted covers, podcast cache, radio config.
       # A bare name is a named volume, a path is a bind mount, so this is both
       # the fresh-install default and the way an existing install keeps its data
@@ -90,14 +131,14 @@ services:
       # absolute paths stored in the database keep resolving. Add libraries
       # pointing at it in the setup wizard.
       #
-      # Read-only, so a scanner bug cannot eat a library.
+      # Read-only, so a scanner bug cannot eat a library...
       - ${SAMO_MEDIA_DIR:-/mnt/media}:${SAMO_MEDIA_DIR:-/mnt/media}:ro
-      # The music folder on top of it, writable, because "Keep in Library"
-      # copies into it. Listed after the read-only root and nested inside it:
-      # Docker applies the more specific path last, so the music library ends up
-      # writable while the drive around it stays read-only. Point it at the same
-      # place as SAMO_MEDIA_DIR if you want the whole thing writable.
-      - ${SAMO_MUSIC_DIR:-/mnt/media/Music}:${SAMO_MUSIC_DIR:-/mnt/media/Music}:rw
+      # ...except the music folder, writable, because "Keep in Library" copies
+      # into it. Name only SAMO_MEDIA_DIR and this is that same folder, so Keep
+      # works with one setting and no folder appears that you did not make. Name
+      # SAMO_MUSIC_DIR too, nested inside it, and only that folder is writable:
+      # the more specific mount is applied last.
+      - ${SAMO_MUSIC_DIR:-${SAMO_MEDIA_DIR:-/mnt/media/Music}}:${SAMO_MUSIC_DIR:-${SAMO_MEDIA_DIR:-/mnt/media/Music}}:rw
 
 volumes:
   pgdata:

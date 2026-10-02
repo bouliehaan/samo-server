@@ -708,10 +708,17 @@ func underAnyDir(path string, dirs []string) bool {
 
 // musicLibraryRoot is where kept files land. Reading it per request rather than
 // caching keeps a library added or repathed after startup working.
+//
+// A mixed library counts. It is what the setup wizard recommends for one folder
+// holding everything, and on a fresh install it is often the only library, so
+// requiring kind 'music' made Keep fail with "no music library configured" for
+// exactly the people who followed the wizard. A real music library still wins;
+// within a mixed one, a top-level Music folder is where the music already is.
 func (s *Service) musicLibraryRoot(ctx context.Context) (string, error) {
-	var path string
+	var path, kind string
 	err := s.db.QueryRowContext(ctx,
-		`SELECT path FROM libraries WHERE kind = 'music' ORDER BY created_at LIMIT 1`).Scan(&path)
+		`SELECT path, kind FROM libraries WHERE kind IN ('music', 'mixed')
+		 ORDER BY (kind = 'music') DESC, created_at LIMIT 1`).Scan(&path, &kind)
 	if err == sql.ErrNoRows {
 		return "", fmt.Errorf("no music library configured")
 	}
@@ -721,7 +728,27 @@ func (s *Service) musicLibraryRoot(ctx context.Context) (string, error) {
 	if strings.TrimSpace(path) == "" {
 		return "", fmt.Errorf("the music library has no path")
 	}
+	if kind == "mixed" {
+		if music := musicSubfolder(path); music != "" {
+			return music, nil
+		}
+	}
 	return path, nil
+}
+
+// musicSubfolder is root's own top-level folder called Music, in any case, or
+// "" when it has none.
+func musicSubfolder(root string) string {
+	entries, err := os.ReadDir(root)
+	if err != nil {
+		return ""
+	}
+	for _, entry := range entries {
+		if entry.IsDir() && strings.EqualFold(entry.Name(), "music") {
+			return filepath.Join(root, entry.Name())
+		}
+	}
+	return ""
 }
 
 // checkWritable verifies the library root can actually be written to, so the
