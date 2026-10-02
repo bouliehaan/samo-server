@@ -71,6 +71,14 @@ type Service struct {
 	// forecasts is each channel's latest air-order forecast (forecast.go).
 	forecastMu sync.Mutex
 	forecasts  map[string]*forecastSlot
+	// forecastCtx roots every forecast run, and Close cancels it. A run reads
+	// the database for as long as it takes, so Close also waits for
+	// forecastRuns: a run left going after it is a run reading a pool the
+	// caller is about to close ("list obligations: sql: database is closed").
+	forecastCtx    context.Context
+	stopForecasts  context.CancelFunc
+	forecastRuns   sync.WaitGroup
+	forecastClosed bool
 }
 
 func NewService(opts ServiceOptions) *Service {
@@ -82,6 +90,7 @@ func NewService(opts ServiceOptions) *Service {
 	if baseCtx == nil {
 		baseCtx = context.Background()
 	}
+	forecastCtx, stopForecasts := context.WithCancel(baseCtx)
 	return &Service{
 		db:               opts.DB,
 		catalog:          opts.Catalog,
@@ -98,17 +107,21 @@ func NewService(opts ServiceOptions) *Service {
 		baseCtx:          baseCtx,
 		loudness:         opts.Loudness,
 		streamers:        map[string]*channelStreamer{},
+		forecastCtx:      forecastCtx,
+		stopForecasts:    stopForecasts,
 	}
 }
 
 // Close stops every running streamer and waits for their ffmpeg subprocesses
 // to be reaped. Call it during shutdown: Go does not kill child processes on
 // exit, so without this a restart leaves one orphaned transcoder per active
-// channel, still holding its input and still burning CPU.
+// channel, still holding its input and still burning CPU. Forecast runs are
+// stopped and waited for the same way, before the database goes.
 func (s *Service) Close(ctx context.Context) {
 	if s == nil {
 		return
 	}
+	s.stopForecastRuns(ctx)
 	s.mu.Lock()
 	streamers := make([]*channelStreamer, 0, len(s.streamers))
 	for id, streamer := range s.streamers {

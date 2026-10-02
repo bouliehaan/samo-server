@@ -102,25 +102,40 @@ func TestNilHubIsUsable(t *testing.T) {
 	}
 }
 
+// Subscribing, receiving and cancelling race the publishers throughout, and
+// nothing deadlocks or sends on a closed channel.
+//
+// A subscriber that only gets going after the last publish never sees an
+// event -- the hub replays nothing -- so it stops waiting once publishing is
+// over. Waiting for one regardless hung the test whenever the scheduler ran a
+// subscriber last, which one CPU does every time (`-cpu 1`).
 func TestConcurrentSubscribeAndPublish(t *testing.T) {
 	hub := NewHub()
-	var wg sync.WaitGroup
+	var publishers, subscribers sync.WaitGroup
+	published := make(chan struct{})
 	for i := 0; i < 16; i++ {
-		wg.Add(2)
+		subscribers.Add(1)
 		go func() {
-			defer wg.Done()
+			defer subscribers.Done()
 			ch, cancel := hub.Subscribe()
-			for range ch {
-				break
+			defer cancel()
+			select {
+			case <-ch:
+			case <-published:
 			}
-			cancel()
 		}()
+		publishers.Add(1)
 		go func() {
-			defer wg.Done()
+			defer publishers.Done()
 			for j := 0; j < 50; j++ {
 				hub.Publish(Event{Type: TypeArtistImages, Data: j})
 			}
 		}()
 	}
-	wg.Wait()
+	publishers.Wait()
+	close(published)
+	subscribers.Wait()
+	if open := hub.Subscribers(); open != 0 {
+		t.Fatalf("%d subscriptions still open after every cancel", open)
+	}
 }

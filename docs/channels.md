@@ -397,10 +397,19 @@ right, because nothing that would overrun was started; **`startImmediately`**
 cuts in on the minute (what derived plans use, so nothing changed silently); and
 **`waitUpTo`** waits, then cuts in past a grace period.
 
-If the gap in front of an appointment closes to less than anything the station
-owns, the appointment simply **starts early**. If the tail of its own hour has no
-room for another item, it **releases early**. No threshold decides either — the
-actual candidate set does.
+If nothing the block owns fits the gap in front of an appointment, the gap is
+**filled from the plan's `underrunPool`** — whole if something fits, faded on the
+boundary if not — so the appointment still starts on its own second. It comes
+forward only across a sliver too small to fill (10 s). The same pool is asked
+**before the ladder bends the block's own rules** to fill such a gap: when what
+does fit is held by a separation rule, the gap gets music rather than the
+episode that finished a minute ago going straight back on (the 2026-09-26
+forecast put Car Talk back on at 08:11, with WAN and Huberman too long for the
+hour before the 10:00 booking). The block's bent pick still plays if the gap pool cannot fill the gap
+cleanly. Inside a booked hour the hour's own material is asked first — one more
+of its own, faded on the hour — then the gap pool, and only then is the tail
+**released early** to the block that follows. No threshold decides any of this —
+the actual candidate set does.
 
 ### The listening day
 

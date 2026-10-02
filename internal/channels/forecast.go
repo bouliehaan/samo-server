@@ -56,7 +56,11 @@ type Forecast struct {
 	ComputedAt time.Time `json:"computedAt"`
 	// From is where the run began: the end of the item on air, or now.
 	From time.Time `json:"from"`
-	// Until is how far the run reached.
+	// Until is how far the run reached: the moment it placed the last thing
+	// it was waiting for, or, when it stopped short, where the horizon or the
+	// time budget stopped it. Not the end of that last item -- a four-hour
+	// episode placed at 11:00 is the answer at 11:00, and the forecast has
+	// nothing to learn from playing it out.
 	Until time.Time `json:"until"`
 	// Complete is true when everything owed that the plan can reach found its
 	// airing before the run stopped; false when the horizon or the time budget
@@ -168,6 +172,10 @@ func forecastRun(
 		return false
 	}
 
+	// settled is the decision that placed the last thing the run was waiting
+	// for, where the run stops. The simulator has played that item out by the
+	// time it asks whether to stop, so its own end is the item's, not this.
+	var settled time.Time
 	result, err := Simulate(ctx, engine, SimOptions{
 		Start:    from,
 		Duration: horizon,
@@ -180,15 +188,23 @@ func forecastRun(
 					aired[ref] = step.At.UTC()
 				}
 			}
-			return !waiting(step.Ends)
+			if waiting(step.Ends) {
+				return false
+			}
+			settled = step.At
+			return true
 		},
 	})
 	if err != nil {
 		return Forecast{}, err
 	}
+	until := result.Report.To
+	if !settled.IsZero() {
+		until = settled
+	}
 	return Forecast{
 		From:     from.UTC(),
-		Until:    result.Report.To.UTC(),
+		Until:    until.UTC(),
 		Complete: !waiting(result.Report.To),
 		Airings:  aired,
 	}, nil
@@ -302,12 +318,35 @@ func (s *Service) airOrder(channelID, key string, onAir *OnAir) (Forecast, bool)
 		s.forecasts[channelID] = slot
 	}
 	current := slot.have && slot.key == key && now.Sub(slot.forecast.ComputedAt) < forecastMaxAge
-	if !current && !slot.running && now.Sub(slot.attempted) >= forecastRetry {
+	if !current && !slot.running && !s.forecastClosed && now.Sub(slot.attempted) >= forecastRetry {
 		slot.running = true
 		slot.attempted = now
+		// Added under forecastMu, which Close takes to set forecastClosed
+		// before it waits, so no run can start once the wait has begun.
+		s.forecastRuns.Add(1)
 		go s.runForecast(channelID, key, onAir)
 	}
 	return slot.forecast, slot.have
+}
+
+// stopForecastRuns cancels every forecast still running and waits for them
+// to finish, or for ctx. None starts after it.
+func (s *Service) stopForecastRuns(ctx context.Context) {
+	s.forecastMu.Lock()
+	s.forecastClosed = true
+	s.forecastMu.Unlock()
+	if s.stopForecasts != nil {
+		s.stopForecasts()
+	}
+	done := make(chan struct{})
+	go func() {
+		s.forecastRuns.Wait()
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-ctx.Done():
+	}
 }
 
 // Forecasted is the channel's latest finished forecast, without asking for a
@@ -326,7 +365,11 @@ func (s *Service) Forecasted(channelID string) (Forecast, bool) {
 // nothing that goes wrong in it may reach the station: a failure is logged and
 // the previous forecast stands, and a panic is caught here rather than taking
 // the process -- and every channel on the air -- down with it.
+//
+// A run Close cut short is neither: the service is going away, so it is not
+// filed and not reported.
 func (s *Service) runForecast(channelID, key string, onAir *OnAir) {
+	defer s.forecastRuns.Done()
 	var (
 		forecast Forecast
 		err      error
@@ -342,13 +385,16 @@ func (s *Service) runForecast(channelID, key string, onAir *OnAir) {
 			return
 		}
 		slot.running = false
+		if s.forecastCtx.Err() != nil {
+			return
+		}
 		if err != nil {
 			s.logger.Printf("channel %s: could not forecast the air order: %v", channelID, err)
 			return
 		}
 		slot.forecast, slot.key, slot.have = forecast, key, true
 	}()
-	ctx, cancel := context.WithTimeout(s.baseCtx, forecastTimeout)
+	ctx, cancel := context.WithTimeout(s.forecastCtx, forecastTimeout)
 	defer cancel()
 	forecast, err = NewScheduler(s.schedDeps()).Forecast(ctx, channelID, onAir)
 }

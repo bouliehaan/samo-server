@@ -76,6 +76,7 @@ func TestOwedServiceSeesUnscheduledEpisodesWithoutWriting(t *testing.T) {
 	ears := newStationEars()
 	ears.heardBySomeone("heard", 60*60)
 	service := NewService(ServiceOptions{DB: db, Catalog: cat, Listened: ears})
+	t.Cleanup(func() { service.Close(context.Background()) })
 	for range 2 {
 		items, err := service.Owed(ctx, "ch1")
 		if err != nil {

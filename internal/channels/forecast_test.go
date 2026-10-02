@@ -12,6 +12,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -555,6 +556,7 @@ func TestOwedSaysWhenEachEpisodeIsExpectedToAir(t *testing.T) {
 		t.Fatal(err)
 	}
 	svc := NewService(ServiceOptions{DB: db, Catalog: cat, Logger: log.New(io.Discard, "", 0)})
+	t.Cleanup(func() { svc.Close(context.Background()) })
 
 	owed, err := svc.Owed(ctx, "ch1")
 	if err != nil || len(owed) != 1 {
@@ -583,5 +585,95 @@ func TestOwedSaysWhenEachEpisodeIsExpectedToAir(t *testing.T) {
 	body, _ := json.Marshal(owed[0])
 	if !strings.Contains(string(body), `"expectedAt":"`) {
 		t.Fatalf("the wall reads expectedAt by name: %s", body)
+	}
+}
+
+// stalledEars never answers until the run asking is cancelled: a forecast
+// stuck mid-run, holding the database, for as long as nobody stops it.
+type stalledEars struct {
+	asked chan struct{}
+	once  sync.Once
+}
+
+func (e *stalledEars) EpisodeProgress(ctx context.Context, _ []string) (map[string]EpisodeListening, error) {
+	e.once.Do(func() { close(e.asked) })
+	<-ctx.Done()
+	return nil, ctx.Err()
+}
+
+// lockedLog is a log destination the forecast's goroutine and the test can
+// share.
+type lockedLog struct {
+	mu  sync.Mutex
+	out strings.Builder
+}
+
+func (l *lockedLog) Write(p []byte) (int, error) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.out.Write(p)
+}
+
+func (l *lockedLog) String() string {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.out.String()
+}
+
+// A forecast runs in the background and reads the database for as long as it
+// takes. Close stops it and waits for it, so the caller can close the
+// database behind it -- a run left going was what logged "list obligations:
+// sql: database is closed" -- and nothing starts another one afterwards.
+func TestCloseStopsTheForecastBeforeTheDatabaseGoes(t *testing.T) {
+	db := newTestDB(t)
+	mustChannel(t, db, "ch1")
+	src := mustSource(t, db, "ch1", CreateSourceInput{
+		Kind: SourcePodcastSubscription, Label: "Show", Role: RoleTalk, Enabled: boolPtr(true),
+		Config: map[string]any{"podcastId": "p1", "tier": "S"},
+	})
+	now := time.Now().UTC()
+	plan := Plan{
+		Version:    PlanVersion,
+		Categories: []CategoryDef{{ID: "talk", Target: 1}},
+		Pools:      []Pool{{ID: "talk", SourceIDs: []string{src.ID}}},
+		Blocks:     []Block{{ID: "general", Default: true, Pools: []PoolRef{{Pool: "talk"}}}},
+	}
+	if err := SavePlan(context.Background(), db, "ch1", plan); err != nil {
+		t.Fatal(err)
+	}
+	cat := &stubCatalog{episodes: map[string][]catalog.PodcastEpisode{
+		"p1": {episode("new", "New today", now.Add(-time.Hour), 40)},
+	}}
+	ears := &stalledEars{asked: make(chan struct{})}
+	logs := &lockedLog{}
+	svc := NewService(ServiceOptions{DB: db, Catalog: cat, Listened: ears, Logger: log.New(logs, "", 0)})
+
+	running := func() bool {
+		svc.forecastMu.Lock()
+		defer svc.forecastMu.Unlock()
+		return svc.forecasts["ch1"] != nil && svc.forecasts["ch1"].running
+	}
+	svc.airOrder("ch1", "before", nil)
+	select {
+	case <-ears.asked:
+	case <-time.After(30 * time.Second):
+		t.Fatal("the forecast never got as far as a decision")
+	}
+
+	closing, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	svc.Close(closing)
+	if closing.Err() != nil {
+		t.Fatal("Close gave up waiting for the forecast")
+	}
+	if running() {
+		t.Fatal("a forecast was still running when Close returned")
+	}
+	svc.airOrder("ch1", "after", nil)
+	if running() {
+		t.Fatal("a forecast started after Close")
+	}
+	if strings.Contains(logs.String(), "could not forecast") {
+		t.Fatalf("a run Close stopped was reported as a failure:\n%s", logs.String())
 	}
 }

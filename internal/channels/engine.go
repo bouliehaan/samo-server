@@ -214,6 +214,32 @@ func (e *Engine) program(
 			return fillItem, fill.decision, next, nil
 		}
 	}
+	// Something plays, but only because the ladder gave up the block's own
+	// rules to find it, in a gap in front of an appointment: what the block
+	// holds is either too long for the room or held by a rule. The ladder is
+	// there so a station short of material does not go quiet, and this
+	// station is not short of anything -- the plan nominated a pool for
+	// exactly this gap. Bending separation to fill it puts an episode that
+	// finished a moment ago straight back on: Car Talk ends at 08:11, WAN and
+	// Huberman do not fit before the 10:00 booking, and the ladder gives up
+	// item separation for the only thing left on the shelf (the 2026-09-26
+	// forecast, forecast_test.go). Three weeks of the 09-17 plan aired "JAŸ-Z
+	// in 8" five minutes after itself the same way.
+	//
+	// The gap pool only counts as the better answer when it plays cleanly; one
+	// that had to bend its own rules is no improvement on the block's, and the
+	// block's pick is still in hand. Not inside a booked hour, where the
+	// hour's own material comes first (see the boundary order below).
+	if attempt.ok && attempt.bentForRoom && timeline.Active == nil {
+		if fillItem, fill, ok := e.fillFromUnderrunPool(ctx, now, timeline, block, tail, env,
+			"nothing of its own plays cleanly in the "+round(attempt.window)+" before "+
+				timeline.nextLabel()+", so the gap is filled rather than bending its rules"); ok &&
+			len(fill.decision.Relaxed) == 0 {
+			next := fill.state
+			next.ItemCount++
+			return fillItem, attempt.explainedBy(fill.decision), next, nil
+		}
+	}
 	if attempt.ok {
 		// A stopset separates things worth separating, so whether one is due is
 		// asked once the station knows what it would play next — a break
@@ -1219,7 +1245,12 @@ type selection struct {
 	// when standing them down would have left the block with nothing. Empty
 	// when the gap rule either did not fire or was able to apply itself.
 	outOfRoom string
-	window    time.Duration
+	// bentForRoom means nothing on the block's shelf passed its rules, part of
+	// it because it does not fit the room before a boundary, and what plays
+	// got through only because the ladder gave rules up. A gap, filled by
+	// bending the rules rather than from the pool the plan keeps for gaps.
+	bentForRoom bool
+	window      time.Duration
 }
 
 // explainedBy is a decision made instead of this attempt, carrying this
@@ -1356,6 +1387,14 @@ func (e *Engine) selectIn(
 	out.decision.Relaxed = relaxed
 	if len(relaxed) > 0 {
 		e.logf("channel %s: nothing qualified, gave up %s", e.Channel.ID, strings.Join(relaxed, ", "))
+		// fitsBeforeAnchor never relaxes, so its rejections are still here
+		// after the ladder: the room is part of why nothing played cleanly.
+		for _, rejection := range rejections {
+			if rejection.Rule == ruleFitsBeforeAnchor {
+				out.bentForRoom = true
+				break
+			}
+		}
 	}
 	if len(survivors) == 0 {
 		out.decision.Error = "every candidate was ruled out"

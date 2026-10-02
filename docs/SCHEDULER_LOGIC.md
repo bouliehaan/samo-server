@@ -229,6 +229,19 @@ skipped and release comes first.
 > rejections first (`selection.explainedBy`), so "why did a song play in the
 > show hour" is answerable from the record.
 
+> **Bent for room (2026-10-01).** A gap in front of an appointment used to
+> reach the gap pool only when *every* rejection was `fitsBeforeAnchor`. When
+> one candidate that fits was held by a separation rule, the ladder relaxed
+> that rule and the gap pool was never asked: in the 2026-09-26 forecast Car
+> Talk ended at 08:11, WAN and Huberman did not fit before the 10:00 booking,
+> and Car Talk was forecast straight back on. `selectIn` now sets `selection.bentForRoom` when the
+> ladder relaxed anything and `fitsBeforeAnchor` rejections remain, and
+> `Engine.program` (with `Active == nil`) tries `fillFromUnderrunPool` first.
+> It takes the fill only when that fill relaxed nothing; otherwise the bent
+> pick plays as before. Three weeks of the 09-17 plan: 5h20m of gap music in
+> 3–40 min stretches, and no episode re-aired within 8 h (before: "JAŸ-Z in 8"
+> 5m20s after its own airing).
+
 ### 3c. `buildIntent` — the window rules (engine.go:1308)
 
 - `Window = PlayCeiling = timeline.Window()` (time to Next anchor; 0 = unbounded).
