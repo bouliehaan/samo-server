@@ -33,6 +33,9 @@ type exploDiscoveryStatus struct {
 	Connected  bool     `json:"connected"`
 	Available  bool     `json:"available"`
 	Providers  []string `json:"providers"`
+	// AlbumProviders is the order whole albums try the providers in, for
+	// the album search to show.
+	AlbumProviders []string `json:"albumProviders"`
 	// Albums is true when the connected Explo can also find whole albums.
 	Albums bool `json:"albums"`
 	// Playlists is true when it can read YouTube Music playlists, for
@@ -42,7 +45,7 @@ type exploDiscoveryStatus struct {
 }
 
 func (s *Server) exploDiscoveryState(r *http.Request) (exploDiscoveryStatus, *explo.Remote) {
-	state := exploDiscoveryStatus{Configured: s.exploDiscoveryConfigured(r), Providers: []string{}}
+	state := exploDiscoveryStatus{Configured: s.exploDiscoveryConfigured(r), Providers: []string{}, AlbumProviders: []string{}}
 	if !state.Configured {
 		if s.explo != nil {
 			if cfg, err := s.explo.Config(r.Context()); err == nil && cfg.Configured {
@@ -66,6 +69,10 @@ func (s *Server) exploDiscoveryState(r *http.Request) (exploDiscoveryStatus, *ex
 	state.Available = status.Configured && len(status.Providers) > 0
 	if state.Available {
 		state.Providers = status.Providers
+		state.AlbumProviders = status.AlbumProviders
+		if len(state.AlbumProviders) == 0 {
+			state.AlbumProviders = status.Providers
+		}
 		state.Albums = status.Albums
 		state.Playlists = status.Playlists
 	} else {

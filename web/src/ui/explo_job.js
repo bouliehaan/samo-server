@@ -1,4 +1,4 @@
-export const providerName = (provider) => ({youtube: "YouTube (yt-dlp)", slskd: "Soulseek"}[provider] || "Explo");
+export const providerName = (provider) => ({youtube: "YouTube (yt-dlp)", slskd: "Soulseek", lidarr: "Lidarr"}[provider] || "Explo");
 // Explo is still downloading: worth polling quickly.
 export const activeJob = (job) => ["queued", "downloading"].includes(job.state);
 // Samo's part once the file is staged: identifying, in-library or needs-review.

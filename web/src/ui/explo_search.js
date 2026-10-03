@@ -91,6 +91,7 @@ export function mountExploSearch(host, library, libraryInput) {
   let songs = [];
   let albums = [];
   let providers = [];
+  let albumProviders = [];
   let searching = false;
   const adding = new Set();
   const expanded = new Set();
@@ -142,9 +143,19 @@ export function mountExploSearch(host, library, libraryInput) {
     const button = event.target.closest("button[data-mode]");
     if (button && (available || jobs.size || albumJobs.size)) select(button.dataset.mode);
   });
+  // Auto names the order the providers are tried in, which for a whole album
+  // is Explo's album order (Soulseek first), not the songs'.
+  function renderProviders() {
+    const order = kind === "albums" && albumProviders.length ? albumProviders : providers;
+    const selected = provider.value;
+    provider.innerHTML = '<option value="auto">Auto · ' + escapeHTML(order.map(providerName).join(" → ")) + '</option>' + providers.map((p) => '<option value="' + attr(p) + '">' + escapeHTML(providerName(p)) + '</option>').join("");
+    if (providers.includes(selected)) provider.value = selected;
+  }
   function showKind() {
     const albumsShown = albumsAvailable || albumJobs.size > 0;
+    const before = kind;
     kind = albumsShown ? preferredKind : "songs";
+    if (kind !== before && providers.length) renderProviders();
     kinds.hidden = !albumsShown;
     kinds.querySelectorAll("button").forEach((button) => {
       const active = button.dataset.kind === kind;
@@ -352,11 +363,11 @@ export function mountExploSearch(host, library, libraryInput) {
       modes.hidden = !available && jobs.size === 0 && albumJobs.size === 0;
       showKind();
       if (!available && mode === "new") showMessage(status.reason || "Explo is temporarily unavailable. Download history is retained.");
-      if (JSON.stringify(providers) !== JSON.stringify(status.providers || [])) {
+      if (JSON.stringify(providers) !== JSON.stringify(status.providers || []) ||
+          JSON.stringify(albumProviders) !== JSON.stringify(status.albumProviders || [])) {
         providers = status.providers || [];
-        const selected = provider.value;
-        provider.innerHTML = '<option value="auto">Auto · ' + escapeHTML(providers.map(providerName).join(" → ")) + '</option>' + providers.map((p) => '<option value="' + attr(p) + '">' + escapeHTML(providerName(p)) + '</option>').join("");
-        if (providers.includes(selected)) provider.value = selected;
+        albumProviders = status.albumProviders || [];
+        renderProviders();
       }
       submit.disabled = !available || searching;
       await Promise.all([

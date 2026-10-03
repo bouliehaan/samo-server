@@ -39,7 +39,8 @@ func TestExploAlbumIsRequestedTrackByTrack(t *testing.T) {
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
 		case r.URL.Path == "/api/samo/status":
-			writeJSON(w, 200, map[string]any{"service": "samo-explo", "version": 1, "configured": true, "providers": []string{"youtube"}, "albums": true})
+			writeJSON(w, 200, map[string]any{"service": "samo-explo", "version": 1, "configured": true, "providers": []string{"youtube", "slskd"},
+				"albumProviders": []string{"slskd", "youtube"}, "albums": true})
 		case r.URL.Path == "/api/samo/albums" && r.URL.Query().Get("q") == "ok computer":
 			writeJSON(w, 200, explo.AlbumResults{Albums: []explo.Album{{ID: okComputer, Title: "OK Computer", Artist: "Radiohead", Type: "Album", Year: 1997}}})
 		case r.URL.Path == "/api/samo/albums/"+okComputer:
@@ -88,6 +89,10 @@ func TestExploAlbumIsRequestedTrackByTrack(t *testing.T) {
 	json.Unmarshal(call("GET", "/api/v1/explo/discovery/status", "").Body.Bytes(), &status)
 	if !status.Albums {
 		t.Fatal("album search not reported available")
+	}
+	// Albums go to Soulseek first; the album search says so.
+	if strings.Join(status.Providers, ",") != "youtube,slskd" || strings.Join(status.AlbumProviders, ",") != "slskd,youtube" {
+		t.Fatalf("providers %v, album providers %v", status.Providers, status.AlbumProviders)
 	}
 	res := call("GET", "/api/v1/explo/albums?q=ok+computer", "")
 	if res.Code != 200 || !strings.Contains(res.Body.String(), `"id":"`+okComputer+`"`) {

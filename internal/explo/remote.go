@@ -23,6 +23,10 @@ type RemoteStatus struct {
 	Version    int      `json:"version"`
 	Configured bool     `json:"configured"`
 	Providers  []string `json:"providers"`
+	// AlbumProviders is the order an album's tracks try the providers in,
+	// which is not the songs' (Soulseek first, for whole FLAC albums). An
+	// older Explo leaves it out.
+	AlbumProviders []string `json:"albumProviders,omitempty"`
 	// Albums is true when Explo can search and download whole albums.
 	Albums bool `json:"albums"`
 	// Playlists is true when Explo can read YouTube Music playlists.

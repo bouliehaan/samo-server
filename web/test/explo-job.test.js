@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import { activeJob, jobLabel, jobStatus, openJob, providerName } from '../src/ui/explo_job.js';
 test('queued is distinct from provider transfer and provider is visible', () => {
   assert.equal(providerName('youtube'), 'YouTube (yt-dlp)');
+  assert.equal(providerName('lidarr'), 'Lidarr');
   assert.match(jobStatus({state:'queued',provider:'slskd'}), /Waiting for a download slot · Soulseek/);
   assert.equal(jobStatus({state:'downloading',provider:'youtube',message:'YouTube (yt-dlp): converting audio…'}), 'YouTube (yt-dlp): converting audio…');
   assert.equal(activeJob({state:'failed'}), false);
