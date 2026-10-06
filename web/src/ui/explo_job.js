@@ -22,3 +22,17 @@ export function jobStatus(job) {
   }
   return job.message || ({failed: "Download failed. Retry with another provider."}[job.state] || job.state);
 }
+
+// An artist's releases, in the groups Explo orders them in. Albums and EPs
+// show at once; singles and the rest wait behind a button, since an artist
+// can have seventy singles and a dozen albums.
+export const DISCOGRAPHY_GROUPS = [
+  {id: "albums", label: "ALBUMS"},
+  {id: "eps", label: "EPS"},
+  {id: "singles", label: "SINGLES", folded: true},
+  {id: "other", label: "COMPILATIONS, LIVE & MORE", folded: true},
+];
+export function discographyGroup(album) {
+  if ((album.secondaryTypes || []).length) return "other";
+  return {Album: "albums", EP: "eps", Single: "singles"}[album.type] || "other";
+}

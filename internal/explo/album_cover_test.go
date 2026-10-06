@@ -149,3 +149,35 @@ func TestRequestedAlbumTrackWearsTheAlbumCoverOverItsOwn(t *testing.T) {
 		t.Fatalf("searched for art the album already had: itunes/deezer = %d/%d", *itunesHits, *deezerHits)
 	}
 }
+
+// An album only Deezer lists has no release group to look its art up by. Its
+// tracks wear Deezer's cover of it, the one Search for new showed, without a
+// text search: Czarface's "Czarface Meets Frankie Pulitzer" on 2026-10-03 sat
+// at "Fetching cover art" for every track with its cover on the search page.
+func TestDeezerAlbumWearsTheCoverSearchShowed(t *testing.T) {
+	ctx := context.Background()
+	f, covers, itunesHits, deezerHits := albumCoverFixture(t)
+	const album = "deezer-750402811"
+	deezerArt := deezerAlbumURL + "/750402811/image?size=xl"
+	covers.allow(deezerArt)
+	f.addRequestedAlbumDrop(t, "track-a", "Brothers Grimm")
+	f.addRequestedAlbumDrop(t, "track-b", "All it Takes is One Bad Day")
+	mustExec(t, f.db, `UPDATE explo_tracks SET musicbrainz_release_group_id = '', matched_album = 'Czarface Meets Frankie Pulitzer', matched_artist = 'Czarface';
+		UPDATE explo_requests SET album_id = '`+album+`', album = 'Czarface Meets Frankie Pulitzer', artist = 'Czarface', album_artist = 'Czarface';`)
+
+	applied, placeholders, err := f.service.backfillMissingCovers(ctx, []string{f.drop})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if applied < 2 || placeholders != 0 {
+		t.Fatalf("applied %d, placeholders %d", applied, placeholders)
+	}
+	for _, id := range []string{"track-a", "track-b"} {
+		if got := f.service.existingTrackCover(ctx, id); !got.real() {
+			t.Fatalf("%s has no real cover: %+v", id, got)
+		}
+	}
+	if *itunesHits != 0 || *deezerHits != 0 {
+		t.Fatalf("searched for art the request named: itunes/deezer = %d/%d", *itunesHits, *deezerHits)
+	}
+}

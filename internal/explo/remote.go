@@ -29,6 +29,9 @@ type RemoteStatus struct {
 	AlbumProviders []string `json:"albumProviders,omitempty"`
 	// Albums is true when Explo can search and download whole albums.
 	Albums bool `json:"albums"`
+	// Artists is true when Explo can search artists and list what they
+	// released, to add an album from.
+	Artists bool `json:"artists"`
 	// Playlists is true when Explo can read YouTube Music playlists.
 	Playlists bool `json:"playlists"`
 }
@@ -85,6 +88,27 @@ type Album struct {
 	Tracks         []Song   `json:"tracks,omitempty"`
 }
 type AlbumResults struct {
+	Albums []Album `json:"albums"`
+}
+
+// Artist is an artist as Explo finds them: MusicBrainz's, or deezer-<n> for
+// one only Deezer lists.
+type Artist struct {
+	ID             string `json:"id"`
+	Source         string `json:"source,omitempty"`
+	Name           string `json:"name"`
+	Disambiguation string `json:"disambiguation,omitempty"`
+	Type           string `json:"type,omitempty"`
+	Country        string `json:"country,omitempty"`
+}
+type ArtistResults struct {
+	Artists []Artist `json:"artists"`
+}
+
+// Discography is what an artist released, studio albums first, each an album
+// that can be opened and added like an album search result.
+type Discography struct {
+	Artist Artist  `json:"artist"`
 	Albums []Album `json:"albums"`
 }
 
@@ -237,6 +261,19 @@ func (c *Remote) Playlist(ctx context.Context, id string) (Playlist, error) {
 func (c *Remote) SearchAlbums(ctx context.Context, q string) (AlbumResults, error) {
 	result := AlbumResults{Albums: []Album{}}
 	err := c.call(ctx, "GET", "albums?q="+url.QueryEscape(q), nil, &result)
+	return result, err
+}
+
+func (c *Remote) SearchArtists(ctx context.Context, q string) (ArtistResults, error) {
+	result := ArtistResults{Artists: []Artist{}}
+	err := c.call(ctx, "GET", "artists?q="+url.QueryEscape(q), nil, &result)
+	return result, err
+}
+
+// Artist lists what an artist released.
+func (c *Remote) Artist(ctx context.Context, id string) (Discography, error) {
+	result := Discography{Albums: []Album{}}
+	err := c.call(ctx, "GET", "artists/"+url.PathEscape(id), nil, &result)
 	return result, err
 }
 

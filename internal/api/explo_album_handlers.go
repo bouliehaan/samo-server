@@ -36,6 +36,44 @@ func (s *Server) searchExploAlbums(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, 200, result)
 }
 
+// searchExploArtists finds artists to browse the releases of.
+func (s *Server) searchExploArtists(w http.ResponseWriter, r *http.Request) {
+	remote := s.requireExploDiscovery(w, r)
+	if remote == nil {
+		return
+	}
+	query := strings.TrimSpace(r.URL.Query().Get("q"))
+	if len(query) < 2 || len(query) > 200 {
+		writeError(w, 400, "enter between 2 and 200 characters")
+		return
+	}
+	result, err := remote.SearchArtists(r.Context(), query)
+	if err != nil {
+		writeExploRemoteError(w, err)
+		return
+	}
+	writeJSON(w, 200, result)
+}
+
+// getExploArtist is what an artist released, each album ready to open or add.
+func (s *Server) getExploArtist(w http.ResponseWriter, r *http.Request) {
+	remote := s.requireExploDiscovery(w, r)
+	if remote == nil {
+		return
+	}
+	id := r.PathValue("id")
+	if !explo.ValidCatalogID(id) {
+		writeError(w, 400, "invalid artist ID")
+		return
+	}
+	result, err := remote.Artist(r.Context(), id)
+	if err != nil {
+		writeExploRemoteError(w, err)
+		return
+	}
+	writeJSON(w, 200, result)
+}
+
 // exploAlbumTrackView is a track of an album as the browser sees it: the song,
 // and the request for it once there is one.
 type exploAlbumTrackView struct {

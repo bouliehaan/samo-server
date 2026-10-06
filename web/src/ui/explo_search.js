@@ -1,6 +1,6 @@
 import { api, isAdmin } from "./auth.js";
 import { attr, escapeHTML } from "./html.js";
-import { activeJob, jobLabel, jobStatus, libraryState, openJob, providerName } from "./explo_job.js";
+import { DISCOGRAPHY_GROUPS, activeJob, discographyGroup, jobLabel, jobStatus, libraryState, openJob, providerName } from "./explo_job.js";
 import { formatDuration } from "./format.js";
 import { exploArtURL } from "./stream.js";
 
@@ -79,17 +79,26 @@ function albumMeta(album) {
 }
 const trackNumber = (number, disc, discs) => (discs ? disc + "-" : "") + String(number || 0).padStart(2, "0");
 
+function artistMeta(artist) {
+  return [artist.disambiguation, artist.type, artist.country, fromDeezer(artist)].filter(Boolean).join(" · ");
+}
+
 export function mountExploSearch(host, library, libraryInput) {
   let available = false;
   let albumsAvailable = false;
+  let artistsAvailable = false;
   let mode = "library";
   // The kind last chosen, shown once this Explo can search albums at all.
   let preferredKind = "songs";
-  try { if (sessionStorage.getItem("explo-search-kind") === "albums") preferredKind = "albums"; } catch { /* default */ }
+  try { const kept = sessionStorage.getItem("explo-search-kind"); if (kept === "albums" || kept === "artists") preferredKind = kept; } catch { /* default */ }
   let kind = "songs";
   let revision = 0;
   let songs = [];
   let albums = [];
+  // Artists found, and the one opened: {artist, albums} | {loading: name} | null.
+  let artists = [];
+  let discography = null;
+  const unfolded = new Set();
   let providers = [];
   let albumProviders = [];
   let searching = false;
@@ -99,13 +108,14 @@ export function mountExploSearch(host, library, libraryInput) {
   const details = new Map();
   host.innerHTML = '<p class="panel-sub" data-connection-status role="status" hidden></p>' + '<div class="actions" id="searchModes" hidden>' +
     '<button type="button" class="pill active" data-mode="library" aria-pressed="true">MY LIBRARY</button>' +
-    '<button type="button" class="pill" data-mode="new" aria-pressed="false">SEARCH FOR NEW</button></div>' +
+    '<button type="button" class="pill" data-mode="new" aria-pressed="false">ADD TRACKS</button></div>' +
     '<div class="explo-song-search" hidden>' +
     '<p class="panel-sub">Find songs and whole albums through Explo. samo identifies each download, fetches its artwork and adds it to your library.</p>' +
     '<div class="pill-bar explo-kinds" hidden>' +
     '<button type="button" class="pill" data-kind="songs" aria-pressed="false">SONGS</button>' +
-    '<button type="button" class="pill" data-kind="albums" aria-pressed="false">ALBUMS</button></div>' +
-    '<form class="search-form"><input type="search" aria-label="Search for new music" minlength="2" maxlength="200" required>' +
+    '<button type="button" class="pill" data-kind="albums" aria-pressed="false">ALBUMS</button>' +
+    '<button type="button" class="pill" data-kind="artists" aria-pressed="false" hidden>ARTISTS</button></div>' +
+    '<form class="search-form"><input type="search" aria-label="Search for music to add" minlength="2" maxlength="200" required>' +
     '<button class="btn primary" type="submit">SEARCH</button></form>' +
     '<label class="explo-provider">Download with <select aria-label="Download provider"><option value="auto">Auto · YouTube first, then Soulseek</option></select></label>' +
     '<div class="status-line" role="status" aria-live="polite" hidden></div>' +
@@ -146,7 +156,7 @@ export function mountExploSearch(host, library, libraryInput) {
   // Auto names the order the providers are tried in, which for a whole album
   // is Explo's album order (Soulseek first), not the songs'.
   function renderProviders() {
-    const order = kind === "albums" && albumProviders.length ? albumProviders : providers;
+    const order = (kind === "albums" || kind === "artists") && albumProviders.length ? albumProviders : providers;
     const selected = provider.value;
     provider.innerHTML = '<option value="auto">Auto · ' + escapeHTML(order.map(providerName).join(" → ")) + '</option>' + providers.map((p) => '<option value="' + attr(p) + '">' + escapeHTML(providerName(p)) + '</option>').join("");
     if (providers.includes(selected)) provider.value = selected;
@@ -155,14 +165,16 @@ export function mountExploSearch(host, library, libraryInput) {
     const albumsShown = albumsAvailable || albumJobs.size > 0;
     const before = kind;
     kind = albumsShown ? preferredKind : "songs";
+    if (kind === "artists" && !artistsAvailable) kind = "albums";
     if (kind !== before && providers.length) renderProviders();
     kinds.hidden = !albumsShown;
+    kinds.querySelector('[data-kind="artists"]').hidden = !artistsAvailable;
     kinds.querySelectorAll("button").forEach((button) => {
       const active = button.dataset.kind === kind;
       button.classList.toggle("active", active);
       button.setAttribute("aria-pressed", String(active));
     });
-    input.placeholder = kind === "albums" ? "Artist or album title" : "Artist or song title";
+    input.placeholder = {albums: "Artist or album title", artists: "Artist name"}[kind] || "Artist or song title";
   }
   kinds.addEventListener("click", (event) => {
     const button = event.target.closest("button[data-kind]");
@@ -235,7 +247,10 @@ export function mountExploSearch(host, library, libraryInput) {
   function renderAlbums() {
     const items = new Map(albums.map((album) => [album.id, album]));
     albumJobs.forEach((entry, id) => { if (!items.has(id)) items.set(id, entry.album); });
-    return [...items.values()].map((album) => {
+    return renderAlbumRows([...items.values()]);
+  }
+  function renderAlbumRows(list) {
+    return list.map((album) => {
       const entry = albumJobs.get(album.id);
       const view = entry && entry.view;
       const counts = view ? albumCounts(view) : null;
@@ -254,8 +269,28 @@ export function mountExploSearch(host, library, libraryInput) {
         '</div></div>' + (open ? renderTracks(album) : '') + '</div>';
     }).join("");
   }
+  function renderArtists() {
+    if (discography && discography.loading) return '<div class="list-row"><div class="main"><div class="meta">Loading ' + escapeHTML(discography.loading) + "'s releases…</div></div></div>";
+    if (!discography) {
+      return artists.map((artist) => '<div class="list-row explo-song-row explo-artist-row"><div class="main"><div class="name">' + escapeHTML(artist.name) + '</div>' +
+        (artistMeta(artist) ? '<div class="meta">' + escapeHTML(artistMeta(artist)) + '</div>' : '') + '</div>' +
+        '<button type="button" class="btn ghost btn-mini" data-artist="' + attr(artist.id) + '">RELEASES</button></div>').join("");
+    }
+    const groups = DISCOGRAPHY_GROUPS.map((group) => ({...group, albums: discography.albums.filter((album) => discographyGroup(album) === group.id)})).filter((group) => group.albums.length);
+    // An artist with nothing but singles shows them at once.
+    const firstShown = groups.find((group) => !group.folded) || groups[0];
+    return '<div class="list-row explo-artist-head"><button type="button" class="btn ghost btn-mini" data-artists-back>← ARTISTS</button>' +
+      '<div class="main"><div class="name">' + escapeHTML(discography.artist.name) + '</div>' +
+      '<div class="meta">' + escapeHTML([artistMeta(discography.artist), discography.albums.length + " releases"].filter(Boolean).join(" · ")) + '</div></div></div>' +
+      groups.map((group) => {
+        const open = !group.folded || group === firstShown || unfolded.has(group.id);
+        return '<div class="explo-group"><span>' + group.label + ' · ' + group.albums.length + '</span>' +
+          (open ? '' : '<button type="button" class="btn ghost btn-mini" data-unfold="' + attr(group.id) + '">SHOW</button>') + '</div>' +
+          (open ? renderAlbumRows(group.albums) : '');
+      }).join("");
+  }
   function render() {
-    const html = kind === "albums" ? renderAlbums() : renderSongs();
+    const html = kind === "artists" ? renderArtists() : kind === "albums" ? renderAlbums() : renderSongs();
     results.innerHTML = html ? '<div class="list">' + html + '</div>' : "";
   }
 
@@ -267,9 +302,15 @@ export function mountExploSearch(host, library, libraryInput) {
     const searchingFor = kind;
     searching = true;
     submit.disabled = true;
-    showMessage(searchingFor === "albums" ? "Searching for albums…" : "Searching for new songs…");
+    showMessage({albums: "Searching for albums…", artists: "Searching for artists…"}[searchingFor] || "Searching for new songs…");
     try {
-      if (searchingFor === "albums") {
+      if (searchingFor === "artists") {
+        const data = await api("/api/v1/explo/artists?q=" + encodeURIComponent(query));
+        if (!host.isConnected || request !== revision) return;
+        artists = data.artists || [];
+        discography = null;
+        showMessage(artists.length ? "Choose an artist to see what they released." : "No artists found. Try another spelling.");
+      } else if (searchingFor === "albums") {
         const data = await api("/api/v1/explo/albums?q=" + encodeURIComponent(query));
         if (!host.isConnected || request !== revision) return;
         albums = data.albums || [];
@@ -299,7 +340,41 @@ export function mountExploSearch(host, library, libraryInput) {
     }
     if (host.isConnected) render();
   }
+  // An album shown anywhere on the page: a search result, an artist's release,
+  // or one already asked for.
+  const knownAlbum = (id) => albums.find((item) => item.id === id) ||
+    (discography && discography.albums && discography.albums.find((item) => item.id === id)) || (albumJobs.get(id) || {}).album;
+  async function openArtist(id) {
+    const found = artists.find((item) => item.id === id);
+    const request = ++revision;
+    discography = {loading: found ? found.name : "the artist"};
+    unfolded.clear();
+    showMessage("");
+    render();
+    try {
+      const data = await api("/api/v1/explo/artists/" + encodeURIComponent(id));
+      if (!host.isConnected || request !== revision) return;
+      discography = {artist: data.artist || found, albums: data.albums || []};
+      showMessage(discography.albums.length ? "Open an album's tracks, or add the whole album." : "Nothing released that Explo can find.");
+    } catch (err) {
+      if (!host.isConnected || request !== revision) return;
+      discography = null;
+      showMessage(err.message);
+    }
+    render();
+  }
   results.addEventListener("click", async (event) => {
+    const artistButton = event.target.closest("button[data-artist]");
+    if (artistButton) { openArtist(artistButton.dataset.artist); return; }
+    if (event.target.closest("button[data-artists-back]")) {
+      ++revision;
+      discography = null;
+      showMessage(artists.length ? "Choose an artist to see what they released." : "");
+      render();
+      return;
+    }
+    const unfold = event.target.closest("button[data-unfold]");
+    if (unfold) { unfolded.add(unfold.dataset.unfold); render(); return; }
     const toggle = event.target.closest("button[data-tracks]");
     if (toggle) {
       const id = toggle.dataset.tracks;
@@ -313,7 +388,7 @@ export function mountExploSearch(host, library, libraryInput) {
       if (albumButton.disabled || !available) return;
       const id = albumButton.dataset.album;
       if (adding.has(id)) return;
-      const album = albums.find((item) => item.id === id) || (albumJobs.get(id) || {}).album;
+      const album = knownAlbum(id);
       if (!album) return;
       adding.add(id);
       albumButton.disabled = true;
@@ -358,6 +433,7 @@ export function mountExploSearch(host, library, libraryInput) {
       if (!host.isConnected) return;
       available = status.available === true;
       albumsAvailable = available && status.albums === true;
+      artistsAvailable = albumsAvailable && status.artists === true;
       connectionStatus.hidden = available || !status.configured || !isAdmin();
       connectionStatus.textContent = status.reason || "";
       modes.hidden = !available && jobs.size === 0 && albumJobs.size === 0;

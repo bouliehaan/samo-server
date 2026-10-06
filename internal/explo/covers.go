@@ -80,6 +80,19 @@ func coverArtArchiveReleaseURL(releaseMBID string) string {
 // caaBaseURL is a var so tests can point the whole CAA rung at a stub.
 var caaBaseURL = "https://coverartarchive.org"
 
+// deezerAlbumURL is the root of Deezer's album API, whose /image redirects to
+// the album's cover.
+var deezerAlbumURL = "https://api.deezer.com/album"
+
+// requestedDeezerCoverURL is Deezer's 1000px cover of an album requested from
+// Deezer (deezer-<n>), the cover Search for new showed; "" for any other.
+func requestedDeezerCoverURL(albumID string) string {
+	if id := DeezerID(albumID); id != "" {
+		return deezerAlbumURL + "/" + id + "/image?size=xl"
+	}
+	return ""
+}
+
 // coverTarget is one identified explo TRACK due for a cover pass, with
 // everything the source chain can use: the persisted MusicBrainz ids from
 // identification and the display artist/album/track strings for the text-
@@ -232,6 +245,21 @@ func (s *Service) backfillMissingCovers(ctx context.Context, dirs []string) (app
 		if hasAlbumArt && s.adoptCover(ctx, target.trackID, existing, albumArt, true) {
 			applied++
 			continue
+		}
+
+		// 2.9 A track of an album requested whole from Deezer wears Deezer's
+		//     cover of it, the one Search for new showed beside the album. An
+		//     album only Deezer lists has no release group for the chain below
+		//     to look art up by: on 2026-10-03 Czarface's "Czarface Meets
+		//     Frankie Pulitzer" sat at "Fetching cover art" for every track
+		//     while its cover showed on the search page.
+		if url := requestedDeezerCoverURL(album.requested); url != "" && s.verifyCoverURL(ctx, url) {
+			if err := s.applyTrackCover(ctx, target.trackID, catalog.Image{URL: url}); err == nil {
+				s.setTrackCoverStatus(ctx, target.trackID, coverStatusDone, true)
+				applied++
+				applied += s.shareAlbumCover(ctx, target.trackID, album)
+				continue
+			}
 		}
 
 		// 3. Try the source chain for real art. The first track of an album

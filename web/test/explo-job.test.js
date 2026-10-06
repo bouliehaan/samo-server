@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { activeJob, jobLabel, jobStatus, openJob, providerName } from '../src/ui/explo_job.js';
+import { DISCOGRAPHY_GROUPS, activeJob, discographyGroup, jobLabel, jobStatus, openJob, providerName } from '../src/ui/explo_job.js';
 test('queued is distinct from provider transfer and provider is visible', () => {
   assert.equal(providerName('youtube'), 'YouTube (yt-dlp)');
   assert.equal(providerName('lidarr'), 'Lidarr');
@@ -29,4 +29,13 @@ test('a staged download is followed until samo has it in the library', () => {
   assert.equal(openJob(review), false);
   assert.equal(jobLabel(undefined), 'ADD SONG');
   assert.equal(jobLabel({state:'failed'}), 'RETRY');
+});
+
+test('an artist\'s releases group as albums, EPs, singles and the rest', () => {
+  assert.equal(discographyGroup({type: 'Album'}), 'albums');
+  assert.equal(discographyGroup({type: 'EP'}), 'eps');
+  assert.equal(discographyGroup({type: 'Single'}), 'singles');
+  assert.equal(discographyGroup({type: 'Album', secondaryTypes: ['Live']}), 'other');
+  assert.equal(discographyGroup({type: 'Broadcast'}), 'other');
+  assert.deepEqual(DISCOGRAPHY_GROUPS.filter((group) => group.folded).map((group) => group.id), ['singles', 'other']);
 });

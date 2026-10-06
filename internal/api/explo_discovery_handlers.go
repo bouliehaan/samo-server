@@ -36,8 +36,10 @@ type exploDiscoveryStatus struct {
 	// AlbumProviders is the order whole albums try the providers in, for
 	// the album search to show.
 	AlbumProviders []string `json:"albumProviders"`
-	// Albums is true when the connected Explo can also find whole albums.
-	Albums bool `json:"albums"`
+	// Albums is true when the connected Explo can also find whole albums;
+	// Artists when it can find an artist and list what they released.
+	Albums  bool `json:"albums"`
+	Artists bool `json:"artists"`
 	// Playlists is true when it can read YouTube Music playlists, for
 	// importing one with the songs the library lacks downloaded.
 	Playlists bool   `json:"playlists"`
@@ -74,6 +76,7 @@ func (s *Server) exploDiscoveryState(r *http.Request) (exploDiscoveryStatus, *ex
 			state.AlbumProviders = status.Providers
 		}
 		state.Albums = status.Albums
+		state.Artists = status.Artists
 		state.Playlists = status.Playlists
 	} else {
 		state.Reason = "Explo is connected, but its download providers are not ready."

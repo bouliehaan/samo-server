@@ -2945,7 +2945,7 @@ import { globalScanActionsHTML, libraryKindScanActionsHTML, libraryScanActionsHT
       ' · fpcalc: ' + (cfg.fpcalcReady ? "ready" : "MISSING") + '</div>';
     if (isAdmin) {
       html += '<div class="empty-state" style="margin-bottom:12px">// song search: ' +
-        (discovery && discovery.available ? 'CONNECTED — Search for new is available on the Search page.' : escapeHTML((discovery && discovery.reason) || 'Configure the Explo folder, then update and restart samo-explo. It connects song search automatically using its existing samo login.')) + '</div>';
+        (discovery && discovery.available ? 'CONNECTED — Add Tracks is available on the Search page.' : escapeHTML((discovery && discovery.reason) || 'Configure the Explo folder, then update and restart samo-explo. It connects song search automatically using its existing samo login.')) + '</div>';
     }
     if (!cfg.fpcalcReady) {
       html += '<div class="empty-state explo-warn" style="margin-bottom:12px">// fpcalc (chromaprint) is not bundled on this server, so the pipeline cannot run. Run <code>make bundle-chromaprint</code> before building the release, or install fpcalc on the host.</div>';

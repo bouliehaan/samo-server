@@ -391,6 +391,8 @@ func (s *Server) routes() {
 	s.handleAPI("POST /api/v1/explo/downloads", s.addExploSong)
 	s.handleAPI("GET /api/v1/explo/downloads/{id}", s.getExploDownload)
 	s.handleAPI("GET /api/v1/explo/albums", s.searchExploAlbums)
+	s.handleAPI("GET /api/v1/explo/artists", s.searchExploArtists)
+	s.handleAPI("GET /api/v1/explo/artists/{id}", s.getExploArtist)
 	s.handleAPI("GET /api/v1/explo/albums/{id}", s.getExploAlbum)
 	s.handleAPI("POST /api/v1/explo/albums/{id}/downloads", s.addExploAlbum)
 	s.handleAPI("GET /api/v1/explo/albums/{id}/download", s.getExploAlbumDownload)

@@ -160,6 +160,8 @@ func TestExploAlbumRoutesRequireBearer(t *testing.T) {
 		{"GET", "/api/v1/explo/albums/" + okComputer},
 		{"POST", "/api/v1/explo/albums/" + okComputer + "/downloads"},
 		{"GET", "/api/v1/explo/albums/" + okComputer + "/download"},
+		{"GET", "/api/v1/explo/artists?q=artist"},
+		{"GET", "/api/v1/explo/artists/" + okComputer},
 		{"GET", "/api/v1/explo/art/" + okComputer},
 	} {
 		response := httptest.NewRecorder()
@@ -285,5 +287,50 @@ func TestExploArtURLFollowsTheAlbumsCatalog(t *testing.T) {
 	}
 	if got := exploArtURL(okComputer); got != "https://coverartarchive.org/release-group/"+okComputer+"/front-250" {
 		t.Fatalf("release group cover at %q", got)
+	}
+}
+
+// An artist found, and what they released listed to add from, through samo's
+// API as Explo answers.
+func TestExploArtistIsFoundAndBrowsed(t *testing.T) {
+	const ye = "164f0d73-1234-4e2c-8743-d77bf2191051"
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.URL.Path == "/api/samo/status":
+			writeJSON(w, 200, map[string]any{"service": "samo-explo", "version": 1, "configured": true, "providers": []string{"youtube"}, "albums": true, "artists": true})
+		case r.URL.Path == "/api/samo/artists" && r.URL.Query().Get("q") == "ye":
+			writeJSON(w, 200, map[string]any{"artists": []map[string]any{{"id": ye, "source": "musicbrainz", "name": "Ye", "disambiguation": "formerly Kanye West"}}})
+		case r.URL.Path == "/api/samo/artists/"+ye:
+			writeJSON(w, 200, map[string]any{"artist": map[string]any{"id": ye, "name": "Ye"},
+				"albums": []map[string]any{{"id": "deezer-502", "source": "deezer", "title": "BULLY 2", "artist": "Kanye West", "type": "Album", "year": 2026}}})
+		default:
+			t.Errorf("unexpected Explo request %s", r.URL)
+			w.WriteHeader(404)
+		}
+	}))
+	defer upstream.Close()
+	db := storagetest.Open(t)
+	service := explo.NewService(explo.ServiceOptions{DB: db, Dirs: []string{"/music/explo"}, AcoustIDAPIKey: "key", FpcalcPath: "/fake/fpcalc"})
+	handler := NewServer(ServerOptions{DB: db, Explo: service, ExploRemote: explo.NewRemote(upstream.URL, "secret")})
+	call := func(path string) *httptest.ResponseRecorder {
+		res := httptest.NewRecorder()
+		handler.ServeHTTP(res, httptest.NewRequest("GET", path, nil))
+		return res
+	}
+	var status exploDiscoveryStatus
+	json.Unmarshal(call("/api/v1/explo/discovery/status").Body.Bytes(), &status)
+	if !status.Artists {
+		t.Fatal("artist browsing not reported available")
+	}
+	var found explo.ArtistResults
+	if res := call("/api/v1/explo/artists?q=ye"); res.Code != 200 || json.Unmarshal(res.Body.Bytes(), &found) != nil || len(found.Artists) != 1 || found.Artists[0].Disambiguation != "formerly Kanye West" {
+		t.Fatalf("artist search %d %s", res.Code, res.Body.String())
+	}
+	var discography explo.Discography
+	if res := call("/api/v1/explo/artists/" + ye); res.Code != 200 || json.Unmarshal(res.Body.Bytes(), &discography) != nil || len(discography.Albums) != 1 || discography.Albums[0].Title != "BULLY 2" {
+		t.Fatalf("discography %d %s", res.Code, res.Body.String())
+	}
+	if res := call("/api/v1/explo/artists/not-an-artist"); res.Code != 400 {
+		t.Fatalf("invalid artist id answered %d", res.Code)
 	}
 }

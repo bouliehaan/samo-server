@@ -105,6 +105,15 @@ func (s *Server) postExploReprocess(w http.ResponseWriter, r *http.Request) {
 		writeExploError(w, err)
 		return
 	}
+	// Song requests waiting on the art this pass fetches are kept with it
+	// straight after, as the periodic pass and a scan do. Without that they
+	// sat at "Fetching cover art" with their covers in hand until the next
+	// periodic pass, up to half an hour on (2026-10-03, a whole album).
+	// Without Explo connected, requests already staged still finish.
+	remote, err := s.exploRemoteClient(r)
+	if err != nil {
+		remote = nil
+	}
 	safego.Go("explo pass after reprocess", func() {
 		ctx, cancel := context.WithTimeout(s.baseCtx, 30*time.Minute)
 		defer cancel()
@@ -115,6 +124,9 @@ func (s *Server) postExploReprocess(w http.ResponseWriter, r *http.Request) {
 		}
 		if err := service.BackfillCovers(ctx); err != nil {
 			log.Warnf("explo: cover backfill after reprocess failed: %v", err)
+		}
+		if service.Enabled() {
+			service.AdvanceRequests(ctx, remote)
 		}
 	})
 	writeJSON(w, http.StatusOK, map[string]any{

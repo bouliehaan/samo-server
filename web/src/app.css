@@ -2137,6 +2137,14 @@ main.app-main {
 /* Wrap rather than clip: the status line is the point of these rows. Three
    classes, to outrank .list-row .main .meta. */
 .explo-song-row .main .name, .explo-song-row .main .meta { white-space: normal; overflow-wrap: anywhere; }
+/* An artist's releases: the artist above, then each group under its label. */
+.explo-artist-head { gap: 14px; border-bottom: 1px solid var(--line); }
+.explo-artist-head .btn { align-self: center; }
+.explo-group {
+  display: flex; align-items: center; justify-content: space-between; gap: 12px;
+  padding: 14px 18px 8px; font-family: var(--mono); font-size: 0.8rem; letter-spacing: 0.13em; color: var(--muted);
+  border-bottom: 1px solid var(--line);
+}
 .explo-album { border-bottom: 1px solid var(--line); }
 .explo-album:last-child { border-bottom: 0; }
 .explo-album.open > .explo-album-row { background: var(--surface-2); }
