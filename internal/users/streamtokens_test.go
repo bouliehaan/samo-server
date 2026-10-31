@@ -69,3 +69,71 @@ func TestStreamTokenRejectsExpired(t *testing.T) {
 		t.Fatal("expired token was not garbage-collected")
 	}
 }
+
+// A deploy restarts the server. Tokens used to live only in memory, so every
+// <audio src> an open player held 401'd until its cached token aged out — the
+// first track after each deploy would not play. A fresh Service on the same
+// database must accept a token the old one minted.
+func TestStreamTokenSurvivesRestart(t *testing.T) {
+	ctx := context.Background()
+	db := storagetest.Open(t)
+	before := New(ServiceOptions{DB: db})
+	if _, err := before.BootstrapWithResult(ctx, BootstrapInput{AdminUsername: "owner", AdminPassword: "samo-stream-1234"}); err != nil {
+		t.Fatal(err)
+	}
+	owner, err := before.GetByUsername(ctx, "owner")
+	if err != nil {
+		t.Fatal(err)
+	}
+	token, _, err := before.IssueStreamToken(owner.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	after := New(ServiceOptions{DB: db})
+	principal, err := after.AuthenticateStreamToken(ctx, token)
+	if err != nil {
+		t.Fatalf("token minted before the restart was refused: %v", err)
+	}
+	if principal.User.ID != owner.ID {
+		t.Fatalf("principal user = %q, want %q", principal.User.ID, owner.ID)
+	}
+
+	var stored string
+	if err := db.QueryRowContext(ctx, `SELECT token_hash FROM stream_tokens`).Scan(&stored); err != nil {
+		t.Fatal(err)
+	}
+	if stored == token {
+		t.Fatal("stream_tokens holds the token itself; it must hold only its hash")
+	}
+
+	if err := after.revokeStreamTokens(ctx, owner.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := New(ServiceOptions{DB: db}).AuthenticateStreamToken(ctx, token); err == nil {
+		t.Fatal("revoked token still accepted after a restart")
+	}
+}
+
+func TestStreamTokenExpiredInDatabaseIsRefused(t *testing.T) {
+	ctx := context.Background()
+	db := storagetest.Open(t)
+	service := New(ServiceOptions{DB: db})
+	if _, err := service.BootstrapWithResult(ctx, BootstrapInput{AdminUsername: "owner", AdminPassword: "samo-stream-1234"}); err != nil {
+		t.Fatal(err)
+	}
+	owner, err := service.GetByUsername(ctx, "owner")
+	if err != nil {
+		t.Fatal(err)
+	}
+	token, _, err := service.IssueStreamToken(owner.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.ExecContext(ctx, `UPDATE stream_tokens SET expires_at = ?`, time.Now().Add(-time.Minute).UTC()); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := New(ServiceOptions{DB: db}).AuthenticateStreamToken(ctx, token); err == nil {
+		t.Fatal("expired token accepted after a restart")
+	}
+}

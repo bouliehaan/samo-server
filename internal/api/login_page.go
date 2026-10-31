@@ -8,7 +8,7 @@ import (
 
 // loginPage serves the sign-in screen. If the server is still in setup mode
 // the page redirects to the wizard so users see one onboarding flow at a
-// time.
+// time; with single sign-on configured it goes straight to the provider.
 func (s *Server) loginPage(w http.ResponseWriter, r *http.Request) {
 	status, err := s.computeSetupStatus(r.Context())
 	if err != nil {
@@ -17,6 +17,11 @@ func (s *Server) loginPage(w http.ResponseWriter, r *http.Request) {
 	}
 	if status.NeedsSetup {
 		http.Redirect(w, r, "/setup", http.StatusFound)
+		return
+	}
+	if target := s.ssoAutoLaunch(r); target != "" {
+		w.Header().Set("Cache-Control", "no-store")
+		http.Redirect(w, r, target, http.StatusFound)
 		return
 	}
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")

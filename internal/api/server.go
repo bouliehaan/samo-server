@@ -21,6 +21,7 @@ import (
 	"github.com/bouliehaan/samo-server/internal/covers"
 	"github.com/bouliehaan/samo-server/internal/events"
 	"github.com/bouliehaan/samo-server/internal/explo"
+	"github.com/bouliehaan/samo-server/internal/extauth"
 	"github.com/bouliehaan/samo-server/internal/files"
 	"github.com/bouliehaan/samo-server/internal/images"
 	"github.com/bouliehaan/samo-server/internal/lastfm"
@@ -72,8 +73,11 @@ type ServerOptions struct {
 	Events         *events.Hub
 	ArtistMeta     *artistmeta.Service
 	Users          *users.Service
-	Channels       *channels.Service
-	SamoRadio      *samoradio.Service
+	// ExtAuth is OIDC and LDAP sign-in. Optional: when nil and DB is set,
+	// the server makes its own from DB.
+	ExtAuth   *extauth.Service
+	Channels  *channels.Service
+	SamoRadio *samoradio.Service
 	// Loudness levels items sent to a samo-radio device against each other,
 	// the same way the channel streamer levels its rotation.
 	Loudness *loudness.Service
@@ -129,6 +133,8 @@ type Server struct {
 	artistImages                     *artistimages.Service
 	artistMeta                       *artistmeta.Service
 	users                            *users.Service
+	extAuth                          *extauth.Service
+	ssoState                         *ssoState
 	channels                         *channels.Service
 	samoRadio                        *samoradio.Service
 	loudness                         *loudness.Service
@@ -236,6 +242,8 @@ func NewServer(options ServerOptions) http.Handler {
 		events:                           eventHub,
 		artistMeta:                       options.ArtistMeta,
 		users:                            options.Users,
+		extAuth:                          options.ExtAuth,
+		ssoState:                         newSSOState(),
 		channels:                         options.Channels,
 		samoRadio:                        options.SamoRadio,
 		loudness:                         options.Loudness,
@@ -255,6 +263,9 @@ func NewServer(options ServerOptions) http.Handler {
 	}
 	if server.baseCtx == nil {
 		server.baseCtx = context.Background()
+	}
+	if server.extAuth == nil && server.db != nil && server.users != nil && server.users.Enabled() {
+		server.extAuth = extauth.New(server.db)
 	}
 	server.routes()
 	return WithSecurityHeaders(WithCORS(server))
@@ -297,6 +308,16 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("POST /api/v1/auth/device/approve", s.approveDevicePairing)
 	s.handleAPI("POST /api/v1/auth/stream-token", s.issueStreamToken)
 
+	// Single sign-on and LDAP (sso_handlers.go). LDAP needs no routes of its
+	// own: it answers through /api/v1/auth/login.
+	s.mux.HandleFunc("GET /api/v1/auth/providers", s.getAuthProviders)
+	s.mux.HandleFunc("GET /auth/oidc/start", s.startOIDC)
+	s.mux.HandleFunc("GET /auth/oidc/callback", s.finishOIDC)
+	s.mux.HandleFunc("POST /api/v1/auth/oidc/complete", s.completeOIDC)
+	s.handleAPI("GET /api/v1/auth/providers/config", s.getAuthProviderConfig)
+	s.handleAPI("PUT /api/v1/auth/providers/config", s.updateAuthProviderConfig)
+	s.handleAPI("POST /api/v1/auth/providers/test", s.testAuthProvider)
+
 	// Setup routes intentionally bypass requireUser so a first-time admin
 	// can be created without a token. Each handler self-checks whether
 	// setup is still pending and falls back to requireAdmin otherwise.
@@ -321,6 +342,8 @@ func (s *Server) routes() {
 	s.handleAPI("POST /api/v1/users", s.createUser)
 	s.handleAPI("PATCH /api/v1/users/{id}", s.updateUser)
 	s.handleAPI("DELETE /api/v1/users/{id}", s.deleteUser)
+	s.handleAPI("GET /api/v1/users/{id}/identities", s.listUserIdentities)
+	s.handleAPI("DELETE /api/v1/users/{id}/identities", s.unlinkUserIdentity)
 
 	s.handleAPI("GET /api/v1/radio/stations", s.listStations)
 	s.handleAPI("GET /api/v1/radio/stations/{id}", s.getStation)
@@ -829,5 +852,6 @@ func (s *Server) home(w http.ResponseWriter, r *http.Request) {
 		http.Redirect(w, r, "/setup", http.StatusFound)
 		return
 	}
-	http.Redirect(w, r, "/app", http.StatusFound)
+	// The player is everyone's front page; admins open the dashboard from it.
+	http.Redirect(w, r, "/listen/", http.StatusFound)
 }

@@ -43,7 +43,12 @@ func (s *Server) streamMusicTrack(w http.ResponseWriter, r *http.Request) {
 	}
 	resume := streamResumeSeconds(r, track.Playback.ProgressSeconds)
 	s.notifyMusicTrackScrobblers(principal.User.ID, track.ID, catalog.PlaybackState{}, catalog.PlaybackState{ProgressSeconds: resume}, nil, "stream", resume)
-	s.streamCatalogAudioFiles(w, r, track.AudioFiles, track.Playback, track.DiscNumber)
+	// The saved position never picks the bytes of a music stream. No client
+	// asks for a resume here, and clients PATCH progress every 20s while they
+	// play, so slicing at it served each rebuffer, seek and gapless prefetch a
+	// different cut of the file than the one the player opened — and a FLAC cut
+	// anywhere past byte 0 has no header left to decode.
+	s.streamCatalogAudioFiles(w, r, track.AudioFiles, catalog.PlaybackState{}, track.DiscNumber)
 }
 
 func (s *Server) streamAudiobook(w http.ResponseWriter, r *http.Request) {

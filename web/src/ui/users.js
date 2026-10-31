@@ -51,8 +51,24 @@ export async function renderUsers(main) {
         <p class="panel-sub">${creating ? 'Users open the web player. Admins can also manage the server.' : 'Leave the password blank to keep it. Resetting another user’s password signs out their devices.'}</p>
         <div class="actions"><button class="btn primary" type="submit">${creating ? 'CREATE USER' : 'SAVE CHANGES'}</button><button class="btn ghost" type="button" id="cancelUserEdit">CANCEL</button></div>
         <div class="status-line" id="userResult" role="status" hidden></div>
+        ${!creating ? '<div class="users-identities" id="userIdentities"></div>' : ''}
         ${!creating && !self ? '<div class="users-danger"><span class="panel-sub">Remove this account and its listening history.</span><button class="btn danger btn-small" type="button" id="deleteUser">DELETE USER</button></div>' : ''}
       </form>`;
+    showIdentities();
+  }
+  // The identity-provider sign-ins linked to the selected account. Loaded per
+  // selection: most accounts have none, and the list is admin-only.
+  async function showIdentities() {
+    const box = detail.querySelector('#userIdentities');
+    if (!box || !selectedID) return;
+    const forID = selectedID;
+    let items = [];
+    try { items = (await api('/api/v1/users/' + encodeURIComponent(forID) + '/identities')).items || []; } catch { return; }
+    if (forID !== selectedID || !items.length) return;
+    box.innerHTML = '<span class="panel-sub">Signs in through:</span>' + items.map(item => `<div class="users-identity">
+      <span>${escapeHTML(item.provider === 'ldap' ? 'LDAP' : item.provider.replace(/^oidc:/, ''))} · ${escapeHTML(item.username || item.subject)}</span>
+      <button class="btn ghost btn-small" type="button" data-unlink-provider="${attr(item.provider)}" data-unlink-subject="${attr(item.subject)}">UNLINK</button>
+    </div>`).join('');
   }
   function message(text, error = false) {
     const result = detail.querySelector('#userResult');
@@ -96,6 +112,14 @@ export async function renderUsers(main) {
   });
   detail.addEventListener('click', async e => {
     if (busy) return;
+    const unlink = e.target.closest('[data-unlink-provider]');
+    if (unlink) {
+      if (!confirm('Unlink this sign-in? The account stays; that identity’s next sign-in is treated as a first one.')) return;
+      const query = new URLSearchParams({ provider: unlink.dataset.unlinkProvider, subject: unlink.dataset.unlinkSubject });
+      try { await api('/api/v1/users/' + encodeURIComponent(selectedID) + '/identities?' + query, { method: 'DELETE' }); showDetail(); }
+      catch (err) { message(err.message, true); }
+      return;
+    }
     if (e.target.closest('#cancelUserEdit')) { creating = false; selectedID = null; directory(); showDetail(); }
     if (!e.target.closest('#deleteUser')) return;
     const user = data.items.find(u => u.id === selectedID);

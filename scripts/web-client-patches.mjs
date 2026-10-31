@@ -21,6 +21,11 @@ export async function patchWebClient(stage) {
     '    const resume = Math.max(0, Math.floor(progressSeconds ?? 0));\n', '');
   await replace('src/renderer/api/samo/samo-long-form.ts',
     '        ...(resume > 0 ? { offsetSeconds: resume } : {}),\n', '');
+  // The S menu carries the hosted player's own items from bootstrap.js:
+  // Server admin (admins only) and Sign out, after the menu's own.
+  await replace('src/renderer/features/titlebar/components/app-menu.tsx',
+    "        {\n            condition: isElectron(),\n            id: 'quit',",
+    "        ...((window as any).SAMO_HOST_MENU ?? []).map((entry: any) => ({ ...entry, type: 'item' as const })),\n        {\n            condition: isElectron(),\n            id: 'quit',");
   // This is a single-server player over the complete library, with no folder setup.
   await writeFile(join(stage, 'src/renderer/features/sidebar/components/server-selector.tsx'),
     'export const ServerSelector = () => null;\n');

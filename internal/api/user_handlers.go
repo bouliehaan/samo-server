@@ -60,6 +60,15 @@ func (s *Server) loginUser(w http.ResponseWriter, r *http.Request) {
 	}
 
 	response, err := service.Login(r.Context(), input)
+	if errors.Is(err, users.ErrUnauthorized) {
+		response, err = s.ldapLogin(r.Context(), input)
+	}
+	if errors.Is(err, errDirectoryUnavailable) {
+		// The directory being down says nothing about the password, so it
+		// is not a failed attempt.
+		writeError(w, http.StatusBadGateway, err.Error())
+		return
+	}
 	if err != nil {
 		s.loginLimiter.recordFailure(usernameKey, now)
 		s.loginLimiter.recordFailure(addrKey, now)
@@ -260,6 +269,10 @@ func writeUserError(w http.ResponseWriter, err error) {
 		writeError(w, http.StatusBadRequest, err.Error())
 	case errors.Is(err, users.ErrInvalidRole):
 		writeError(w, http.StatusBadRequest, err.Error())
+	case errors.Is(err, users.ErrNotProvisioned), errors.Is(err, users.ErrNotInGroup), errors.Is(err, users.ErrIdentityConflict):
+		writeError(w, http.StatusForbidden, err.Error())
+	case errors.Is(err, users.ErrInvalidIdentity):
+		writeError(w, http.StatusBadGateway, err.Error())
 	case errors.Is(err, users.ErrProtectedUser), errors.Is(err, users.ErrLastAdmin), errors.Is(err, users.ErrUsernameTaken):
 		writeError(w, http.StatusConflict, err.Error())
 	default:

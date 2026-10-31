@@ -9,6 +9,13 @@
  * ===================================================================== */
 
 /* ---- Shell: fixed left rail + command bar + scrolling frame ---- */
+/* Nothing of the dashboard paints until boot() has an admin: this page is
+ * served to anyone, and the script that sends a visitor to sign in runs only
+ * after the first paint. */
+body.booting > :not(.grid-bg) {
+  visibility: hidden;
+}
+
 .app-shell {
   position: relative;
   z-index: 1;
@@ -342,15 +349,6 @@ main.app-main {
   display: grid;
   grid-template-columns: repeat(auto-fill, minmax(172px, 1fr));
   gap: 16px;
-}
-.album-row {
-  display: grid;
-  grid-auto-flow: column;
-  grid-auto-columns: 158px;
-  gap: 14px;
-  overflow-x: auto;
-  padding-bottom: 8px;
-  scroll-snap-type: x proximity;
 }
 @media (max-width: 1200px) {
   .album-grid { grid-template-columns: repeat(auto-fill, minmax(132px, 1fr)); }
@@ -2115,6 +2113,10 @@ main.app-main {
 .users-detail .settings-form { padding-top: 16px; }
 .users-danger { display: flex; justify-content: space-between; align-items: center; gap: 16px; border-top: 1px solid var(--line); padding-top: 20px; margin-top: 12px; }
 .users-danger .panel-sub { margin: 0; }
+.users-identities { display: grid; gap: 8px; }
+.users-identities:empty { display: none; }
+.users-identities .panel-sub { margin: 0; }
+.users-identity { display: flex; justify-content: space-between; align-items: center; gap: 16px; font-family: var(--mono); font-size: 0.8rem; overflow-wrap: anywhere; }
 @media (max-width: 1050px) { .users-layout { grid-template-columns: 1fr; } }
 
 .explo-provider { display: flex; align-items: center; gap: 0.75rem; margin: 0.75rem 0 1rem; flex-wrap: wrap; }

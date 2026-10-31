@@ -246,7 +246,7 @@ func serveFileAt(w http.ResponseWriter, r *http.Request, path string, info os.Fi
 	defer file.Close()
 
 	startByte := int64(0)
-	if offsetSeconds > 0 {
+	if offsetSeconds > 0 && sliceableAudio(contentType, path) {
 		startByte = byteOffsetForSeconds(info.Size(), effectiveDurationSeconds(durationSeconds, info.Size()), offsetSeconds)
 		if startByte > 0 {
 			w.Header().Set("X-Samo-Stream-Offset-Seconds", strconv.Itoa(offsetSeconds))
@@ -301,6 +301,29 @@ func serveFileFromByte(w http.ResponseWriter, r *http.Request, path string, info
 	section := io.NewSectionReader(file, startByte, remaining)
 	http.ServeContent(w, r, filepath.Base(path), info.ModTime(), section)
 	return nil
+}
+
+// sliceableAudio reports whether a file still decodes when served from an
+// arbitrary byte. MP3 and ADTS AAC are runs of self-synchronising frames, so a
+// decoder finds the next frame and plays on. FLAC, Ogg, MP4 and WAV keep what a
+// decoder needs at the front of the file (STREAMINFO, the Opus/Vorbis headers,
+// the moov atom, the fmt chunk), and a slice of one is noise to a browser.
+// Those are served whole and the player seeks with Range.
+func sliceableAudio(contentType, path string) bool {
+	contentType = strings.ToLower(strings.TrimSpace(contentType))
+	if i := strings.IndexByte(contentType, ';'); i >= 0 {
+		contentType = strings.TrimSpace(contentType[:i])
+	}
+	switch contentType {
+	case "audio/mpeg", "audio/mp3", "audio/aac", "audio/aacp":
+		return true
+	case "", "application/octet-stream":
+		switch strings.ToLower(filepath.Ext(path)) {
+		case ".mp3", ".aac":
+			return true
+		}
+	}
+	return false
 }
 
 func byteOffsetForSeconds(size int64, durationSeconds, offsetSeconds int) int64 {

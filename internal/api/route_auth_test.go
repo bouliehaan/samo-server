@@ -58,7 +58,7 @@ var streamTokenRoutes = map[string]string{
 // before the handler runs. Some check one themselves, and say which.
 var publicRoutes = map[string]string{
 	"GET /listen/":           "desktop web client shell and static assets; data and media require account credentials",
-	"GET /":                  "redirects to /setup or /app",
+	"GET /":                  "redirects to /setup or /listen/",
 	"GET /app":               "the web app's shell page; it signs in with its own bearer",
 	"GET /app/":              "the web app's shell page; it signs in with its own bearer",
 	"GET /login":             "the sign-in page",
@@ -78,6 +78,10 @@ var publicRoutes = map[string]string{
 	"POST /api/v1/auth/device/start":   "a TV asks for a code before it holds any credential",
 	"POST /api/v1/auth/device/poll":    "the device code in the body is the credential",
 	"POST /api/v1/auth/device/approve": "authenticates a bearer itself, never a stream token",
+	"GET /api/v1/auth/providers":       "the login page asks which sign-in buttons to draw; says only on/off and a label",
+	"GET /auth/oidc/start":             "begins an SSO sign-in before any credential exists; sets only the attempt's binding cookie",
+	"GET /auth/oidc/callback":          "the identity provider's redirect back; state, binding cookie and a verified ID token are the credential",
+	"POST /api/v1/auth/oidc/complete":  "a single-use hand-off code plus the attempt's binding cookie are the credential",
 
 	"GET /api/v1/setup/status":                  "the wizard reads it before any account exists; says only needsSetup afterwards",
 	"POST /api/v1/setup/admin":                  "creates the first admin, and refuses once one exists",

@@ -112,6 +112,7 @@ Optional integrations go on the install line the same way as the media path: `SA
 | [docs/storage-and-scanning.md](docs/storage-and-scanning.md) | Scanner environment variables |
 | [docs/metadata.md](docs/metadata.md) | External lookup providers (off by default) |
 | [docs/lastfm.md](docs/lastfm.md) | Scrobbling and account linking |
+| [docs/sso.md](docs/sso.md) | Single sign-on (OIDC) and LDAP, e.g. authentik |
 | [docs/samo-radio.md](docs/samo-radio.md) | Aux-port playback devices |
 
 ## Developing

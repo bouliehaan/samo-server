@@ -146,3 +146,84 @@ func TestStreamMediaFileReturnsExactSourceBytes(t *testing.T) {
 		t.Fatalf("body = %q, want exact source bytes", rec.Body.Bytes())
 	}
 }
+
+// A music track is one file the player seeks in, so the stream is the whole
+// file whatever position was saved last. Slicing at size*progress/duration cut
+// the fLaC header off a FLAC (the browser cannot decode what is left), and
+// because clients PATCH progress every 20s while they play, each rebuffer or
+// seek re-opened the URL against a different slice than the one the player
+// started on.
+func TestStreamMusicTrackIgnoresSavedProgress(t *testing.T) {
+	ctx := context.Background()
+	root := t.TempDir()
+	libraryDir := filepath.Join(root, "music")
+	if err := os.MkdirAll(libraryDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	payload := append([]byte("fLaC"), bytes.Repeat([]byte{0xAB}, 296)...)
+	audioPath := filepath.Join(libraryDir, "03 Home with No Delay.flac")
+	if err := os.WriteFile(audioPath, payload, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	db := storagetest.Open(t)
+	if _, err := db.ExecContext(ctx, `
+		INSERT INTO libraries (id, name, kind, media_type, path)
+		VALUES ('library-1', 'Music', 'music', '', ?)`, libraryDir); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.ExecContext(ctx, `
+		INSERT INTO music_tracks (id, title, duration_seconds, playback_json, added_at, updated_at)
+		VALUES ('track-1', 'Home with No Delay', 300, '{}', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.ExecContext(ctx, `
+		INSERT INTO media_files (id, library_id, track_id, path, relative_path, file_name, mime_type, size_bytes, duration_seconds)
+		VALUES ('file-1', 'library-1', 'track-1', ?, ?, ?, 'audio/flac', ?, 300)`,
+		audioPath, filepath.Base(audioPath), filepath.Base(audioPath), len(payload)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.ExecContext(ctx, `
+		INSERT INTO user_playback (user_id, target_kind, target_id, state_json, updated_at)
+		VALUES (?, 'music-track', 'track-1', ?, CURRENT_TIMESTAMP)`,
+		users.BootstrapUserID, `{"progressSeconds":120}`); err != nil {
+		t.Fatal(err)
+	}
+
+	seed, err := catalogstore.LoadSeedFromDB(ctx, db)
+	if err != nil {
+		t.Fatal(err)
+	}
+	handler := NewServer(ServerOptions{
+		Catalog:  catalog.NewService(seed),
+		Playback: playback.New(db),
+		Files:    files.New(db),
+	})
+
+	// "?at=120" is an explicit position, and a FLAC still cannot be cut there.
+	for _, tc := range []struct{ query, rangeHeader string }{
+		{"", ""}, {"", "bytes=0-"}, {"", "bytes=100-"}, {"?at=120", ""},
+	} {
+		rangeHeader := tc.rangeHeader
+		req := httptest.NewRequest(http.MethodGet, "/api/v1/music/tracks/track-1/stream"+tc.query, nil)
+		if rangeHeader != "" {
+			req.Header.Set("Range", rangeHeader)
+		}
+		rec := httptest.NewRecorder()
+		handler.ServeHTTP(rec, req)
+		if rec.Code != http.StatusOK && rec.Code != http.StatusPartialContent {
+			t.Fatalf("range %q: status = %d, body = %s", rangeHeader, rec.Code, rec.Body.String())
+		}
+		if got := rec.Header().Get("X-Samo-Stream-Offset-Seconds"); got != "" {
+			t.Fatalf("range %q: offset header = %q, want the whole file", rangeHeader, got)
+		}
+		want := payload
+		if rangeHeader == "bytes=100-" {
+			want = payload[100:]
+		}
+		if !bytes.Equal(rec.Body.Bytes(), want) {
+			t.Fatalf("range %q: body starts %q (%d bytes), want %q (%d bytes)",
+				rangeHeader, rec.Body.Bytes()[:4], rec.Body.Len(), want[:4], len(want))
+		}
+	}
+}

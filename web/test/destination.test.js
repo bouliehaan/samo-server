@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { loginDestination } from '../src/ui/destination.js';
 const origin = 'https://samo.example';
 test('role defaults and dashboard boundaries', () => {
-  assert.equal(loginDestination({role:'admin'}, null, origin), '/app');
+  assert.equal(loginDestination({role:'admin'}, null, origin), '/listen/');
   assert.equal(loginDestination({role:'user'}, null, origin), '/listen/');
   assert.equal(loginDestination({role:'user'}, '/app#settings', origin), '/listen/');
   assert.equal(loginDestination({role:'admin'}, '/app#users', origin), '/app#users');

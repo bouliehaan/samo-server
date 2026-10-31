@@ -49,12 +49,6 @@ export function recentlyAddedKindLabel(kind) {
   }
 }
 
-export function browseAlbums(data) {
-  if (!data) return [];
-  if (Array.isArray(data.items)) return data.items;
-  return data.albums || [];
-}
-
 export function browseTracks(data) {
   if (!data) return [];
   if (Array.isArray(data.items)) return data.items;

@@ -250,7 +250,7 @@ func TestServeMediaFileAtResumeSupportsRangeRequests(t *testing.T) {
 	if err := os.MkdirAll(libraryDir, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	audioPath := filepath.Join(libraryDir, "song.flac")
+	audioPath := filepath.Join(libraryDir, "song.mp3")
 	payload := []byte("0123456789abcdefghij")
 	if err := os.WriteFile(audioPath, payload, 0o644); err != nil {
 		t.Fatal(err)
@@ -264,7 +264,7 @@ func TestServeMediaFileAtResumeSupportsRangeRequests(t *testing.T) {
 	}
 	if _, err := db.ExecContext(ctx, `
 		INSERT INTO media_files (id, library_id, path, file_name, mime_type, size_bytes, duration_seconds)
-		VALUES ('file-1', 'library-1', ?, 'song.flac', 'audio/flac', ?, 10)`, audioPath, len(payload)); err != nil {
+		VALUES ('file-1', 'library-1', ?, 'song.mp3', 'audio/mpeg', ?, 10)`, audioPath, len(payload)); err != nil {
 		t.Fatal(err)
 	}
 
@@ -291,7 +291,7 @@ func TestServeMediaFileAtResumeReturnsUnmodifiedTailBytes(t *testing.T) {
 	if err := os.MkdirAll(libraryDir, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	audioPath := filepath.Join(libraryDir, "song.flac")
+	audioPath := filepath.Join(libraryDir, "song.mp3")
 	payload := []byte("0123456789abcdefghij")
 	if err := os.WriteFile(audioPath, payload, 0o644); err != nil {
 		t.Fatal(err)
@@ -305,7 +305,7 @@ func TestServeMediaFileAtResumeReturnsUnmodifiedTailBytes(t *testing.T) {
 	}
 	if _, err := db.ExecContext(ctx, `
 		INSERT INTO media_files (id, library_id, path, file_name, mime_type, size_bytes, duration_seconds)
-		VALUES ('file-1', 'library-1', ?, 'song.flac', 'audio/flac', ?, 10)`, audioPath, len(payload)); err != nil {
+		VALUES ('file-1', 'library-1', ?, 'song.mp3', 'audio/mpeg', ?, 10)`, audioPath, len(payload)); err != nil {
 		t.Fatal(err)
 	}
 
@@ -330,5 +330,44 @@ func TestByteOffsetForSeconds(t *testing.T) {
 	}
 	if got := byteOffsetForSeconds(100, 0, 5); got != 0 {
 		t.Fatalf("offset = %d, want 0 when duration missing", got)
+	}
+}
+
+// A FLAC keeps its STREAMINFO at the front, so a resume offset must not cut it:
+// the whole file goes out and the player seeks with Range.
+func TestServeMediaFileAtServesFLACWhole(t *testing.T) {
+	ctx := context.Background()
+	root := t.TempDir()
+	libraryDir := filepath.Join(root, "music")
+	if err := os.MkdirAll(libraryDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	audioPath := filepath.Join(libraryDir, "song.flac")
+	payload := []byte("fLaC456789abcdefghij")
+	if err := os.WriteFile(audioPath, payload, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	db := storagetest.Open(t)
+	if _, err := db.ExecContext(ctx, `
+		INSERT INTO libraries (id, name, kind, media_type, path)
+		VALUES ('library-1', 'Music', 'music', '', ?)`, libraryDir); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.ExecContext(ctx, `
+		INSERT INTO media_files (id, library_id, path, file_name, mime_type, size_bytes, duration_seconds)
+		VALUES ('file-1', 'library-1', ?, 'song.flac', 'audio/flac', ?, 10)`, audioPath, len(payload)); err != nil {
+		t.Fatal(err)
+	}
+
+	rec := httptest.NewRecorder()
+	if err := New(db).ServeMediaFileAt(ctx, "file-1", 5, rec, httptest.NewRequest(http.MethodGet, "/stream", nil)); err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(rec.Body.Bytes(), payload) {
+		t.Fatalf("body = %q, want the whole file", rec.Body.Bytes())
+	}
+	if got := rec.Header().Get("X-Samo-Stream-Offset-Seconds"); got != "" {
+		t.Fatalf("offset header = %q, want none", got)
 	}
 }

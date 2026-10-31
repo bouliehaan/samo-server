@@ -17,10 +17,11 @@ type streamTokenEntry struct {
 	expiresAt time.Time
 }
 
-// streamTokenStore is an in-memory ephemeral credential cache. Stream tokens
-// authenticate the same user as the bearer that minted them but are designed
-// to be safe-ish in URLs (HTML5 <audio src> can't send custom headers).
-// Tokens are dropped on server restart — clients re-mint on next request.
+// streamTokenStore is an in-memory cache in front of the stream_tokens table.
+// Stream tokens authenticate the same user as the bearer that minted them but
+// are designed to be safe-ish in URLs (HTML5 <audio src> can't send custom
+// headers). The table is what makes a token outlive a restart; this map only
+// spares the database a lookup on every cover and Range request.
 type streamTokenStore struct {
 	mu     sync.Mutex
 	tokens map[string]streamTokenEntry
@@ -43,6 +44,13 @@ func (s *streamTokenStore) issue(userID string) (string, time.Time, error) {
 	s.gcLocked(time.Now())
 	s.tokens[token] = streamTokenEntry{userID: userID, expiresAt: expiresAt}
 	return token, expiresAt, nil
+}
+
+// remember caches a token the database vouched for.
+func (s *streamTokenStore) remember(token, userID string, expiresAt time.Time) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.tokens[token] = streamTokenEntry{userID: userID, expiresAt: expiresAt}
 }
 
 func (s *streamTokenStore) validate(token string) (string, bool) {

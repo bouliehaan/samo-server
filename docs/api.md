@@ -14,7 +14,15 @@ User accounts live in the database. Each user has their own playback state and c
 
 | Route | Purpose |
 |-------|---------|
-| `POST /api/v1/auth/login` | username/password login; returns a bearer token |
+| `POST /api/v1/auth/login` | username/password login; returns a bearer token. Local accounts are checked first, then LDAP when it is on |
+| `GET /api/v1/auth/providers` | which sign-in methods the login page offers (public) |
+| `GET /auth/oidc/start?next=` | begins an SSO sign-in; redirects to the identity provider. `GET /login` redirects here when OIDC is on, unless it carries `local`, `sso` or `sso_error` (public) |
+| `GET /auth/oidc/callback` | the provider's redirect back; redirects to `/login?sso=done#sso=<hand-off>`, or `/login?sso_error=<reason>` (public) |
+| `POST /api/v1/auth/oidc/complete` | trades `{"code": <hand-off>}` plus the attempt's `samo_sso` cookie for the login response, plus `next` from the start (public) |
+| `GET`/`PUT /api/v1/auth/providers/config` | OIDC/LDAP settings, secrets withheld (admin) |
+| `POST /api/v1/auth/providers/test` | `{"provider": "oidc"\|"ldap", "username"?}`: tries the saved settings (admin) |
+| `GET /api/v1/users/{id}/identities` | an account's linked SSO/LDAP identities (admin) |
+| `DELETE /api/v1/users/{id}/identities?provider=&subject=` | unlink one (admin) |
 | `GET /api/v1/users/me` | current user profile |
 | `PATCH /api/v1/users/me` | update display name or password |
 | `GET /api/v1/users/me/tokens` | list API tokens |
@@ -33,7 +41,9 @@ Bootstrap env (first run):
 
 If the named admin already exists and `SAMO_BOOTSTRAP_PASSWORD` is set, startup updates that admin's password. This gives self-hosted installs a recovery path without carrying a known default password.
 
-Public routes (no user token): `GET /health`, `POST /api/v1/auth/login`, `POST /api/v1/auth/device/start`, `POST /api/v1/auth/device/poll`, `GET /pair`, radio/internet-radio stream URLs.
+SSO and LDAP are described in [sso.md](sso.md).
+
+Public routes (no user token): `GET /health`, `POST /api/v1/auth/login`, the four SSO routes above, `POST /api/v1/auth/device/start`, `POST /api/v1/auth/device/poll`, `GET /pair`, radio/internet-radio stream URLs.
 
 ### Device pairing (TV sign-in)
 
@@ -183,6 +193,8 @@ When `mediaFileId` is omitted, Samo picks the file automatically:
 
 - Uses saved playback `progressSeconds` to select the correct part file and byte offset for multi-file audiobooks and podcasts.
 - Uses `disc` (or the track's own disc number on music streams) when multiple files share one track.
+- Never uses saved progress for a music track: the file is served whole from byte 0 and the player seeks with Range.
+- Applies a resume offset as a byte offset only to MP3 and ADTS AAC, which decode from any frame. FLAC, Ogg, MP4 and WAV keep their headers at the front, so they are always served whole.
 - Orders linked files by disc/track metadata, then relative path.
 
 Response headers on stream shortcuts:

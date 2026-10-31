@@ -100,6 +100,9 @@ func (s *Server) patchPlayback(w http.ResponseWriter, r *http.Request) {
 	if !readJSONBody(w, r, &patch) {
 		return
 	}
+	if kind == playback.TargetMusicTrack {
+		s.dropImpossibleMusicPosition(id, &patch)
+	}
 	updated, err := s.playbackService().Patch(r.Context(), principal.User.ID, kind, id, patch)
 	if err != nil {
 		writePlaybackError(w, err)
@@ -113,6 +116,24 @@ func (s *Server) patchPlayback(w http.ResponseWriter, r *http.Request) {
 		s.recordAudiobookListeningSession(r.Context(), principal.User.ID, id, before, updated, &patch)
 	}
 	writeJSON(w, http.StatusOK, updated)
+}
+
+// dropImpossibleMusicPosition discards a reported position past the end of the
+// track. The desktop/web renderer sent Jellyfin ticks (seconds * 1e7) as seconds
+// on every pause and seek, so a track 3.7s in was stored at 37,550,000. A song
+// never resumes from its position, but scrobbling and listening inference read
+// it, and a number that cannot be true is worse than none.
+func (s *Server) dropImpossibleMusicPosition(trackID string, patch *playback.PatchInput) {
+	if patch.ProgressSeconds == nil || s.catalog == nil {
+		return
+	}
+	track, err := s.catalog.MusicTrack(trackID)
+	if err != nil || track.DurationSeconds <= 0 {
+		return
+	}
+	if *patch.ProgressSeconds > track.DurationSeconds+5 {
+		patch.ProgressSeconds = nil
+	}
 }
 
 func (s *Server) playbackService() *playback.Service {

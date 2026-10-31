@@ -44,3 +44,16 @@
     }
     .footer-note a { color: var(--accent); }
   
+    .sso-block { display: grid; gap: 14px; margin-top: 14px; }
+    .sso-divider {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      color: var(--muted);
+      font-family: var(--mono);
+      font-size: 0.72rem;
+      text-transform: uppercase;
+      letter-spacing: 0.12em;
+    }
+    .sso-divider::before, .sso-divider::after { content: ""; flex: 1; border-top: 1px solid var(--line-strong); }
+    .sso-button { justify-content: center; text-align: center; text-decoration: none; }

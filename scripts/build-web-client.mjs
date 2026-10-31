@@ -19,7 +19,7 @@ try {
   await symlink(join(source, 'node_modules'), join(stage, 'node_modules'), 'dir');
   await copyFile(join(root, 'web/client/bootstrap.js'), join(stage, 'src/renderer/server-bootstrap.js'));
   await copyFile(join(root, 'web/client/host.css'), join(stage, 'src/renderer/server-host.css'));
-  for (const name of ['compat', 'search-ranking']) await copyFile(join(root, `web/client/${name}.js`), join(stage, `src/renderer/server-${name}.js`));
+  for (const name of ['compat', 'media-auth', 'search-ranking']) await copyFile(join(root, `web/client/${name}.js`), join(stage, `src/renderer/server-${name}.js`));
   await patchWebClient(stage);
   let html = await readFile(join(stage, 'src/renderer/index.html'), 'utf8');
   html = html.replace(/<meta\s+http-equiv="Content-Security-Policy"[\s\S]*?\/>/, '')

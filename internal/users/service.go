@@ -64,7 +64,24 @@ func (s *Service) IssueStreamToken(userID string) (string, time.Time, error) {
 	if strings.TrimSpace(userID) == "" {
 		return "", time.Time{}, ErrUnauthorized
 	}
-	return s.streamTokens.issue(strings.TrimSpace(userID))
+	userID = strings.TrimSpace(userID)
+	token, expiresAt, err := s.streamTokens.issue(userID)
+	if err != nil {
+		return "", time.Time{}, err
+	}
+	// Persisted so the token outlives a restart: a deploy used to 401 every
+	// <audio src> an open player was holding until its cached token aged out.
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if _, err := s.db.ExecContext(ctx, `DELETE FROM stream_tokens WHERE expires_at < ?`, time.Now().UTC()); err != nil {
+		return "", time.Time{}, err
+	}
+	if _, err := s.db.ExecContext(ctx, `
+		INSERT INTO stream_tokens (token_hash, user_id, expires_at) VALUES (?, ?, ?)`,
+		hashToken(token), userID, expiresAt); err != nil {
+		return "", time.Time{}, err
+	}
+	return token, expiresAt, nil
 }
 
 // AuthenticateStreamToken resolves an ephemeral stream token to the user it
@@ -74,15 +91,31 @@ func (s *Service) AuthenticateStreamToken(ctx context.Context, token string) (Pr
 	if !s.Enabled() {
 		return Principal{}, ErrDisabled
 	}
-	userID, ok := s.streamTokens.validate(strings.TrimSpace(token))
-	if !ok {
-		return Principal{}, ErrUnauthorized
+	token = strings.TrimSpace(token)
+	userID, ok := s.streamTokens.validate(token)
+	if !ok && token != "" {
+		// Minted before the last restart, or by another instance.
+		var expiresAt time.Time
+		err := s.dbForRead().QueryRowContext(ctx, `
+			SELECT user_id, expires_at FROM stream_tokens WHERE token_hash = ? AND expires_at > ?`,
+			hashToken(token), time.Now().UTC()).Scan(&userID, &expiresAt)
+		if err != nil {
+			return Principal{}, ErrUnauthorized
+		}
+		s.streamTokens.remember(token, userID, expiresAt)
 	}
 	user, err := loadUserByID(ctx, s.dbForRead(), userID)
 	if err != nil {
 		return Principal{}, ErrUnauthorized
 	}
 	return Principal{User: user}, nil
+}
+
+// revokeStreamTokens drops every stream token a user holds, cached and stored.
+func (s *Service) revokeStreamTokens(ctx context.Context, userID string) error {
+	s.streamTokens.revokeUser(userID)
+	_, err := s.db.ExecContext(ctx, `DELETE FROM stream_tokens WHERE user_id = ?`, userID)
+	return err
 }
 
 func (s *Service) Bootstrap(ctx context.Context, input BootstrapInput) error {
@@ -238,15 +271,7 @@ func (s *Service) Login(ctx context.Context, input LoginInput) (LoginResponse, e
 	if err != nil {
 		return LoginResponse{}, err
 	}
-	issued, err := s.IssueToken(ctx, principal, CreateTokenInput{Label: "login"})
-	if err != nil {
-		return LoginResponse{}, err
-	}
-	return LoginResponse{
-		User:      principal.User,
-		Token:     issued.Secret,
-		TokenMeta: issued.Token,
-	}, nil
+	return s.IssueLogin(ctx, principal, "login")
 }
 
 func (s *Service) IssueToken(ctx context.Context, actor Principal, input CreateTokenInput) (TokenIssue, error) {

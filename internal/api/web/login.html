@@ -21,7 +21,7 @@
     <section class="card login-shell">
       <div class="card-head"><span class="caret">&gt;</span> SIGN IN</div>
       <h1>Welcome back.</h1>
-      <p class="lede">Use the username and password you created during setup.</p>
+      <p class="lede">Use your samo username and password.</p>
       <label class="field">
         <span class="field-label">USERNAME</span>
         <input type="text" id="username" autocomplete="username" autofocus>
@@ -32,6 +32,10 @@
       </label>
       <div class="actions">
         <button class="btn primary" id="submit">SIGN IN &rarr;</button>
+      </div>
+      <div class="sso-block" id="ssoBlock" hidden>
+        <div class="sso-divider"><span>or</span></div>
+        <a class="btn ghost sso-button" id="ssoButton" href="/auth/oidc/start">SIGN IN WITH SSO &rarr;</a>
       </div>
       <div class="footer-note">// forgot your password? sign back in as another admin and reset from Users,<br>// or re-run setup with SAMO_BOOTSTRAP_PASSWORD set to override</div>
     </section>

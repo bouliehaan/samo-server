@@ -1,4 +1,5 @@
 import { renderUsers } from "./ui/users.js";
+import { renderSignInSettings } from "./ui/sign_in.js";
 // Entry point for the app page. Vite bundles this into
 // internal/api/web/build/, which go:embed compiles into the binary.
 //
@@ -26,7 +27,7 @@ import { composerSamoRadioDevice, samoRadioDeviceCard, samoRadioSendBar } from "
 import { composerChannel, composerChannelContent, composerChannelSchedule, composerChannelShow, composerClose, roleForKind, composerLibrary, composerMessage, composerPlaylist, composerPlaylistEdit, composerPlaylistImport, composerPodcastAttachFeed, composerPodcastFeed, composerRadioStation, fieldHTML, toggleComposer } from "./ui/composer.js";
 import { formatDataSize, formatDate, formatDuration, formatUptime, minuteToHHMM, parseHHMM, weekdayMaskToLabel } from "./ui/format.js";
 import { attr, escapeHTML, progressBar, setMessage, setStatus, splitTags, tagsLine } from "./ui/html.js";
-import { audiobookSub, audiobookTitle, browseAlbums, browseResultCount, candidateFeedURL, isLibraryFolderPodcast, libraryKindLabel, musicPaginationFooter, nowPlayingLine, playlistCoverBlock, podcastHasLinkedFeed, podcastSub, podcastTitle, recentlyAddedKindLabel, scanPruneSummary } from "./ui/labels.js";
+import { audiobookSub, audiobookTitle, browseResultCount, candidateFeedURL, isLibraryFolderPodcast, libraryKindLabel, musicPaginationFooter, nowPlayingLine, playlistCoverBlock, podcastHasLinkedFeed, podcastSub, podcastTitle, recentlyAddedKindLabel, scanPruneSummary } from "./ui/labels.js";
 import { globalScanActionsHTML, libraryKindScanActionsHTML, libraryScanActionsHTML, withButton } from "./ui/scan_actions.js";
 
 (function () {
@@ -625,10 +626,9 @@ import { globalScanActionsHTML, libraryKindScanActionsHTML, libraryScanActionsHT
   async function viewHome() {
     renderLoading();
     try {
-      const [overview, recentlyAdded, newestReleases, libraries, internetRadio] = await Promise.all([
+      const [overview, recentlyAdded, libraries, internetRadio] = await Promise.all([
         api("/api/v1/catalog/overview"),
         api("/api/v1/catalog/recently-added?limit=50"),
-        api("/api/v1/music/albums?limit=10&sort=release&direction=desc"),
         api("/api/v1/libraries").catch(() => ({ items: [], total: 0 })),
         api("/api/v1/internet-radio/stations?limit=500").catch(() => ({ items: [] })),
       ]);
@@ -661,16 +661,6 @@ import { globalScanActionsHTML, libraryKindScanActionsHTML, libraryScanActionsHT
         html += '<div class="album-grid">' + recentItems.map(recentlyAddedCard).join("") + '</div>';
       } else {
         html += '<div class="empty-state">// nothing indexed yet - add a library folder and wait for the scan</div>';
-      }
-      html += '</div>';
-
-      const releaseAlbums = browseAlbums(newestReleases);
-      html += '<div class="section-row">';
-      html += '<div class="section-label">// newest releases</div>';
-      if (releaseAlbums.length > 0) {
-        html += '<div class="album-row">' + releaseAlbums.map(albumCard).join("") + '</div>';
-      } else {
-        html += '<div class="empty-state">// no release dates in catalog yet</div>';
       }
       html += '</div>';
 
@@ -2558,6 +2548,9 @@ import { globalScanActionsHTML, libraryKindScanActionsHTML, libraryScanActionsHT
         body = await settingsPodcasts();
       } else if (settingsMode === "explo") {
         body = await settingsExplo();
+      } else if (settingsMode === "signin" && isAdmin()) {
+        // Drawn and bound by its own module once the shell is in place.
+        body = '<div id="signInSettings"></div>';
       } else {
         body = await settingsAccount();
       }
@@ -2566,6 +2559,7 @@ import { globalScanActionsHTML, libraryKindScanActionsHTML, libraryScanActionsHT
         '<button class="pill ' + (settingsMode === "radio" ? "active" : "") + '" data-action="settings-mode" data-mode="radio">RADIO</button>' +
         '<button class="pill ' + (settingsMode === "podcasts" ? "active" : "") + '" data-action="settings-mode" data-mode="podcasts">PODCASTS</button>' +
         '<button class="pill ' + (settingsMode === "explo" ? "active" : "") + '" data-action="settings-mode" data-mode="explo">EXPLO</button>' +
+        (isAdmin() ? '<button class="pill ' + (settingsMode === "signin" ? "active" : "") + '" data-action="settings-mode" data-mode="signin">SIGN-IN</button>' : '') +
         '<button class="pill ' + (settingsMode === "account" ? "active" : "") + '" data-action="settings-mode" data-mode="account">ACCOUNT</button>' +
       '</div>';
       main.innerHTML = '<section class="view">' +
@@ -2573,6 +2567,8 @@ import { globalScanActionsHTML, libraryKindScanActionsHTML, libraryScanActionsHT
         pills + body +
       '</section>';
       bindSettingsForms();
+      const signIn = document.getElementById("signInSettings");
+      if (signIn) await renderSignInSettings(signIn);
     } catch (err) { renderError(err.message); }
   }
 
@@ -4817,7 +4813,8 @@ import { globalScanActionsHTML, libraryKindScanActionsHTML, libraryScanActionsHT
 
   document.getElementById("signOut").addEventListener("click", () => {
     localStorage.removeItem(tokenKey);
-    window.location.href = "/login";
+    // ?local=1: the form, not straight back in through single sign-on.
+    window.location.href = "/login?local=1";
   });
 
   // Live updates. Scan and backfill progress used to be polled every 1.5-2s
@@ -4847,6 +4844,7 @@ import { globalScanActionsHTML, libraryKindScanActionsHTML, libraryScanActionsHT
     try {
       setCurrentUser(await api("/api/v1/users/me"));
       if (!isAdmin()) { window.location.replace("/listen/"); return; }
+      document.body.classList.remove("booting");
       document.getElementById("authUser").textContent = (currentUser.username || "-").toUpperCase();
       await ensureStreamToken();
       // Refresh the stream token well before its TTL so audio/img URLs
@@ -4871,6 +4869,9 @@ import { globalScanActionsHTML, libraryKindScanActionsHTML, libraryScanActionsHT
         }
       } catch { /* explo unavailable — tab stays hidden */ }
     } catch (err) {
+      // A 401 is already on its way to /login; anything else is shown.
+      if (err.message === "unauthorized") return;
+      document.body.classList.remove("booting");
       setStatus("ERROR · " + (err.message || "unknown"));
       return;
     }

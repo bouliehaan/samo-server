@@ -115,7 +115,9 @@ func (s *Service) manageUser(ctx context.Context, actor Principal, id string, in
 		return User{}, err
 	}
 	if remove || (passwordHash != nil && actor.User.ID != id) {
-		s.streamTokens.revokeUser(id)
+		if err := s.revokeStreamTokens(ctx, id); err != nil {
+			return User{}, err
+		}
 	}
 	if remove {
 		return User{}, nil
