@@ -22,6 +22,8 @@ try {
   for (const name of ['compat', 'media-auth', 'search-ranking', 'touch']) await copyFile(join(root, `web/client/${name}.js`), join(stage, `src/renderer/server-${name}.js`));
   // The phone layout and its helpers (see web-client-patches.mjs for the hooks).
   await cp(join(root, 'web/client/mobile'), join(stage, 'src/renderer/server-mobile'), { recursive: true });
+  // The player's own settings for what the server keeps per user (Last.fm).
+  await cp(join(root, 'web/client/settings'), join(stage, 'src/renderer/server-settings'), { recursive: true });
   await patchWebClient(stage);
   let html = await readFile(join(stage, 'src/renderer/index.html'), 'utf8');
   html = html.replace(/<meta\s+http-equiv="Content-Security-Policy"[\s\S]*?\/>/, '')

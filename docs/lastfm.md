@@ -24,6 +24,16 @@ Startup logs show `last.fm scrobbling: enabled` when credentials are active. Cre
 
 All routes require the caller's Samo user token (`Authorization: Bearer ...` or `X-Samo-Token`). Each Samo user links their own Last.fm account; scrobbles and queue/history are scoped to that user.
 
+Anyone can link theirs from the player at `/listen/`: **Settings → General →
+Scrobbling → Connect Last.fm**, approve samo on last.fm, and come back; it
+finishes by itself. The API credentials above are the server's and only an
+admin sets them; linking an account needs no admin rights. Admins can also
+link from the dashboard's Settings → Account.
+
+Only music is scrobbled, and only what is played while signed in as that user:
+from the player, the apps, or a Subsonic client using that user's credentials.
+Radio, samo-radio devices, podcasts and audiobooks are never scrobbled.
+
 1. `POST /api/v1/lastfm/auth/begin`
 
    Returns `{ "authUrl", "token" }`.
