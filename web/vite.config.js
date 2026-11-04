@@ -30,6 +30,7 @@ export default defineConfig({
         setup: resolve(import.meta.dirname, "src/setup.js"),
         login: resolve(import.meta.dirname, "src/login.js"),
         pair: resolve(import.meta.dirname, "src/pair.js"),
+        wrapped: resolve(import.meta.dirname, "src/wrapped.js"),
       },
       output: {
         entryFileNames: "[name]-[hash].js",

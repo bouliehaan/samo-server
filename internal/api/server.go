@@ -27,6 +27,7 @@ import (
 	"github.com/bouliehaan/samo-server/internal/lastfm"
 	"github.com/bouliehaan/samo-server/internal/libraries"
 	"github.com/bouliehaan/samo-server/internal/listenbrainz"
+	"github.com/bouliehaan/samo-server/internal/wrapped"
 	"github.com/bouliehaan/samo-server/internal/log"
 	"github.com/bouliehaan/samo-server/internal/loudness"
 	"github.com/bouliehaan/samo-server/internal/metadata"
@@ -64,6 +65,7 @@ type ServerOptions struct {
 	Sources       *sources.Service
 	LastFM        *lastfm.Service
 	ListenBrainz  *listenbrainz.Service
+	Wrapped       *wrapped.Service
 	Explo         *explo.Service
 	ExploRemote   *explo.Remote
 	// ExploArtClient fetches the covers beside Search for new results; the
@@ -127,6 +129,7 @@ type Server struct {
 	sources                          *sources.Service
 	lastfm                           *lastfm.Service
 	listenbrainz                     *listenbrainz.Service
+	wrapped                          *wrapped.Service
 	explo                            *explo.Service
 	exploRemote                      *explo.Remote
 	exploArt                         *exploArtCache
@@ -235,6 +238,7 @@ func NewServer(options ServerOptions) http.Handler {
 		sources:                          options.Sources,
 		lastfm:                           options.LastFM,
 		listenbrainz:                     options.ListenBrainz,
+		wrapped:                          options.Wrapped,
 		explo:                            options.Explo,
 		exploRemote:                      options.ExploRemote,
 		exploArt:                         newExploArtCache(options.ExploArtClient),
@@ -285,6 +289,8 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("GET /setup", s.setupPage)
 	s.mux.HandleFunc("GET /setup/", s.setupPage)
 	s.mux.HandleFunc("GET /health", s.health)
+	s.mux.HandleFunc("GET /wrapped", s.wrappedPage)
+	s.mux.HandleFunc("GET /wrapped/", s.wrappedPage)
 
 	// Browser favicon (public — fetched before login). Light/dark variants are
 	// selected by the <link media="(prefers-color-scheme:…)"> tags in the page
@@ -430,6 +436,10 @@ func (s *Server) routes() {
 	s.handleAPI("GET /api/v1/listenbrainz/history", s.listListenBrainzHistory)
 
 	s.handleAPI("POST /api/v1/scrobble/events", s.postScrobbleEvent)
+	s.handleAPI("GET /api/v1/wrapped", s.getWrapped)
+	s.handleAPI("GET /api/v1/wrapped/settings", s.getWrappedSettings)
+	s.handleAPI("PUT /api/v1/wrapped/settings", s.putWrappedSettings)
+	s.handleAPI("DELETE /api/v1/wrapped/history", s.deleteWrappedHistory)
 
 	// Media bytes: the routes a stream token opens (auth.go). Everything
 	// registered through handleAPI refuses one.

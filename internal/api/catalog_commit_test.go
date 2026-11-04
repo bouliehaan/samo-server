@@ -42,6 +42,9 @@ var nonCatalogMutations = map[string]string{
 	"patchPlayback":     "per-user playback position",
 	"putPlayback":       "per-user playback position",
 	"postScrobbleEvent": "per-user listen history",
+	// samo Wrapped: one listener's own history switch and log.
+	"putWrappedSettings":   "per-user listening history switch",
+	"deleteWrappedHistory": "per-user listening history",
 
 	// Credentials and account plumbing.
 	"createUser":               "account, not catalog",

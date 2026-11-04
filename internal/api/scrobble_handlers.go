@@ -35,7 +35,9 @@ func (s *Server) notifyMusicTrackScrobblers(
 	}
 	lastfmLive := s.lastfm != nil && s.lastfm.Enabled()
 	listenbrainzLive := s.listenbrainz != nil && s.listenbrainz.Enabled()
-	if !lastfmLive && !listenbrainzLive {
+	// samo's own history for Wrapped, which logs only for users who turned it on.
+	wrappedLive := s.wrapped != nil
+	if !lastfmLive && !listenbrainzLive && !wrappedLive {
 		return
 	}
 	track, err := s.catalog.MusicTrack(trackID)
@@ -79,6 +81,13 @@ func (s *Server) notifyMusicTrackScrobblers(
 			ctx, cancel := context.WithTimeout(s.baseCtx, 30*time.Second)
 			defer cancel()
 			s.listenbrainz.HandlePlayback(ctx, input)
+		})
+	}
+	if wrappedLive {
+		safego.Go("wrapped playback handoff", func() {
+			ctx, cancel := context.WithTimeout(s.baseCtx, 30*time.Second)
+			defer cancel()
+			s.wrapped.HandlePlayback(ctx, input)
 		})
 	}
 }

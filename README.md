@@ -98,6 +98,8 @@ Optional integrations go on the install line the same way as the media path: `SA
 - Adds podcast RSS feeds and internet radio stream URLs.
 - Runs 24/7 radio channels programmed from your own library — see
   [docs/channels.md](docs/channels.md).
+- samo Wrapped: each listener's year in music, from their Last.fm or, if they
+  choose, samo's own listening history — see [docs/wrapped.md](docs/wrapped.md).
 - Streams original files, and serves artwork through a thumbnail ladder.
 - Records playback and scrobbles, optionally to Last.fm.
 - Exposes a native `/api/v1` surface plus a read-only Subsonic adapter.

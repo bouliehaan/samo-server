@@ -51,6 +51,7 @@ async function boot() {
   // dashboard for admins, and signing out.
   let signingOut = false;
   window.SAMO_HOST_MENU = [
+    { id: 'wrapped', icon: 'star', label: 'samo Wrapped', onClick: () => location.assign('/wrapped') },
     ...(user.role === 'admin'
       ? [{ id: 'server-admin', icon: 'server', label: 'Server admin', onClick: () => location.assign('/app') }]
       : []),

@@ -55,6 +55,7 @@ import (
 	"github.com/bouliehaan/samo-server/internal/toolchain"
 	"github.com/bouliehaan/samo-server/internal/users"
 	"github.com/bouliehaan/samo-server/internal/watch"
+	"github.com/bouliehaan/samo-server/internal/wrapped"
 )
 
 const (
@@ -715,25 +716,32 @@ func main() {
 	artistImageService.SetEventHub(eventHub)
 
 	handler := api.NewServer(api.ServerOptions{
-		DB:             db,
-		APIToken:       cfg.APIToken,
-		Catalog:        catalogService,
-		Libraries:      libraryService,
-		Playback:       playbackService,
-		Covers:         coverService,
-		Files:          filesService,
-		Thumbnails:     thumbnailService,
-		Metadata:       metadataService,
-		MetadataApply:  metadataApplyService,
-		Playlists:      playlistService,
-		PodcastStream:  podcastStreamService,
-		PodcastCache:   podcastCacheService,
-		Search:         searchService,
-		Bookmarks:      bookmarksService,
-		Radio:          radioService,
-		Sources:        sourceService,
-		LastFM:         lastfmService,
-		ListenBrainz:   listenbrainzService,
+		DB:            db,
+		APIToken:      cfg.APIToken,
+		Catalog:       catalogService,
+		Libraries:     libraryService,
+		Playback:      playbackService,
+		Covers:        coverService,
+		Files:         filesService,
+		Thumbnails:    thumbnailService,
+		Metadata:      metadataService,
+		MetadataApply: metadataApplyService,
+		Playlists:     playlistService,
+		PodcastStream: podcastStreamService,
+		PodcastCache:  podcastCacheService,
+		Search:        searchService,
+		Bookmarks:     bookmarksService,
+		Radio:         radioService,
+		Sources:       sourceService,
+		LastFM:        lastfmService,
+		ListenBrainz:  listenbrainzService,
+		// Days and hours in a Wrapped are this machine's, like the radio's.
+		Wrapped: wrapped.NewService(wrapped.ServiceOptions{
+			DB:     db,
+			LastFM: lastfmService,
+			Zone:   scheduleLocation,
+			Logger: log.Printf,
+		}),
 		Explo:          exploService,
 		ExploRemote:    exploRemote,
 		ExploArtClient: egress.Client(egressRouter, &http.Client{Timeout: 15 * time.Second}),

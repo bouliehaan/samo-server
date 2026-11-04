@@ -255,13 +255,14 @@ async function patchPhone(stage, replace) {
     "        if (linked) setFilter(linked);\n" +
     "    }, [linked, visit]);\n");
 
-  // Scrobbling heads the General tab, so a listener can link their own Last.fm
-  // account without the admin dashboard (web/client/settings).
+  // Scrobbling and samo Wrapped head the General tab, so a listener can link
+  // their own Last.fm account, and choose whether samo keeps its own history,
+  // without the admin dashboard (web/client/settings).
   const general = 'src/renderer/features/settings/components/general/general-tab.tsx';
   await replace(general, "import { Stack } from '/@/shared/components/stack/stack';\n",
-    "import { Stack } from '/@/shared/components/stack/stack';\nimport { ScrobblingSettings } from '/@/renderer/server-settings/scrobbling-settings';\n");
+    "import { Stack } from '/@/shared/components/stack/stack';\nimport { ScrobblingSettings } from '/@/renderer/server-settings/scrobbling-settings';\nimport { WrappedSettings } from '/@/renderer/server-settings/wrapped-settings';\n");
   await replace(general, '        <Stack gap="md">\n            <ApplicationSettings />',
-    '        <Stack gap="md">\n            <ScrobblingSettings />\n            <ApplicationSettings />');
+    '        <Stack gap="md">\n            <ScrobblingSettings />\n            <WrappedSettings />\n            <ApplicationSettings />');
 
   // "Search music, audiobooks, po" is what fitted of the placeholder.
   await replace('src/renderer/features/search/components/global-search-bar.tsx',

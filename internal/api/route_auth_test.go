@@ -61,6 +61,8 @@ var publicRoutes = map[string]string{
 	"GET /":                  "redirects to /setup or /listen/",
 	"GET /app":               "the web app's shell page; it signs in with its own bearer",
 	"GET /app/":              "the web app's shell page; it signs in with its own bearer",
+	"GET /wrapped":           "the Wrapped page shell; it signs in with the player's bearer",
+	"GET /wrapped/":          "the Wrapped page shell; it signs in with the player's bearer",
 	"GET /login":             "the sign-in page",
 	"GET /login/":            "the sign-in page",
 	"GET /setup":             "the first-run wizard page",

@@ -38,5 +38,14 @@
     "css": [
       "setup-BBjrvj2T.css"
     ]
+  },
+  "src/wrapped.js": {
+    "file": "wrapped-Cwtk90L7.js",
+    "name": "wrapped",
+    "src": "src/wrapped.js",
+    "isEntry": true,
+    "css": [
+      "wrapped-CLQHbciQ.css"
+    ]
   }
 }
