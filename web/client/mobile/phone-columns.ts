@@ -11,11 +11,14 @@ const TITLES = [TableColumn.TITLE_COMBINED, TableColumn.TITLE_ARTIST, TableColum
  * title over the artist, the length, and a ⋯ for everything else. The desktop
  * table (album, genre, year, plays, heart...) squeezed into 390px left the
  * title one letter wide, so on a phone the table keeps only those columns.
+ * A ⋯ is added where the list had none: Safari on an iPhone has no right
+ * click, so it is the reliable way to the queue and playlist actions.
  *
- * Every column other than the title is pinned, which is what makes the title
- * the one that takes the rest of the row when the widths are fitted. A ⋯ is
- * added where the list had none: Safari on an iPhone has no right click, so it
- * is the reliable way to the queue and playlist actions.
+ * Nothing is pinned. The table draws pinned columns as panes of their own and
+ * keeps them level with JavaScript on every scroll event, which under a
+ * finger's momentum made lists judder back and forth. Unpinned, the row is
+ * one pane the browser scrolls natively. The widths are proportions of the
+ * row (the table fits them to it), set so the title takes most of it.
  *
  * A table with no title column is some other shape, and is left alone.
  */
@@ -27,26 +30,26 @@ export const phoneColumns = (
     const title = TITLES.map(find).find(Boolean);
     if (!title) return null;
 
+    const fixed = { autoSize: false, pinned: null } as const;
     const out: ItemTableListColumnConfig[] = [];
-    const combined = title.id === TableColumn.TITLE_COMBINED;
-    if (!combined) {
+    if (title.id !== TableColumn.TITLE_COMBINED) {
         // An album's tracks are numbered and share one cover: keep the number.
         const lead = find(TableColumn.TRACK_NUMBER) ?? find(TableColumn.ROW_INDEX);
         const image = find(TableColumn.IMAGE);
-        if (image) out.push({ ...image, autoSize: false, pinned: 'left', width: 56 });
-        else if (lead) out.push({ ...lead, align: 'center', autoSize: false, pinned: 'left', width: 36 });
+        if (image) out.push({ ...image, ...fixed, width: 56 });
+        else if (lead) out.push({ ...lead, ...fixed, align: 'center', width: 36 });
     }
-    out.push({ ...title, autoSize: false, pinned: null, width: 240 });
+    out.push({ ...title, ...fixed, width: 250 });
     const duration = find(TableColumn.DURATION);
-    if (duration) out.push({ ...duration, align: 'end', autoSize: false, pinned: 'right', width: 52 });
+    if (duration) out.push({ ...duration, ...fixed, align: 'end', width: 52 });
     const actions = find(TableColumn.ACTIONS) ?? {
         align: 'center',
         id: TableColumn.ACTIONS,
         isEnabled: true,
-        pinned: 'right',
+        pinned: null,
         width: 44,
     };
-    out.push({ ...actions, align: 'center', autoSize: false, pinned: 'right', width: 44 });
+    out.push({ ...actions, ...fixed, align: 'center', width: 44 });
     return out;
 };
 

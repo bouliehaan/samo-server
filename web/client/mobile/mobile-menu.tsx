@@ -15,17 +15,22 @@ interface HostMenuEntry {
     onClick: () => void;
 }
 
+interface MenuEntry {
+    /** Where the icon comes from, when it differs from where the entry goes. */
+    icon?: string;
+    label: string;
+    to: string;
+}
+
 interface MobileMenuProps {
     onClose: () => void;
     opened: boolean;
 }
 
 /**
- * Everything the five tabs do not reach: the music library by kind, favorites,
- * settings, and the hosted player's own entries from bootstrap.js (server
- * admin for admins, and signing out). The desktop sidebar it replaces opened
- * on a blank button where its logo should have been, so "sign out" was hidden
- * behind something that did not look like a button at all.
+ * The rest of samo, beyond the five tabs: every kind of media first, then the
+ * music library by kind, then settings and the hosted player's own entries
+ * from bootstrap.js (server admin for admins, and signing out).
  */
 export const MobileMenu = ({ onClose, opened }: MobileMenuProps) => {
     const { t } = useTranslation();
@@ -33,19 +38,46 @@ export const MobileMenu = ({ onClose, opened }: MobileMenuProps) => {
     const host = (window as any).SAMO_HOST_USER as undefined | { isAdmin: boolean; name: string };
     const hostEntries = ((window as any).SAMO_HOST_MENU ?? []) as HostMenuEntry[];
 
-    const library = [
-        { label: t('page.sidebar.music', { defaultValue: 'Music', postProcess: 'titleCase' }), route: AppRoute.MUSIC },
-        { label: t('page.sidebar.albums', { postProcess: 'titleCase' }), route: AppRoute.LIBRARY_ALBUMS },
-        { label: t('page.sidebar.albumArtists', { postProcess: 'titleCase' }), route: AppRoute.LIBRARY_ALBUM_ARTISTS },
-        { label: t('page.sidebar.tracks', { postProcess: 'titleCase' }), route: AppRoute.LIBRARY_SONGS },
-        { label: t('page.sidebar.genres', { postProcess: 'titleCase' }), route: AppRoute.LIBRARY_GENRES },
-        { label: t('page.sidebar.favorites', { postProcess: 'titleCase' }), route: AppRoute.FAVORITES },
+    const listen: MenuEntry[] = [
+        { label: t('page.sidebar.playlists', { postProcess: 'titleCase' }), to: AppRoute.PLAYLISTS },
+        { label: 'Audiobooks', to: AppRoute.AUDIOBOOKS },
+        // The podcast feed (latest episodes) heads the Podcasts page; the home
+        // page's "Podcast Feed" links there too.
+        { label: 'Podcasts', to: AppRoute.PODCASTS },
+        // The radio page opens on this filter (scripts/web-client-patches.mjs).
+        { icon: AppRoute.RADIO, label: 'Internet Radio', to: `${AppRoute.RADIO}?filter=internet` },
+    ];
+    const music: MenuEntry[] = [
+        { label: t('page.sidebar.albums', { postProcess: 'titleCase' }), to: AppRoute.LIBRARY_ALBUMS },
+        { label: t('page.sidebar.artists', { postProcess: 'titleCase' }), to: AppRoute.LIBRARY_ALBUM_ARTISTS },
+        { label: t('page.sidebar.favorites', { postProcess: 'titleCase' }), to: AppRoute.FAVORITES },
+        // The music page leads on to songs and genres, which have no other way in.
+        { label: 'All Music', to: AppRoute.MUSIC },
     ];
 
-    const go = (route: string) => {
+    const go = (to: string) => {
         onClose();
-        navigate(route);
+        navigate(to);
     };
+
+    const section = (title: string, entries: MenuEntry[]) => (
+        <>
+            <div className={styles.menuSection}>{title}</div>
+            {entries.map((entry) => (
+                <button
+                    className={styles.menuItem}
+                    key={entry.to}
+                    onClick={() => go(entry.to)}
+                    type="button"
+                >
+                    <span className={styles.menuIcon}>
+                        <SidebarIcon active={false} route={entry.icon ?? entry.to} size="1.25rem" />
+                    </span>
+                    {entry.label}
+                </button>
+            ))}
+        </>
+    );
 
     return (
         <Drawer
@@ -60,22 +92,8 @@ export const MobileMenu = ({ onClose, opened }: MobileMenuProps) => {
                 <span className={styles.menuBrand}>samo</span>
                 {host?.name && <span className={styles.menuUser}>{host.name}</span>}
             </div>
-            <div className={styles.menuSection}>
-                {t('page.sidebar.myLibrary', { postProcess: 'titleCase' })}
-            </div>
-            {library.map((item) => (
-                <button
-                    className={styles.menuItem}
-                    key={item.route}
-                    onClick={() => go(item.route)}
-                    type="button"
-                >
-                    <span className={styles.menuIcon}>
-                        <SidebarIcon active={false} route={item.route} size="1.25rem" />
-                    </span>
-                    {item.label}
-                </button>
-            ))}
+            {section('Listen', listen)}
+            {section(t('entity.music', { defaultValue: 'Music', postProcess: 'titleCase' }), music)}
             <div className={styles.menuDivider} />
             <button
                 className={styles.menuItem}

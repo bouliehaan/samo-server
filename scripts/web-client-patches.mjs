@@ -239,6 +239,22 @@ async function patchPhone(stage, replace) {
     '        [LibraryItem.PLAYLIST]: {\n            display: ListDisplayType.TABLE,\n',
     "        [LibraryItem.PLAYLIST]: {\n            display: typeof window !== 'undefined' && window.matchMedia?.('(max-width: 768px)').matches ? ListDisplayType.GRID : ListDisplayType.TABLE,\n");
 
+  // A link can open the radio page on one of its filters (?filter=internet,
+  // the phone menu's Internet Radio). The page stays mounted between visits,
+  // so a later link sets the filter as well as the first one.
+  const radio = 'src/renderer/features/radio/routes/radio-list-route.tsx';
+  await replace(radio, "import { useMemo, useState } from 'react';\n",
+    "import { useEffect, useMemo, useState } from 'react';\nimport { useLocation, useSearchParams } from 'react-router';\n");
+  await replace(radio, "    const [filter, setFilter] = useState<RadioFilter>('all');\n",
+    "    const [searchParams] = useSearchParams();\n" +
+    "    const { key: visit } = useLocation();\n" +
+    "    const requested = searchParams.get('filter');\n" +
+    "    const linked = (['all', 'channels', 'favorites', 'internet'] as const).find((id) => id === requested);\n" +
+    "    const [filter, setFilter] = useState<RadioFilter>(linked ?? 'all');\n" +
+    "    useEffect(() => {\n" +
+    "        if (linked) setFilter(linked);\n" +
+    "    }, [linked, visit]);\n");
+
   // "Search music, audiobooks, po" is what fitted of the placeholder.
   await replace('src/renderer/features/search/components/global-search-bar.tsx',
     "                        placeholder={t('page.sidebar.searchPlaceholder', {",

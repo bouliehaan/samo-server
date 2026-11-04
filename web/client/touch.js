@@ -7,10 +7,38 @@ export function isAppleTouch(nav) {
     (/Macintosh/.test(nav.userAgent || '') && (nav.maxTouchPoints || 0) > 1);
 }
 
-// Long press opens the context menu. Android's Chrome already fires
-// contextmenu for a held finger; Safari on iOS never does, which left the
-// renderer's menus (add to queue, play next, go to album) out of reach of
-// anything but the occasional ⋯ button. This fires one where the finger is
+// No drag and drop on a touch screen. Every song row and every cover is a
+// drag source on the desktop (drop it on a playlist, reorder the queue), so
+// each carries draggable="true". On a phone (iOS 15 and later, and Chrome on
+// Android) a finger that rests a moment before a swipe then picks the cover
+// up instead of scrolling, and the browser's drag auto-scroll creeps the list
+// towards whichever edge the finger nears: a scroll that judders back and
+// forth and barely moves. Elements are disarmed as the renderer arms them.
+export function installNoTouchDrag(win) {
+  const doc = win.document;
+  const disarm = element => {
+    if (element.getAttribute?.('draggable') === 'true') element.setAttribute('draggable', 'false');
+  };
+  const sweep = node => {
+    if (node.nodeType !== 1) return;
+    disarm(node);
+    node.querySelectorAll('[draggable="true"]').forEach(disarm);
+  };
+  new win.MutationObserver(records => {
+    for (const record of records) {
+      if (record.type === 'attributes') disarm(record.target);
+      else record.addedNodes.forEach(sweep);
+    }
+  }).observe(doc.documentElement, { attributeFilter: ['draggable'], attributes: true, childList: true, subtree: true });
+  sweep(doc.documentElement);
+  // Anything that still starts a drag (an image, a link) does not.
+  doc.addEventListener('dragstart', event => event.preventDefault(), { capture: true });
+}
+
+// Long press opens the context menu. Safari on iOS never fires contextmenu
+// for a held finger, which left the renderer's menus (add to queue, play next,
+// go to album) out of reach of anything but the ⋯ button. Chrome on Android
+// does fire one; there this is a later fallback that its own cancels. This fires one where the finger is
 // held, and eats the click that would otherwise follow when it lifts, so the
 // row under it does not also start playing.
 export function installLongPress(win, { delay = 500, slop = 10 } = {}) {

@@ -1,14 +1,20 @@
 import './server-host.css';
 import { installRandomUUID } from './server-compat.js';
 import { installMediaAuth } from './server-media-auth.js';
-import { installLongPress, isAppleTouch } from './server-touch.js';
+import { installLongPress, installNoTouchDrag, isAppleTouch } from './server-touch.js';
 installRandomUUID(window.crypto);
+const touchScreen = Boolean(window.matchMedia?.('(hover: none) and (pointer: coarse)').matches);
+if (touchScreen) installNoTouchDrag(window);
 if (isAppleTouch(navigator)) {
   // WebKit starts an AudioContext suspended unless it is resumed inside the tap
   // itself, and suspends it again when the screen locks: audio routed through
   // one plays silently, or stops in a pocket. Plain <audio> keeps playing.
   window.SAMO_NO_WEB_AUDIO = true;
   installLongPress(window);
+} else if (touchScreen) {
+  // Chrome on Android opens its own after ~500ms, which cancels this one; it is
+  // here for the browsers that do not (some in-app and vendor browsers).
+  installLongPress(window, { delay: 650 });
 }
 
 // Authenticate before importing the renderer (its stores hydrate at import time).

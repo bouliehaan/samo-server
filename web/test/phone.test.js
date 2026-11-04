@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { backTarget, isRootPath, tabForPath, TAB_ROUTES } from '../client/mobile/routes.js';
-import { installLongPress, isAppleTouch } from '../client/touch.js';
+import { installLongPress, installNoTouchDrag, isAppleTouch } from '../client/touch.js';
 import { installMediaAuth } from '../client/media-auth.js';
 
 test('every page lights the tab it belongs to', () => {
@@ -177,4 +177,38 @@ test('lock-screen artwork is drawn from a credentialed blob, and refreshed when 
   // Artwork from anywhere else is the OS's to fetch.
   win.navigator.mediaSession.metadata = new MediaMetadata({ title: 'KEXP', artwork: [{ src: 'https://cdn.example/kexp.png' }] });
   assert.equal(shown.at(-1).artwork[0].src, 'https://cdn.example/kexp.png');
+});
+
+test('on a touch screen nothing can be picked up and dragged instead of scrolled', () => {
+  class Element {
+    constructor(attrs = {}, children = []) { this.nodeType = 1; this.attrs = { ...attrs }; this.children = children; }
+    getAttribute(name) { return this.attrs[name] ?? null; }
+    setAttribute(name, value) { this.attrs[name] = String(value); observer?.record({ type: 'attributes', target: this }); }
+    querySelectorAll() { const all = []; const walk = e => e.children.forEach(c => { if (c.getAttribute('draggable') === 'true') all.push(c); walk(c); }); walk(this); return all; }
+  }
+  let observer = null;
+  class MutationObserver {
+    constructor(callback) { this.callback = callback; observer = this; }
+    observe() {}
+    record(r) { this.callback([r]); }
+  }
+  const already = new Element({ draggable: 'true' });
+  const root = new Element({}, [new Element({}, [already])]);
+  const listeners = {};
+  const win = { MutationObserver, document: { documentElement: root, addEventListener: (t, fn) => { listeners[t] = fn; } } };
+  installNoTouchDrag(win);
+  assert.equal(already.getAttribute('draggable'), 'false', 'what was on the page at start');
+
+  // The renderer arms a row after it mounts...
+  const row = new Element();
+  row.setAttribute('draggable', 'true');
+  assert.equal(row.getAttribute('draggable'), 'false');
+  // ...or a whole page of them arrives at once.
+  const card = new Element({ draggable: 'true' });
+  observer.record({ type: 'childList', addedNodes: [new Element({}, [card])] });
+  assert.equal(card.getAttribute('draggable'), 'false');
+
+  const drag = { prevented: false, preventDefault() { this.prevented = true; } };
+  listeners.dragstart(drag);
+  assert.ok(drag.prevented, 'an image or link that starts a drag anyway is stopped');
 });

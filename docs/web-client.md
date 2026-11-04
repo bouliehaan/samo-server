@@ -56,13 +56,17 @@ when switching accounts. API authorization remains enforced by the server.
 Below 768px wide (or a phone on its side), `/listen/` is laid out like the
 Android app rather than the desktop: a top bar with back, the unified search
 and a menu; the page; a mini player; and the Android app's five tabs — Home,
-Podcasts, Audiobooks, Playlists, Radio. Everything else (albums, artists,
-tracks, genres, favorites, settings, server admin, sign out) is in the menu.
+Podcasts, Audiobooks, Playlists, Radio. The menu has the rest: Playlists,
+Audiobooks, Podcasts and Internet Radio; Albums, Artists, Favorites and All
+Music (which leads on to songs and genres); then settings, server admin and
+sign out.
 
 - **Tap plays.** A tap on a song plays it and a tap on an album opens it; the
   desktop's single click only selected. Each row has a ⋯ for the rest, and a
   long press opens the same menu — on iPhones too, where Safari never sends a
-  right click. Menus open as sheets along the bottom of the screen.
+  right click. Menus open as sheets along the bottom of the screen. Drag and
+  drop is off on touch screens, where a resting finger would pick a cover up
+  instead of scrolling.
 - **Lock screen.** Title, artist and cover show on the lock screen and in
   Control Center, with play/pause, next/previous and seeking. On iOS samo
   plays through a plain `<audio>` element rather than Web Audio, which WebKit
