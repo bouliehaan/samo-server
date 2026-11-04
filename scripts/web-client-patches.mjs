@@ -26,6 +26,35 @@ export async function patchWebClient(stage) {
   await replace('src/renderer/features/titlebar/components/app-menu.tsx',
     "        {\n            condition: isElectron(),\n            id: 'quit',",
     "        ...((window as any).SAMO_HOST_MENU ?? []).map((entry: any) => ({ ...entry, type: 'item' as const })),\n        {\n            condition: isElectron(),\n            id: 'quit',");
+  // The browser already has back and forward; the shell's own pair is for Electron.
+  const mainContent = 'src/renderer/layouts/default-layout/main-content.tsx';
+  await replace(mainContent, "import { useNavigate } from 'react-router';\n", '');
+  await replace(mainContent, `    const navigate = useNavigate();
+
+    return (
+        <>
+            <div className={styles['chrome-navigation-controls']}>
+                <button
+                    aria-label="Back"
+                    className={styles['chrome-shell-button']}
+                    onClick={() => navigate(-1)}
+                    type="button"
+                >
+                    <Icon icon="arrowLeftS" size="lg" />
+                </button>
+                <button
+                    aria-label="Forward"
+                    className={styles['chrome-shell-button']}
+                    onClick={() => navigate(1)}
+                    type="button"
+                >
+                    <Icon icon="arrowRightS" size="lg" />
+                </button>
+            </div>
+
+`, `    return (
+        <>
+`);
   // This is a single-server player over the complete library, with no folder setup.
   await writeFile(join(stage, 'src/renderer/features/sidebar/components/server-selector.tsx'),
     'export const ServerSelector = () => null;\n');
