@@ -1,1 +1,0 @@
-import{dI as t,ai as i,dh as o}from"./main-CyOx-Qh0.js";const n={list:e=>t({gcTime:1e3*60*60,queryFn:({signal:r})=>o.controller.getInternetRadioStations({apiClientProps:{serverId:e.serverId,signal:r}}),queryKey:i.radio.list(e.serverId||""),...e.options})};export{n as r};
