@@ -13,6 +13,13 @@
     -webkit-tap-highlight-color: transparent;
 }
 
+/* Whatever shows behind the app, anywhere, is the app's own colour rather
+ * than the page's plain black. */
+:root[data-samo-mobile],
+:root[data-samo-mobile] body {
+    background: var(--theme-colors-background);
+}
+
 :root[data-samo-mobile] body {
     /* The page is the app: no rubber-banding the whole shell, no
      * double-tap-to-zoom delay, and a held finger opens samo's menu rather

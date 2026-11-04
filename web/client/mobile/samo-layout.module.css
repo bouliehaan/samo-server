@@ -1,11 +1,17 @@
-/* Top bar, page, mini player, tabs. The page is the only row that grows. */
+/* Top bar, page, mini player, tabs. The page is the only row that grows.
+ *
+ * Pinned to the edges of the screen rather than sized in viewport units. On an
+ * iPhone, as a home-screen web app with a translucent status bar, 100vh and
+ * 100dvh came out shorter than the screen, and the black page behind showed
+ * under the tabs as an empty chin, as if Safari's toolbar were still there.
+ * The edges of the layout viewport are the edges of the screen in every mode,
+ * so the layout fills it whatever height the units report. */
 .layout {
+    position: fixed;
+    inset: 0;
     display: grid;
     grid-template-rows: auto minmax(0, 1fr) auto auto;
     grid-template-columns: minmax(0, 1fr);
-    width: 100vw;
-    height: 100vh;
-    height: 100dvh;
     overflow: hidden;
     background: var(--theme-colors-background);
 }
@@ -23,9 +29,8 @@
 }
 
 .shell {
-    position: relative;
-    width: 100vw;
-    height: 100dvh;
+    position: fixed;
+    inset: 0;
     overflow: auto;
 }
 
