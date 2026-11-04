@@ -1,0 +1,233 @@
+/* Phone-only adjustments to the desktop renderer's own components.
+ *
+ * Everything here is scoped to :root[data-samo-mobile], which the phone layout
+ * sets while it is mounted, so a desktop-width window never sees it. The
+ * renderer's CSS-module classes are built as fs-<file>-<class> (see
+ * scripts/build-web-client.mjs), which is what these selectors name; the
+ * attribute selector also lifts each rule above the single-class rule it
+ * overrides, whichever stylesheet loads last. */
+
+/* ---- touch basics -------------------------------------------------------- */
+
+:root[data-samo-mobile] {
+    -webkit-tap-highlight-color: transparent;
+}
+
+:root[data-samo-mobile] body {
+    /* The page is the app: no rubber-banding the whole shell, no
+     * double-tap-to-zoom delay, and a held finger opens samo's menu rather
+     * than iOS's copy/save-image callout or a text selection. */
+    overscroll-behavior: none;
+    touch-action: manipulation;
+    -webkit-touch-callout: none;
+    -webkit-user-select: none;
+    user-select: none;
+}
+
+:root[data-samo-mobile] :is(input, textarea, [contenteditable='true']) {
+    -webkit-user-select: text;
+    user-select: text;
+}
+
+/* iOS zooms the page into any focused field set under 16px, and does not zoom
+ * back out. */
+:root[data-samo-mobile] :is(input, textarea, select) {
+    font-size: max(16px, 1em);
+}
+
+/* ---- search in the top bar ---------------------------------------------- */
+
+:root[data-samo-mobile] .fs-global-search-bar-module-top-bar {
+    z-index: auto;
+    height: auto;
+    padding: 0;
+}
+
+/* Home is a tab of its own here. */
+:root[data-samo-mobile] .fs-global-search-bar-module-home-button {
+    display: none;
+}
+
+:root[data-samo-mobile] .fs-global-search-bar-module-chrome-group {
+    width: 100%;
+}
+
+:root[data-samo-mobile] .fs-global-search-bar-module-input-wrapper {
+    max-width: none;
+}
+
+:root[data-samo-mobile] .fs-global-search-bar-module-input {
+    height: 42px;
+}
+
+/* Results take the screen below the bar, like a phone's search page, rather
+ * than a desktop dropdown hanging off the field. */
+:root[data-samo-mobile] .fs-global-search-bar-module-dropdown {
+    position: fixed;
+    top: calc(56px + env(safe-area-inset-top));
+    right: 0;
+    bottom: 0;
+    left: 0;
+    z-index: 250;
+    width: auto;
+    max-height: none;
+    padding-bottom: env(safe-area-inset-bottom);
+    background: var(--theme-colors-background);
+    border: 0;
+    border-radius: 0;
+    box-shadow: none;
+    overscroll-behavior: contain;
+}
+
+:root[data-samo-mobile] .fs-global-search-bar-module-row {
+    min-height: 56px;
+}
+
+@media (max-height: 500px) {
+    :root[data-samo-mobile] .fs-global-search-bar-module-dropdown {
+        top: calc(48px + env(safe-area-inset-top));
+    }
+}
+
+/* ---- full-screen player ------------------------------------------------- */
+
+/* The cover is square at whatever size fits: it was 100% wide with a height
+ * cap, so on a phone shorter than ~800px it came out as a letterboxed strip. */
+:root[data-samo-mobile] .fs-mobile-fullscreen-player-module-image-container {
+    flex: 1 1 0;
+    min-height: 0;
+    padding: 0.5rem 1.5rem;
+    container-type: size;
+}
+
+:root[data-samo-mobile] .fs-mobile-fullscreen-player-module-image {
+    width: min(100cqw, 100cqh, 440px);
+    height: auto;
+    max-height: none;
+    aspect-ratio: 1;
+}
+
+:root[data-samo-mobile] .fs-mobile-fullscreen-player-module-image-native-aspect-ratio {
+    aspect-ratio: auto;
+}
+
+:root[data-samo-mobile] .fs-mobile-fullscreen-player-module-container {
+    padding-top: env(safe-area-inset-top);
+    padding-bottom: env(safe-area-inset-bottom);
+}
+
+/* ---- grids --------------------------------------------------------------- */
+
+/* Two stations to a row rather than one the width of the screen. */
+:root[data-samo-mobile] .fs-radio-list-items-module-radio-list {
+    grid-template-columns: repeat(auto-fill, minmax(min(100%, 9.5rem), 1fr));
+    gap: 1.25rem 0.875rem;
+}
+
+/* ---- tooltips ------------------------------------------------------------ */
+
+/* A tap is a hover on a touch screen, and the tooltip it opened stayed up
+ * over the page until something else was tapped. The components are told not
+ * to open them (scripts/web-client-patches.mjs); this catches any that open
+ * by another route. */
+@media (hover: none) {
+    :root[data-samo-mobile] .mantine-Tooltip-tooltip {
+        display: none;
+    }
+}
+
+/* ---- page margins -------------------------------------------------------- */
+
+/* 2rem a side is a desktop margin; on a 390px screen it is a sixth of it. */
+:root[data-samo-mobile] .fs-long-form-library-page-module-content {
+    padding-right: 1rem;
+    padding-left: 1rem;
+}
+
+:root[data-samo-mobile] :is(.fs-album-detail-content-module-detail-container, .fs-album-artist-detail-content-module-detail-container) {
+    padding-right: 0.75rem;
+    padding-left: 0.75rem;
+}
+
+/* ---- full-screen player: type and backdrop ------------------------------ */
+
+/* A desktop-sized title took three lines and pushed the controls off a
+ * smaller phone. */
+:root[data-samo-mobile] .fs-mobile-fullscreen-player-module-title-row :is(h1, h2, h3) {
+    display: -webkit-box;
+    overflow: hidden;
+    font-size: clamp(1.25rem, 6vw, 1.625rem);
+    line-height: 1.2;
+    -webkit-box-orient: vertical;
+    -webkit-line-clamp: 2;
+}
+
+/* The backdrop is the cover's own dominant colour, which can be anything up
+ * to full-strength yellow under white text. The player has a gradient for
+ * that already, but at z-index -1 inside a container that is not a stacking
+ * context it painted behind the colour it was meant to shade; isolating the
+ * container brings it to the front. A lighter shade of our own on top keeps
+ * the title legible over the brightest covers, as on the Android player. */
+:root[data-samo-mobile] .fs-mobile-fullscreen-player-module-container {
+    isolation: isolate;
+}
+
+:root[data-samo-mobile] .fs-mobile-fullscreen-player-module-container::before {
+    position: absolute;
+    inset: 0;
+    z-index: 0;
+    pointer-events: none;
+    content: '';
+    background: linear-gradient(180deg, rgb(0 0 0 / 20%) 0%, rgb(0 0 0 / 35%) 50%, rgb(0 0 0 / 50%) 100%);
+}
+
+/* ---- lists --------------------------------------------------------------- */
+
+/* The row's ⋯ is a finger's width, not a cursor's. */
+:root[data-samo-mobile] .fs-item-table-list-column-module-container .fs-action-icon-module-root {
+    min-width: 40px;
+    min-height: 40px;
+}
+
+/* ---- context menus ------------------------------------------------------- */
+
+/* A desktop menu opens where the pointer is and its submenus fly out beside
+ * it, which on a 390px screen is off the edge. On a phone they are sheets
+ * along the bottom, under the thumb, the way the Android app's are: the
+ * submenu (Radix marks it with aria-labelledby) rises over its menu. */
+:root[data-samo-mobile] [data-radix-popper-content-wrapper]:has(> [data-radix-menu-content]) {
+    top: auto !important;
+    right: max(0.5rem, env(safe-area-inset-right)) !important;
+    bottom: calc(0.5rem + env(safe-area-inset-bottom)) !important;
+    left: max(0.5rem, env(safe-area-inset-left)) !important;
+    min-width: 0 !important;
+    transform: none !important;
+}
+
+/* Dim the page behind the first sheet; a tap on it closes the menu. */
+:root[data-samo-mobile] [data-radix-popper-content-wrapper]:has(> [data-radix-menu-content]:not([aria-labelledby]))::before {
+    position: fixed;
+    inset: 0;
+    z-index: -1;
+    content: '';
+    background: rgb(0 0 0 / 45%);
+}
+
+:root[data-samo-mobile] .fs-context-menu-module-content {
+    width: 100%;
+    min-width: 0;
+    max-width: none;
+    border-radius: 14px;
+}
+
+:root[data-samo-mobile] [aria-labelledby].fs-context-menu-module-content {
+    box-shadow: 0 -16px 40px rgb(0 0 0 / 60%);
+}
+
+:root[data-samo-mobile] .fs-context-menu-module-max-height {
+    max-height: min(36rem, 70dvh);
+}
+
+:root[data-samo-mobile] .fs-context-menu-module-item {
+    min-height: 44px;
+}

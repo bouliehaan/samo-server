@@ -33,6 +33,11 @@ func (s *Server) webClientHandler() http.Handler {
 		policy = strings.Replace(policy, "img-src 'self' data:", "img-src 'self' blob: data:", 1)
 		w.Header().Set("Content-Security-Policy", policy+"; worker-src 'self' blob:")
 		w.Header().Set("Cache-Control", "no-cache")
+		// Go's MIME table has no entry for the home-screen manifest, and the
+		// security headers forbid sniffing one.
+		if strings.HasSuffix(r.URL.Path, ".webmanifest") {
+			w.Header().Set("Content-Type", "application/manifest+json")
+		}
 		files.ServeHTTP(w, r)
 	})
 }

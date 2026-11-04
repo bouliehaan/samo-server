@@ -17,7 +17,8 @@
       main.login-main { grid-template-columns: 1fr; gap: 40px; padding: 32px 24px; }
     }
     .login-hero { display: grid; gap: 16px; }
-    .login-shell {
+    .login-shell,
+    .login-shell form {
       display: grid;
       gap: 6px;
     }

@@ -117,4 +117,37 @@ export function installMediaAuth(win, token, { limit = 400 } = {}) {
     if (String(name).toLowerCase() !== 'background-image') return setProperty.call(this, name, value, priority);
     showBackground(this, value, v => setProperty.call(this, name, v, priority));
   };
+
+  // Lock-screen and notification artwork: the OS fetches MediaMetadata
+  // artwork itself, with no way to add a header, so a cover URL drew as a blank
+  // square on the phone's lock screen. Hand it the blob instead, and set the
+  // metadata again when the blob arrives if the track has not changed since.
+  const session = win.navigator?.mediaSession;
+  const Metadata = win.MediaMetadata;
+  if (!session || typeof Metadata !== 'function') return;
+  let proto2 = session;
+  let metadata;
+  while (proto2 && !(metadata = Object.getOwnPropertyDescriptor(proto2, 'metadata'))) proto2 = Object.getPrototypeOf(proto2);
+  if (!metadata?.set) return;
+  let latest = null;
+  function withArtwork(meta, art) {
+    return new Metadata({ title: meta.title, artist: meta.artist, album: meta.album, artwork: art });
+  }
+  Object.defineProperty(proto2, 'metadata', { ...metadata, set(value) {
+    latest = value;
+    const art = Array.from(value?.artwork ?? []);
+    const urls = art.map(entry => mediaUrl(entry.src));
+    if (!urls.some(Boolean)) return metadata.set.call(this, value);
+    const swap = () => art.map((entry, i) => {
+      const blob = urls[i] && cached(urls[i]);
+      // An unknown type makes some platforms skip the image entirely.
+      return urls[i] ? (blob ? { src: blob, sizes: entry.sizes } : null) : entry;
+    }).filter(Boolean);
+    metadata.set.call(this, withArtwork(value, swap()));
+    const pending = urls.filter(url => url && !blobs.has(url));
+    if (!pending.length) return;
+    Promise.allSettled(pending.map(load)).then(() => {
+      if (latest === value) metadata.set.call(this, withArtwork(value, swap()));
+    });
+  } });
 }

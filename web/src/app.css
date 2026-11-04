@@ -1721,6 +1721,33 @@ main.app-main {
   .app-cmd { flex-wrap: wrap; gap: 12px; }
   .bar-util { width: 100%; }
   .bar-util-btn { flex: 1; }
+  /* On a phone the wrapped strip was the whole first screen, and every page
+   * began below the fold. One row instead: the wordmark and sign-out on top,
+   * the tabs in a strip that scrolls sideways under them. */
+  .app-rail {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto;
+    grid-template-areas: "brand foot" "nav nav";
+    align-items: center;
+    gap: 10px 12px;
+    padding: 14px 16px 10px;
+  }
+  .rail-brand { grid-area: brand; }
+  .rail-status { display: none; }
+  .rail-foot { grid-area: foot; margin: 0; }
+  .rail-account-meta { display: none; }
+  .app-nav {
+    grid-area: nav;
+    flex-wrap: nowrap;
+    margin: 0 -16px;
+    padding: 0 16px 4px;
+    overflow-x: auto;
+    scrollbar-width: none;
+    -webkit-overflow-scrolling: touch;
+  }
+  .app-nav::-webkit-scrollbar { display: none; }
+  .app-nav .rail-group { display: none; }
+  .app-nav .tab { flex: 0 0 auto; }
 }
 
 /* ---------- samo-radio: the server's own audio output ---------- */

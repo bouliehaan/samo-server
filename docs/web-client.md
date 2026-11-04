@@ -50,3 +50,32 @@ GPL license ships alongside the generated assets.
 The bootstrap verifies the server login before loading any renderer stores,
 binds the client to the current origin and user, and clears playback/query caches
 when switching accounts. API authorization remains enforced by the server.
+
+## On a phone
+
+Below 768px wide (or a phone on its side), `/listen/` is laid out like the
+Android app rather than the desktop: a top bar with back, the unified search
+and a menu; the page; a mini player; and the Android app's five tabs — Home,
+Podcasts, Audiobooks, Playlists, Radio. Everything else (albums, artists,
+tracks, genres, favorites, settings, server admin, sign out) is in the menu.
+
+- **Tap plays.** A tap on a song plays it and a tap on an album opens it; the
+  desktop's single click only selected. Each row has a ⋯ for the rest, and a
+  long press opens the same menu — on iPhones too, where Safari never sends a
+  right click. Menus open as sheets along the bottom of the screen.
+- **Lock screen.** Title, artist and cover show on the lock screen and in
+  Control Center, with play/pause, next/previous and seeking. On iOS samo
+  plays through a plain `<audio>` element rather than Web Audio, which WebKit
+  silences when the screen locks (ReplayGain is not applied there as a result).
+- **Add to Home Screen.** On an iPhone, Safari's Share → Add to Home Screen
+  gives samo its own icon and a full-screen window with no browser bars, over
+  plain HTTP as well. A home-screen app keeps its own storage there, so it asks
+  you to sign in once more the first time it opens. Chrome on Android installs
+  it as an app only from an HTTPS address; from a plain `http://` LAN address
+  its Add to Home screen makes a shortcut that opens in a browser tab.
+
+The layout is in `web/client/mobile`, copied into the renderer as
+`src/renderer/server-mobile`; `scripts/web-client-patches.mjs` holds the hooks
+into the renderer for it and the touch fixes that belong in the renderer's own
+components. As with the other patches, a build fails rather than ship one
+that no longer applies to the renderer source.

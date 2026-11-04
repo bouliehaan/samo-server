@@ -22,17 +22,19 @@
       <div class="card-head"><span class="caret">&gt;</span> SIGN IN</div>
       <h1>Welcome back.</h1>
       <p class="lede">Use your samo username and password.</p>
-      <label class="field">
-        <span class="field-label">USERNAME</span>
-        <input type="text" id="username" autocomplete="username" autofocus>
-      </label>
-      <label class="field">
-        <span class="field-label">PASSWORD</span>
-        <input type="password" id="password" autocomplete="current-password">
-      </label>
-      <div class="actions">
-        <button class="btn primary" id="submit">SIGN IN &rarr;</button>
-      </div>
+      <form id="signInForm" novalidate>
+        <label class="field">
+          <span class="field-label">USERNAME</span>
+          <input type="text" id="username" name="username" autocomplete="username" autocapitalize="none" autocorrect="off" spellcheck="false" enterkeyhint="next" autofocus>
+        </label>
+        <label class="field">
+          <span class="field-label">PASSWORD</span>
+          <input type="password" id="password" name="password" autocomplete="current-password" enterkeyhint="go">
+        </label>
+        <div class="actions">
+          <button class="btn primary" id="submit" type="submit">SIGN IN &rarr;</button>
+        </div>
+      </form>
       <div class="sso-block" id="ssoBlock" hidden>
         <div class="sso-divider"><span>or</span></div>
         <a class="btn ghost sso-button" id="ssoButton" href="/auth/oidc/start">SIGN IN WITH SSO &rarr;</a>

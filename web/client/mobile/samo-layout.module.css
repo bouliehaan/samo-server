@@ -1,0 +1,37 @@
+/* Top bar, page, mini player, tabs. The page is the only row that grows. */
+.layout {
+    display: grid;
+    grid-template-rows: auto minmax(0, 1fr) auto auto;
+    grid-template-columns: minmax(0, 1fr);
+    width: 100vw;
+    height: 100vh;
+    height: 100dvh;
+    overflow: hidden;
+    background: var(--theme-colors-background);
+}
+
+.main {
+    position: relative;
+    min-height: 0;
+    overflow: hidden auto;
+    overscroll-behavior: contain;
+    -webkit-overflow-scrolling: touch;
+
+    /* Pages raise their own sticky headers; keep all of that below the top
+     * bar, whose search results open over the page. */
+    isolation: isolate;
+}
+
+.shell {
+    position: relative;
+    width: 100vw;
+    height: 100dvh;
+    overflow: auto;
+}
+
+.overlay {
+    position: fixed;
+    inset: 0;
+    z-index: 200;
+    overflow: hidden;
+}

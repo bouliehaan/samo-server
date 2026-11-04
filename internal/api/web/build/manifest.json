@@ -1,33 +1,33 @@
 {
-  "_login-CjvJmBS5.css": {
-    "file": "login-CjvJmBS5.css",
-    "src": "_login-CjvJmBS5.css"
+  "_login-eOtBQtpn.css": {
+    "file": "login-eOtBQtpn.css",
+    "src": "_login-eOtBQtpn.css"
   },
   "src/app.js": {
-    "file": "app-CA0BMQEt.js",
+    "file": "app-D2nWqwcA.js",
     "name": "app",
     "src": "src/app.js",
     "isEntry": true,
     "css": [
-      "app-BvUg2NXr.css"
+      "app-D2r-mzdO.css"
     ]
   },
   "src/login.js": {
-    "file": "login-Myl3bqiV.js",
+    "file": "login-BNAUcCv1.js",
     "name": "login",
     "src": "src/login.js",
     "isEntry": true,
     "css": [
-      "login-CjvJmBS5.css"
+      "login-eOtBQtpn.css"
     ]
   },
   "src/pair.js": {
-    "file": "pair-9DdhZDat.js",
+    "file": "pair-zG_sj7KS.js",
     "name": "pair",
     "src": "src/pair.js",
     "isEntry": true,
     "css": [
-      "login-CjvJmBS5.css"
+      "login-eOtBQtpn.css"
     ]
   },
   "src/setup.js": {

@@ -19,12 +19,27 @@ try {
   await symlink(join(source, 'node_modules'), join(stage, 'node_modules'), 'dir');
   await copyFile(join(root, 'web/client/bootstrap.js'), join(stage, 'src/renderer/server-bootstrap.js'));
   await copyFile(join(root, 'web/client/host.css'), join(stage, 'src/renderer/server-host.css'));
-  for (const name of ['compat', 'media-auth', 'search-ranking']) await copyFile(join(root, `web/client/${name}.js`), join(stage, `src/renderer/server-${name}.js`));
+  for (const name of ['compat', 'media-auth', 'search-ranking', 'touch']) await copyFile(join(root, `web/client/${name}.js`), join(stage, `src/renderer/server-${name}.js`));
+  // The phone layout and its helpers (see web-client-patches.mjs for the hooks).
+  await cp(join(root, 'web/client/mobile'), join(stage, 'src/renderer/server-mobile'), { recursive: true });
   await patchWebClient(stage);
   let html = await readFile(join(stage, 'src/renderer/index.html'), 'utf8');
   html = html.replace(/<meta\s+http-equiv="Content-Security-Policy"[\s\S]*?\/>/, '')
     .replace(/<% if \(web\) \{ %>[\s\S]*?<% } %>/, '')
     .replace('src="main.tsx"', 'src="server-bootstrap.js"');
+  // Add to Home Screen: a standalone window with samo's icon and no browser
+  // bars, on iOS through the apple- tags and elsewhere through the manifest.
+  const homeScreen = [
+    '<meta name="theme-color" content="#000000" />',
+    '<meta name="apple-mobile-web-app-capable" content="yes" />',
+    '<meta name="mobile-web-app-capable" content="yes" />',
+    '<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />',
+    '<meta name="apple-mobile-web-app-title" content="samo" />',
+    '<link rel="apple-touch-icon" href="/listen/icons/apple-touch-icon.png" />',
+    '<link rel="manifest" href="/listen/manifest.webmanifest" />',
+  ].join('\n        ');
+  if (!html.includes('</head>')) throw new Error('index.html has no </head> for the home-screen tags');
+  html = html.replace('</head>', `    ${homeScreen}\n    </head>`);
   await writeFile(join(stage, 'src/renderer/index.html'), html);
   const config = `import { defineConfig } from 'vite';
 import path from 'node:path';
@@ -48,6 +63,8 @@ export default defineConfig({
   await rm(output, { recursive: true, force: true });
   await mkdir(output, { recursive: true });
   await cp(join(stage, 'output'), output, { recursive: true });
+  await copyFile(join(root, 'web/client/manifest.webmanifest'), join(output, 'manifest.webmanifest'));
+  await cp(join(root, 'web/client/icons'), join(output, 'icons'), { recursive: true });
   await copyFile(join(source, 'LICENSE'), join(output, 'LICENSE'));
   const revision = execFileSync('git', ['rev-parse', 'HEAD'], { cwd: source, encoding: 'utf8' }).trim();
   const dirty = Boolean(execFileSync('git', ['-c', 'core.fsmonitor=false', 'status', '--porcelain', '--untracked-files=no'], { cwd: source, encoding: 'utf8' }).trim());

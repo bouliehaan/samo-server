@@ -105,8 +105,12 @@ import { loginDestination } from "./ui/destination.js";
 
     if (query.has("sso_error") || fragment.has("sso_error")) setError(query.get("sso_error") || fragment.get("sso_error"));
 
-    document.getElementById("submit").addEventListener("click", submit);
-    document.getElementById("password").addEventListener("keydown", (e) => { if (e.key === "Enter") submit(); });
-    document.getElementById("username").addEventListener("keydown", (e) => { if (e.key === "Enter") submit(); });
+    // A real form, so a phone keyboard's Go key submits it and the platform's
+    // password manager recognises a sign-in it can offer to save. Enter in
+    // either field submits it too.
+    document.getElementById("signInForm").addEventListener("submit", (e) => {
+      e.preventDefault();
+      submit();
+    });
   })();
   

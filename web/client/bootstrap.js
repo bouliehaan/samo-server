@@ -1,7 +1,15 @@
 import './server-host.css';
 import { installRandomUUID } from './server-compat.js';
 import { installMediaAuth } from './server-media-auth.js';
+import { installLongPress, isAppleTouch } from './server-touch.js';
 installRandomUUID(window.crypto);
+if (isAppleTouch(navigator)) {
+  // WebKit starts an AudioContext suspended unless it is resumed inside the tap
+  // itself, and suspends it again when the screen locks: audio routed through
+  // one plays silently, or stops in a pocket. Plain <audio> keeps playing.
+  window.SAMO_NO_WEB_AUDIO = true;
+  installLongPress(window);
+}
 
 // Authenticate before importing the renderer (its stores hydrate at import time).
 // A per-user record ID keeps the desktop client's caches separated by account.
@@ -31,6 +39,8 @@ async function boot() {
   window.SERVER_NAME = 'Samo';
   window.SERVER_TYPE = 'samo';
   window.SERVER_LOCK = true;
+  // The phone layout's menu names who is signed in.
+  window.SAMO_HOST_USER = { name: user.displayName || user.username, isAdmin: user.role === 'admin' };
   // Items for the S menu (web-client-patches.mjs puts them in AppMenu): the
   // dashboard for admins, and signing out.
   let signingOut = false;
