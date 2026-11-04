@@ -5,6 +5,7 @@ import { Outlet } from 'react-router';
 import styles from './samo-layout.module.css';
 import './mobile-overrides.css';
 
+import { usePhoneFullVolume } from '/@/renderer/server-mobile/full-volume';
 import { MobileMenu } from '/@/renderer/server-mobile/mobile-menu';
 import { MobileMiniPlayer } from '/@/renderer/server-mobile/mobile-mini-player';
 import { MobileTabBar } from '/@/renderer/server-mobile/mobile-tab-bar';
@@ -33,6 +34,7 @@ interface MobileLayoutProps {
 export const MobileLayout = ({ shell }: MobileLayoutProps) => {
     const [menuOpened, { close: closeMenu, open: openMenu }] = useDisclosure(false);
     const { expanded: isPlayerExpanded, visualizerExpanded } = useFullScreenPlayerOverlayState();
+    usePhoneFullVolume();
 
     // Global phone overrides of the renderer's own components hang off this,
     // so a desktop-width window is untouched by them.

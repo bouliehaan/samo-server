@@ -231,3 +231,21 @@
 :root[data-samo-mobile] .fs-context-menu-module-item {
     min-height: 44px;
 }
+
+/* ---- pages that open on a cover ----------------------------------------- */
+
+/* A playlist is a cover hero over its track list, laid out as a column of
+ * fixed height in which the list takes what the hero leaves. On a phone the
+ * hero alone is taller than the screen, so the list was left 0px tall and
+ * nothing on the page scrolled. Here the page scrolls instead, the hero goes
+ * up and away, and the list beneath it is one screen tall and scrolls on its
+ * own. Pages with a short header (Tracks, Albums...) keep their layout. */
+:root[data-samo-mobile] .fs-animated-page-module-animated-page:has(> :first-child .fs-library-header-module-library-header) {
+    overflow-y: auto;
+    overscroll-behavior: contain;
+}
+
+:root[data-samo-mobile] .fs-animated-page-module-animated-page:has(> :first-child .fs-library-header-module-library-header) > .fs-list-with-sidebar-container-module-container {
+    flex: none;
+    height: 100%;
+}
