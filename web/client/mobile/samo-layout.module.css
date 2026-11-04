@@ -23,6 +23,10 @@
     overscroll-behavior: contain;
     -webkit-overflow-scrolling: touch;
 
+    /* On its side an iPhone's notch is at one end of the page; keep the page
+     * clear of it (no inset when upright). */
+    padding: 0 env(safe-area-inset-right) 0 env(safe-area-inset-left);
+
     /* Pages raise their own sticky headers; keep all of that below the top
      * bar, whose search results open over the page. */
     isolation: isolate;

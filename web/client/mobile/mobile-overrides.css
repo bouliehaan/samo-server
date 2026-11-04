@@ -124,9 +124,29 @@
     aspect-ratio: auto;
 }
 
-:root[data-samo-mobile] .fs-mobile-fullscreen-player-module-container {
-    padding-top: env(safe-area-inset-top);
-    padding-bottom: env(safe-area-inset-bottom);
+/* The player, queue and lyrics panes are each pinned to the edges of the
+ * container, so the container's own padding never reached them: as a
+ * home-screen app the collapse button sat under the status bar's clock. Each
+ * pane clears the status bar, the notch on its side, and the home indicator
+ * (half its inset is enough, as for the tab bar). */
+:root[data-samo-mobile]
+    :is(
+        .fs-mobile-fullscreen-player-module-player-state,
+        .fs-mobile-fullscreen-player-module-queue-state,
+        .fs-mobile-fullscreen-player-module-lyrics-state
+    ) {
+    box-sizing: border-box;
+    padding: env(safe-area-inset-top) env(safe-area-inset-right)
+        calc(env(safe-area-inset-bottom) / 2) env(safe-area-inset-left);
+}
+
+/* On its side a phone is ~390pt tall and the player needs ~470: the shuffle,
+ * repeat and queue row fell off the bottom with no way to reach it. */
+@media (max-height: 500px) {
+    :root[data-samo-mobile] .fs-mobile-fullscreen-player-module-player-state {
+        overflow-y: auto;
+        overscroll-behavior: contain;
+    }
 }
 
 /* ---- grids --------------------------------------------------------------- */
